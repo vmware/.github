@@ -12,7 +12,7 @@ Throughout these collections you’ll discover scripts, libraries, APIs, templat
 
 Browse the [vmware-tanzu](https://github.com/vmware-tanzu/) or the [vmware-tanzu-labs](https://github.com/vmware-tanzu-labs/) org to discover cloud native and modern applications related open source - think of Kubernetes and all its surrounding ecosystem. Recommended projects to explore include [Sonobuoy](https://github.com/vmware-tanzu/sonobuoy), [Carvel](https://github.com/vmware-tanzu/carvel), [Pinniped](https://github.com/vmware-tanzu/pinniped), [Tanzu Community Edition](https://github.com/vmware-tanzu/community-edition), and the newest member, [Cartographer](https://github.com/vmware-tanzu/cartographer). 
 
-There’s even more VMware-backed open source to experience in [Clarity](https://github.com/vmware/clarity), [Spring](https://github.com/spring-projects), [RabbitMQ](https://github.com/rabbitmq), and [Project Salt](https://github.com/saltstack/salt). 
+There’s even more VMware-backed open source to experience in [Clarity](https://github.com/vmware/clarity), [Spring](https://github.com/spring-projects), [RabbitMQ](https://github.com/rabbitmq), [Project Salt](https://github.com/saltstack/salt), and [Greenplum](https://github.com/greenplum-db). 
 
 # Get Started
 Join our open source community: explore, experiment, ask questions, and contribute. Follow us [on Twitter](https://twitter.com/vmwopensource) and check in on the latest news and project updates [at our blog](https://blogs.vmware.com/opensource/). 
