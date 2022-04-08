@@ -50,6 +50,12 @@ The maintainers will respond to vulnerability reports as follows:
 6. The maintainers will work on fixing the vulnerability and perform internal testing before preparing to roll out the fix.
 7. Once the fix is confirmed, the maintainers will patch the vulnerability in the next patch or minor release, and backport a patch release into all earlier supported releases.
 
+## Public Disclosure Process
+
+The maintainers publish the public advisory to this project's community via GitHub. In most cases, additional communication via Slack, Twitter, mailing lists, blog, and other channels will assist in educating the project's users and rolling out the patched release to affected users.
+
+The maintainers will also publish any mitigating steps users can take until the fix can be applied to their instances. This project's distributors will handle creating and publishing their own security advisories.
+
 
 ## Confidentiality, integrity and availability
 
