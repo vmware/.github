@@ -26,9 +26,9 @@ The report will be fielded by the maintainers who have committer and release per
 Do not report non-security-impacting bugs through this channel. Use GitHub issues for all non-security-impacting bugs.
 
 
-## Proposed Email Content
+## Proposed Report Content
 
-Provide a descriptive subject line and in the body of the email include the following information:
+Provide a descriptive title and in the description of the report include the following information:
 
 *   Basic identity information, such as your name and your affiliation or company.
 *   Detailed steps to reproduce the vulnerability  (POC scripts, screenshots, and logs are all helpful to us).
