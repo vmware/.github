@@ -17,12 +17,18 @@ If you know of a publicly disclosed security vulnerability for this project, ple
 
 **IMPORTANT: Do not file public issues on GitHub for security vulnerabilities**
 
-To report a vulnerability or a security-related issue, please contact the maintainers directly via their individual email addresses with the details of the vulnerability. The email will be fielded by the maintainers who have committer and release permissions. Emails will be addressed within 3 business days, including a detailed plan to investigate the issue and any potential workarounds to perform in the meantime. Do not report non-security-impacting bugs through this channel. Use GitHub issues for all non-security-impacting bugs.
+To report a vulnerability or a security-related issue, please contact the maintainers with enough details through one of the following channels: 
+* Directly via their individual email addresses
+* Open a [GitHub Security Advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability). This allows for anyone to report security vulnerabilities directly and privately to the maintainers via GitHub. Note that this option may not be present for every repository.
+
+The report will be fielded by the maintainers who have committer and release permissions. Feedback will be sent within 3 business days, including a detailed plan to investigate the issue and any potential workarounds to perform in the meantime. 
+
+Do not report non-security-impacting bugs through this channel. Use GitHub issues for all non-security-impacting bugs.
 
 
-## Proposed Email Content
+## Proposed Report Content
 
-Provide a descriptive subject line and in the body of the email include the following information:
+Provide a descriptive title and in the description of the report include the following information:
 
 *   Basic identity information, such as your name and your affiliation or company.
 *   Detailed steps to reproduce the vulnerability  (POC scripts, screenshots, and logs are all helpful to us).
@@ -46,7 +52,7 @@ The maintainers will respond to vulnerability reports as follows:
 2. If the issue is not deemed to be a vulnerability, the maintainers will follow up with a detailed reason for rejection.
 3. The maintainers will initiate a conversation with the reporter within 3 business days.
 4. If a vulnerability is acknowledged and the timeline for a fix is determined, the maintainers will work on a plan to communicate with the appropriate community, including identifying mitigating steps that affected users can take to protect themselves until the fix is rolled out.
-5. The maintainers will also create a [Security Advisory](https://docs.github.com/en/code-security/repository-security-advisories/publishing-a-repository-security-advisory) using the [CVSS Calculator](https://www.first.org/cvss/calculator/3.0). The maintainers make the final call on the calculated CVSS; it is better to move quickly than making the CVSS perfect. Issues may also be reported to [Mitre](https://cve.mitre.org/) using this [scoring calculator](https://nvd.nist.gov/vuln-metrics/cvss/v3-calculator). The draft advisory will initially be set to private.
+5. The maintainers will also create a [Security Advisory](https://docs.github.com/en/code-security/repository-security-advisories/publishing-a-repository-security-advisory) using the [CVSS Calculator](https://www.first.org/cvss/calculator/3.0), if it is not created yet.  The maintainers make the final call on the calculated CVSS; it is better to move quickly than making the CVSS perfect. Issues may also be reported to [Mitre](https://cve.mitre.org/) using this [scoring calculator](https://nvd.nist.gov/vuln-metrics/cvss/v3-calculator). The draft advisory will initially be set to private.
 6. The maintainers will work on fixing the vulnerability and perform internal testing before preparing to roll out the fix.
 7. Once the fix is confirmed, the maintainers will patch the vulnerability in the next patch or minor release, and backport a patch release into all earlier supported releases.
 
