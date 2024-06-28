@@ -1,4 +1,4 @@
-![VMware Collaboration Image](profile/image1.jpg)
+![VMware Collaboration Image](https://github.com/vmware/.github/blob/main/profile/image1.jpg)
 
 # Welcome!
 
