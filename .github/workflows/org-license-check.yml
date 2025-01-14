@@ -35,7 +35,7 @@ jobs:
           ORG_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
           EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS }}
         run: |
-          cat > check_licenses.py << 'EOL'
+          cat << 'EOL' > check_licenses.py
           import os
           import json
           from github import Github
@@ -193,3 +193,4 @@ jobs:
               body: body,
               labels: ['license-compliance']
             });
+            
