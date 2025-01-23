@@ -34,6 +34,8 @@ jobs:
         env:
           ORG_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
           EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS }}
+          INCLUDED_REPOS: ${{ vars.INCLUDED_REPOS }}  # From variables
+
         run: |
           python .github/scripts/check_licenses.py
 
