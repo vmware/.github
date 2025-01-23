@@ -1,0 +1,11 @@
+name: CLA Check Trigger Template
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, closed]
+  issue_comment:
+    types: [created]
+jobs:
+  cla-check-trigger:
+    uses: ${{ github.repository_owner }}/.github/.github/workflows/cla-workflow.yml@main
+    secrets: inherit
