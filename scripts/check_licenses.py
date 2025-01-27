@@ -86,7 +86,7 @@ def main():
     included_repos = [r.strip() for r in os.environ.get('INCLUDED_REPOS', '').split(',') if r.strip()]
 
     # Get repositories accessible to the bot via org membership
-    repos = user.get_repos(affiliation="organization_member", type="all")
+    repos = user.get_repos(affiliation="organization_member", visibility="all")
 
     results = {
         'non_permissive': [],
