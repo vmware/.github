@@ -19,6 +19,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/.github
           token: ${{ secrets.CLA_BOT_TOKEN }}  # Use token to access private repo
+          path: .github
 
       - name: Setup Python
         uses: actions/setup-python@v4
