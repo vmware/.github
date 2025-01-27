@@ -73,9 +73,9 @@ def install_trigger(repo):
 
 def main():
     # Authenticate with bot's token
-    token = os.environ.get('CLA_BOT_TOKEN')
+    token = os.environ.get('ORG_TOKEN')
     if not token:
-        print("Error: CLA_BOT_TOKEN environment variable not set.")
+        print("Error: ORG_TOKEN environment variable not set.")
         return 1
 
     g = Github(token)
