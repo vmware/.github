@@ -1,1 +1,27 @@
 
+name: "CLA Check"
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          path-to-signatures: 'signatures/version1/${{ github.repository_owner }}/cla.json'
+          path-to-document: 'https://${{ github.repository_owner }}.github.io/cla-docs/GenericCLA.html'
+          branch: 'main'
+          allowlist: bot*
+          remote-repository-name: .github
+          
