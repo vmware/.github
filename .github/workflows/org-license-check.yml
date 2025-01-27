@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/.github
-          token: ${{ secrets.ORG_GITHUB_TOKEN }}  # Use token to access private repo
+          token: ${{ secrets.CLA_BOT_TOKEN }}  # Use token to access private repo
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -32,7 +32,7 @@ jobs:
 
       - name: Run License Check Script
         env:
-          ORG_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
+          ORG_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
           EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS }}
           INCLUDED_REPOS: ${{ vars.INCLUDED_REPOS }}  # From variables
 
