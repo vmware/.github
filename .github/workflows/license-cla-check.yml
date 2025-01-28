@@ -12,6 +12,12 @@ permissions:
 
 jobs:
   license-check:
+    # Add condition to run on PR events or specific comment triggers
+    if: |
+      github.event_name == 'pull_request_target' || 
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     runs-on: ubuntu-latest
     steps:
       - name: Check if repository is enabled or excluded
@@ -49,11 +55,38 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write('should_run=true')
 
+      # Get PR SHA based on event type
+      - name: Get PR SHA
+        id: pr_sha
+        if: steps.repo_filter.outputs.should_run == 'true'
+        shell: python
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          import os
+          import json
+          from github import Github
+
+          event_name = os.environ['EVENT_NAME']
+          if event_name == 'pull_request_target':
+              sha = os.environ['PR_HEAD_SHA']
+          else:  # issue_comment
+              g = Github(os.environ['GITHUB_TOKEN'])
+              repo = g.get_repo(os.environ['GITHUB_REPOSITORY'])
+              pr = repo.get_pull(int(os.environ['PR_NUMBER']))
+              sha = pr.head.sha
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write(f'sha={sha}')
+
       - name: Checkout PR Head
         if: steps.repo_filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr_sha.outputs.sha }}
           fetch-depth: 0
 
       - name: Fuzzy License Validation
