@@ -15,12 +15,33 @@ runs:
       shell: python
       env:
         ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+        ENABLED_REPOS: ${{ vars.ENABLED_REPOS || '[]' }}
+        EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS || '[]' }}
+        CURRENT_REPO: ${{ github.repository }}
       run: |
         import os
         import re
+        import json
         from difflib import SequenceMatcher
         from github import Github, GithubException
-        
+
+        # Check if the repository is enabled or excluded
+        enabled_repos = json.loads(os.environ['ENABLED_REPOS'])
+        excluded_repos = json.loads(os.environ['EXCLUDED_REPOS'])
+        current_repo = os.environ['CURRENT_REPO']
+
+        if enabled_repos and current_repo not in enabled_repos:
+            print(f"Skipping repository {current_repo} (not in enabled list)")
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+                fh.write('license_status=skipped')
+            exit(0)
+
+        if current_repo in excluded_repos:
+            print(f"Skipping repository {current_repo} (excluded)")
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+                fh.write('license_status=skipped')
+            exit(0)
+
         # Configuration
         EXCLUDED_KEYWORDS = {
             'gpl', 'gnu', 'general', 'public', 'version', '2', '3',
@@ -28,15 +49,15 @@ runs:
             'copyright', 'foundation', 'franklin', 'street', 'patent'
         }
         SIMILARITY_THRESHOLD = 0.75
-        
+
         g = Github(os.environ['ORG_TOKEN'])
         repo = g.get_repo(os.environ['GITHUB_REPOSITORY'])
-        
+
         # Load permitted licenses
         org_repo = repo.organization.get_repo(".github")
         licenses_file = org_repo.get_contents("permissive_licenses.json")
         permitted_licenses = json.loads(licenses_file.decoded_content)['permissive']
-        
+
         # Get license file content
         license_text = ""
         try:
@@ -46,7 +67,7 @@ runs:
                     break
         except GithubException:
             pass
-            
+
         # Preprocess text
         if license_text:
             lines = license_text.split('\n')[:20]
@@ -55,12 +76,12 @@ runs:
                 for word in re.findall(r'\w+', line) 
                 if word not in EXCLUDED_KEYWORDS
             ])
-            
+
             # Generate candidate phrases
             candidates = re.findall(r'\w+', clean_text)
             phrases = [' '.join(candidates[i:i+3]) for i in range(len(candidates)-2)]
             all_candidates = set(candidates + phrases)
-            
+
             # Fuzzy match against permitted licenses
             is_permissive = False
             for license_name in permitted_licenses:
@@ -75,9 +96,10 @@ runs:
         else:
             # No license file found
             is_permissive = False
-            
+
         # Set output
         print(f"license_status={'permissive' if is_permissive else 'non-permissive'}")
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
             fh.write(f'license_status={"permissive" if is_permissive else "non-permissive"}')
+            
 
