@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   license-check:
-    # Add condition to run on PR events or specific comment triggers
+    # Run on PR events or CLA-related comments
     if: |
       github.event_name == 'pull_request_target' || 
       (github.event_name == 'issue_comment' && 
@@ -31,56 +31,85 @@ jobs:
           import os
           import json
 
-          enabled_repos = json.loads(os.environ['ENABLED_REPOS'])
-          excluded_repos = json.loads(os.environ['EXCLUDED_REPOS'])
-          current_repo = os.environ['CURRENT_REPO']
+          try:
+              # Load repository lists from environment variables
+              enabled_repos = json.loads(os.environ['ENABLED_REPOS'])
+              excluded_repos = json.loads(os.environ['EXCLUDED_REPOS'])
+              current_repo = os.environ['CURRENT_REPO']
 
-          # If enabled_repos is specified, only run for those repos
-          if enabled_repos:
-              if current_repo not in enabled_repos:
-                  print(f"Skipping repository {current_repo} (not in enabled list)")
+              # Check enabled repos first if specified
+              if enabled_repos:
+                  if current_repo not in enabled_repos:
+                      print(f"⚠️ Skipping {current_repo} - not in enabled list")
+                      print(f"Enabled repos: {', '.join(enabled_repos)}")
+                      with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+                          fh.write('should_run=false')
+                      exit(0)
+
+              # Then check excluded repos
+              if current_repo in excluded_repos:
+                  print(f"⚠️ Skipping {current_repo} - in excluded list")
+                  print(f"Excluded repos: {', '.join(excluded_repos)}")
                   with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
                       fh.write('should_run=false')
                   exit(0)
 
-          # If excluded_repos is specified, skip those repos
-          if current_repo in excluded_repos:
-              print(f"Skipping repository {current_repo} (excluded)")
+              # Repository is allowed to run
+              print(f"✅ Running checks for {current_repo}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+                  fh.write('should_run=true')
+
+          except json.JSONDecodeError as e:
+              print(f"❌ Error parsing repository lists: {e}")
+              print(f"ENABLED_REPOS: {os.environ['ENABLED_REPOS']}")
+              print(f"EXCLUDED_REPOS: {os.environ['EXCLUDED_REPOS']}")
               with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
                   fh.write('should_run=false')
-              exit(0)
+              exit(1)
 
-          # Otherwise, run the job
-          print(f"Running for repository {current_repo}")
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-              fh.write('should_run=true')
-
-      # Get PR SHA based on event type
       - name: Get PR SHA
         id: pr_sha
         if: steps.repo_filter.outputs.should_run == 'true'
         shell: python
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.issue.number }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           import os
           import json
           from github import Github
 
-          event_name = os.environ['EVENT_NAME']
-          if event_name == 'pull_request_target':
-              sha = os.environ['PR_HEAD_SHA']
-          else:  # issue_comment
-              g = Github(os.environ['GITHUB_TOKEN'])
-              repo = g.get_repo(os.environ['GITHUB_REPOSITORY'])
-              pr = repo.get_pull(int(os.environ['PR_NUMBER']))
-              sha = pr.head.sha
+          try:
+              event_name = os.environ['EVENT_NAME']
+              
+              # For pull_request_target events, get SHA directly from event payload
+              if event_name == 'pull_request_target':
+                  with open(os.environ['EVENT_PATH']) as f:
+                      event_data = json.load(f)
+                      sha = event_data['pull_request']['head']['sha']
+                      print(f"✅ Got SHA from pull_request_target event: {sha}")
+              
+              # For issue_comment events, need to fetch PR details
+              else:
+                  g = Github(os.environ['GITHUB_TOKEN'])
+                  repo = g.get_repo(os.environ['REPOSITORY'])
+                  with open(os.environ['EVENT_PATH']) as f:
+                      event_data = json.load(f)
+                      pr_number = event_data['issue']['number']
+                  
+                  pr = repo.get_pull(pr_number)
+                  sha = pr.head.sha
+                  print(f"✅ Got SHA from PR #{pr_number}: {sha}")
 
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-              fh.write(f'sha={sha}')
+              # Write SHA to output
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+                  fh.write(f'sha={sha}')
+
+          except Exception as e:
+              print(f"❌ Error getting PR SHA: {e}")
+              exit(1)
 
       - name: Checkout PR Head
         if: steps.repo_filter.outputs.should_run == 'true'
@@ -99,7 +128,6 @@ jobs:
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }} # Uncomment if using a remote repository for signatures
         with:
           path-to-signatures: 'signatures/version1/${{ github.repository_owner }}/cla.json'
           path-to-document: 'https://${{ github.repository_owner }}.github.io/cla-docs/GenericCLA.html'
