@@ -20,6 +20,13 @@ jobs:
        (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     runs-on: ubuntu-latest
     steps:
+      - name: Debug Event Payload
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Enabled Repos: ${{ vars.ENABLED_REPOS }}"
+          echo "Excluded Repos: ${{ vars.EXCLUDED_REPOS }}"
+          
       - name: Check if repository is enabled or excluded
         id: repo_filter
         shell: python
