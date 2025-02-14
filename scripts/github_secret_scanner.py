@@ -61,7 +61,7 @@ class GitHubClient:
         if self.rate_limit_remaining < 10:
             wait_time = (self.rate_limit_reset - datetime.now()).total_seconds() + 5 # Add a buffer
             if wait_time > 0:
-                self.logger.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.")
+                logging.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.") # Corrected logging
                 time.sleep(wait_time)
             self.validate_token() # Refresh after waiting.
 
@@ -78,7 +78,7 @@ class GitHubClient:
 
             return response
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Request failed: {e}")  # Use exception for full traceback
+            logging.exception(f"Request failed: {e}")  # Use exception for full traceback
             raise
 
     def validate_token(self):
@@ -90,12 +90,12 @@ class GitHubClient:
             self.rate_limit_reset = datetime.fromtimestamp(rate_limit['reset'])
 
             if self.rate_limit_remaining > 0:
-                self.logger.info(f"Rate Limit: {self.rate_limit_remaining} remaining. Reset at {self.rate_limit_reset}")
+                logging.info(f"Rate Limit: {self.rate_limit_remaining} remaining. Reset at {self.rate_limit_reset}") # Corrected logging
             else:
-                self.logger.error(f"Rate limit exceeded. Reset at {self.rate_limit_reset}")
+                logging.error(f"Rate limit exceeded. Reset at {self.rate_limit_reset}") # Corrected logging
                 raise Exception("Rate limit exceeded.")
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Token validation failed: {e}")
+            logging.exception(f"Token validation failed: {e}") # Corrected logging
             raise
 
     @lru_cache(maxsize=100)
@@ -106,7 +106,7 @@ class GitHubClient:
             response = self._request("GET", url)
             return response.json()['default_branch']
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Failed to fetch default branch for {repo}: {e}")
+            logging.exception(f"Failed to fetch default branch for {repo}: {e}") # Corrected logging
             raise
 
     def fetch_repositories(self, org):
@@ -118,7 +118,7 @@ class GitHubClient:
                 repos.extend(response.json())
                 url = response.links.get('next', {}).get('url')
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Failed to fetch repositories for {org}: {e}")
+            logging.exception(f"Failed to fetch repositories for {org}: {e}") # Corrected logging
             raise
         return repos
 
@@ -131,7 +131,7 @@ class GitHubClient:
                 alerts.extend(response.json())
                 url = response.links.get('next', {}).get('url')
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Failed to fetch alerts for {repo}: {e}")
+            logging.exception(f"Failed to fetch alerts for {repo}: {e}") # Corrected logging
             raise
         return alerts
 
@@ -167,7 +167,7 @@ class SecretScanner:
                                     return True
             return False
         except requests.exceptions.RequestException as e:
-            self.logger.exception(f"Error checking if alert is active for {repo}: {e}")
+            logging.exception(f"Error checking if alert is active for {repo}: {e}") # Corrected logging
             return False
 
     def generate_report(self):
@@ -205,12 +205,12 @@ class SecretScanner:
                                         alert['updated_at']
                                     ])
                         except Exception as e:
-                            self.logger.exception(f"Error processing alerts for {repo['name']}: {e}")
+                            logging.exception(f"Error processing alerts for {repo['name']}: {e}")  # Corrected logging
 
-            self.logger.info(f"Report generated: {self.output_file}")
+            logging.info(f"Report generated: {self.output_file}")  # Corrected logging
 
         except Exception as e:
-            self.logger.exception(f"Failed to generate report: {e}")
+            logging.exception(f"Failed to generate report: {e}")  # Corrected logging
             sys.exit(1)
 
 
@@ -258,13 +258,14 @@ def main():
         total_alerts = ReportGenerator.count_alerts(args.output)
         active_alerts = ReportGenerator.count_active_alerts(args.output)
 
-        logging.info(f"Total alerts found: {total_alerts}")  # Use logging.info
+        logging.info(f"Total alerts found: {total_alerts}")
         logging.info(f"Active alerts: {active_alerts}")
 
     except Exception as e:
-        logging.exception(f"An error occurred: {e}") # Use logging.exception.
+        logging.exception(f"An error occurred: {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+    
