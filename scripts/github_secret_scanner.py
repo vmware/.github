@@ -1,5 +1,3 @@
---- START OF FILE github_secret_scanner.py ---
-
 import argparse
 import requests
 import logging
