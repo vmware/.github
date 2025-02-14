@@ -3,16 +3,13 @@ import requests
 import logging
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
-from datetime import datetime, timedelta
-from contextlib import contextmanager
+from datetime import datetime
 import sys
 import time
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 
-# Logger class to manage logging levels and messages
 class Logger:
     _instance = None
 
@@ -26,47 +23,43 @@ class Logger:
         return cls._instance
 
 
-# GitHubClient class to handle GitHub API interactions (repos, secret scanning)
 class GitHubClient:
     def __init__(self, token, max_retries=3):
         self.token = token
         self.base_url = "https://api.github.com"
         self.headers = {"Authorization": f"token {self.token}", "Accept": "application/vnd.github.v3+json"}
         self.max_retries = max_retries
-        self.session = self._create_session()  # Create session once
-        self.logger = Logger()  # Use the Logger instance
+        self.session = self._create_session()
+        self.logger = Logger()
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
 
     def _create_session(self):
-        """Create a requests session with retry logic."""
         session = requests.Session()
         session.headers.update(self.headers)
         retry_strategy = Retry(
             total=self.max_retries,
-            backoff_factor=2,  # Exponential backoff
-            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
-            allowed_methods=["GET"]  # Only retry GET requests
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
-        session.mount("http://", adapter)  # Usually not needed for GitHub API
+        session.mount("http://", adapter)
         return session
 
     def _handle_rate_limit(self):
-        """Checks remaining rate limit and waits if necessary."""
-        if self.rate_limit_remaining is None or self.rate_limit_remaining < 50: # Threshold.
-            self.validate_token() # Updates the rate limits
+        if self.rate_limit_remaining is None:
+            self.validate_token()
 
         if self.rate_limit_remaining < 10:
-            wait_time = (self.rate_limit_reset - datetime.now()).total_seconds() + 5 # Add a buffer
+            wait_time = (self.rate_limit_reset - datetime.now()).total_seconds() + 5
             if wait_time > 0:
-                logging.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.") # Corrected logging
+                logging.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.")
                 time.sleep(wait_time)
-            self.validate_token() # Refresh after waiting.
+            self.validate_token()
 
     def _request(self, method, url, **kwargs):
-        """Centralized request handling with rate limit checks and error handling."""
         self._handle_rate_limit()
         try:
             response = self.session.request(method, url, **kwargs)
@@ -78,35 +71,21 @@ class GitHubClient:
 
             return response
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Request failed: {e}")  # Use exception for full traceback
+            logging.exception(f"Request failed: {e}")
             raise
 
     def validate_token(self):
         url = f"{self.base_url}/rate_limit"
         try:
-            response = self._request("GET", url)
+            response = self.session.get(url)
+            response.raise_for_status()
             rate_limit = response.json()['resources']['core']
             self.rate_limit_remaining = rate_limit['remaining']
             self.rate_limit_reset = datetime.fromtimestamp(rate_limit['reset'])
 
-            if self.rate_limit_remaining > 0:
-                logging.info(f"Rate Limit: {self.rate_limit_remaining} remaining. Reset at {self.rate_limit_reset}") # Corrected logging
-            else:
-                logging.error(f"Rate limit exceeded. Reset at {self.rate_limit_reset}") # Corrected logging
-                raise Exception("Rate limit exceeded.")
+            logging.info(f"Rate Limit: {self.rate_limit_remaining} remaining. Reset at {self.rate_limit_reset}")
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Token validation failed: {e}") # Corrected logging
-            raise
-
-    @lru_cache(maxsize=100)
-    def fetch_default_branch(self, org, repo):
-        """Fetch default branch of a repo (cached)."""
-        url = f"{self.base_url}/repos/{org}/{repo}"
-        try:
-            response = self._request("GET", url)
-            return response.json()['default_branch']
-        except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to fetch default branch for {repo}: {e}") # Corrected logging
+            logging.exception(f"Token validation failed: {e}")
             raise
 
     def fetch_repositories(self, org):
@@ -118,127 +97,117 @@ class GitHubClient:
                 repos.extend(response.json())
                 url = response.links.get('next', {}).get('url')
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to fetch repositories for {org}: {e}") # Corrected logging
+            logging.exception(f"Failed to fetch repositories for {org}: {e}")
             raise
         return repos
 
-    def fetch_secret_alerts(self, org, repo):
+    def fetch_secret_alerts(self, org, repo, state="open"):
         alerts = []
-        url = f"{self.base_url}/repos/{org}/{repo}/secret-scanning/alerts?per_page=100&state=open"
+        # Use state parameter in the API call
+        url = f"{self.base_url}/repos/{org}/{repo}/secret-scanning/alerts?per_page=100&state={state}"
         try:
             while url:
                 response = self._request("GET", url)
                 alerts.extend(response.json())
                 url = response.links.get('next', {}).get('url')
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to fetch alerts for {repo}: {e}") # Corrected logging
+            logging.exception(f"Failed to fetch {state} alerts for {repo}: {e}")
             raise
         return alerts
 
 
-# SecretScanner class to handle the logic related to scanning and reporting
 class SecretScanner:
     def __init__(self, org, token, output_file, include_inactive=False, log_level='INFO', max_workers=10, max_retries=3):
         self.org = org
         self.token = token
         self.output_file = output_file
-        self.include_inactive = include_inactive
+        self.include_inactive = include_inactive  # Keep this for filtering in workflow
         self.max_workers = max_workers
-        self.client = GitHubClient(self.token, max_retries) #Pass max_retries
-        self.logger = Logger(log_level)  # Initialize and use the Logger
-
-    def is_alert_active(self, org, repo, alert):
-        """Checks if an alert is active (at HEAD of default branch)."""
-        try:
-            default_branch = self.client.fetch_default_branch(org, repo)
-            if 'locations' in alert and alert['locations']:
-                for location in alert['locations']:
-                    if location.get('type') == 'commit':
-                        details_url = location.get('details_url')
-                        if details_url:  # Check if details_url exists
-                            location_details = self.client._request("GET", details_url).json()
-                            path = location_details.get('path')
-                            commit_sha = location_details.get('commit_sha')
-                            if path and commit_sha:
-                                commits_url = f"{self.client.base_url}/repos/{org}/{repo}/commits?path={path}&sha={default_branch}"
-                                commits = self.client._request("GET", commits_url).json()
-
-                                if commits and commits[0]['sha'] == commit_sha:
-                                    return True
-            return False
-        except requests.exceptions.RequestException as e:
-            logging.exception(f"Error checking if alert is active for {repo}: {e}") # Corrected logging
-            return False
+        self.client = GitHubClient(self.token, max_retries)
+        self.logger = Logger(log_level)
+        self.total_alerts = 0  # Track total alerts
+        self.active_alerts = 0 # Track active alerts
 
     def generate_report(self):
         try:
-            # Validate token
             self.client.validate_token()
-
-            # Fetch repositories
             repos = self.client.fetch_repositories(self.org)
 
             with open(self.output_file, mode='w', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
-                writer.writerow(["Repository", "Alert ID", "Secret Type", "Status", "Alert URL", "Last Updated"])
+                writer.writerow(["Repository", "Alert ID", "Secret Type", "State", "Alert URL", "Created At", "Updated At"])
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    future_to_repo = {
-                        executor.submit(self.client.fetch_secret_alerts, self.org, repo['name']): repo
-                        for repo in repos
-                    }
+                    future_to_repo = {}
+                    # Fetch open alerts
+                    for repo in repos:
+                      future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "open")] = (repo, "open")
+                    # Fetch closed alerts if include_inactive is True
+                    if self.include_inactive:
+                        for repo in repos:
+                            future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "fixed")] = (repo, "fixed") # Fixed, not Inactive.
+
 
                     for future in as_completed(future_to_repo):
-                        repo = future_to_repo[future]
+                        (repo, state) = future_to_repo[future]
                         try:
                             alerts = future.result()
                             for alert in alerts:
-                                is_active = self.is_alert_active(self.org, repo['name'], alert)
-                                if self.include_inactive or is_active:
-                                    status = "Active" if is_active else "Inactive"
-                                    writer.writerow([
-                                        repo['name'],
-                                        alert['number'],
-                                        alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
-                                        status,
-                                        alert['html_url'],
-                                        alert['updated_at']
-                                    ])
-                        except Exception as e:
-                            logging.exception(f"Error processing alerts for {repo['name']}: {e}")  # Corrected logging
+                                self.total_alerts += 1
+                                if state == "open":
+                                    self.active_alerts += 1
 
-            logging.info(f"Report generated: {self.output_file}")  # Corrected logging
+                                writer.writerow([
+                                    repo['name'],
+                                    alert['number'],
+                                    alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
+                                    alert['state'],  # Use the alert's state directly
+                                    alert['html_url'],
+                                    alert['created_at'], # Added created_at
+                                    alert['updated_at']
+                                ])
+                        except Exception as e:
+                            logging.exception(f"Error processing alerts for {repo['name']}: {e}")
+
+            logging.info(f"Report generated: {self.output_file}")
+            logging.info(f"Total alerts found: {self.total_alerts}")
+            logging.info(f"Active alerts: {self.active_alerts}")
+
 
         except Exception as e:
-            logging.exception(f"Failed to generate report: {e}")  # Corrected logging
+            logging.exception(f"Failed to generate report: {e}")
             sys.exit(1)
 
+    def get_stats(self):
+        """Returns a dictionary with the total and active alert counts."""
+        return {"total": self.total_alerts, "active": self.active_alerts}
 
-# ReportGenerator class to process the report (kept as-is, since no issues found)
+
+# ReportGenerator (modified to handle exceptions)
 class ReportGenerator:
     @staticmethod
+    def _count_alerts_with_state(input_file, target_state):
+        count = 0
+        try:
+            with open(input_file, mode='r', encoding='utf-8') as file:
+                reader = csv.reader(file)
+                next(reader)  # Skip header
+                for row in reader:
+                    if len(row) > 3 and row[3].lower() == target_state.lower():  # Index 3 is "State"
+                        count += 1
+        except (IOError, FileNotFoundError) as e:
+            logging.error(f"Error reading report file: {e}")
+            return -1  # Return -1 to indicate an error
+        return count
+    @staticmethod
     def count_alerts(input_file):
-        total = 0
-        with open(input_file, mode='r', encoding='utf-8') as file:
-            reader = csv.reader(file)
-            next(reader)  # Skip header
-            for _ in reader:
-                total += 1
-        return total
+        return ReportGenerator._count_alerts_with_state(input_file, "") # Count all.
 
     @staticmethod
     def count_active_alerts(input_file):
-        active = 0
-        with open(input_file, mode='r', encoding='utf-8') as file:
-            reader = csv.reader(file)
-            next(reader)  # Skip header
-            for row in reader:
-                if row[3] == "Active":
-                    active += 1
-        return active
+        return ReportGenerator._count_alerts_with_state(input_file, "open")
 
 
-# Main function to handle arguments and initiate the scanning process
 def main():
     parser = argparse.ArgumentParser(description="GitHub Secret Scanner")
     parser.add_argument("--org", required=True, help="GitHub organization name")
@@ -247,19 +216,16 @@ def main():
     parser.add_argument("--include-inactive", action='store_true', help="Include inactive alerts in the report")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--max-workers", type=int, default=10, help="Maximum concurrent workers")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum retries for API requests") # Added argument
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum retries for API requests")
 
     args = parser.parse_args()
 
     try:
-        scanner = SecretScanner(args.org, args.token, args.output, args.include_inactive, args.log_level, args.max_workers, args.max_retries) # Pass max_retries
+        scanner = SecretScanner(args.org, args.token, args.output, args.include_inactive, args.log_level, args.max_workers, args.max_retries)
         scanner.generate_report()
-
-        total_alerts = ReportGenerator.count_alerts(args.output)
-        active_alerts = ReportGenerator.count_active_alerts(args.output)
-
-        logging.info(f"Total alerts found: {total_alerts}")
-        logging.info(f"Active alerts: {active_alerts}")
+        # Get Stats from SecretScanner Instance
+        stats = scanner.get_stats()
+        print(f"__STATS_START__total={stats['total']},active={stats['active']}__STATS_END__") # Special string for workflow parsing
 
     except Exception as e:
         logging.exception(f"An error occurred: {e}")
