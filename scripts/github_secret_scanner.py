@@ -103,7 +103,6 @@ class GitHubClient:
 
     def fetch_secret_alerts(self, org, repo, state="open"):
         alerts = []
-        # Use state parameter in the API call
         url = f"{self.base_url}/repos/{org}/{repo}/secret-scanning/alerts?per_page=100&state={state}"
         try:
             while url:
@@ -121,50 +120,67 @@ class SecretScanner:
         self.org = org
         self.token = token
         self.output_file = output_file
-        self.include_inactive = include_inactive  # Keep this for filtering in workflow
+        self.include_inactive = include_inactive
         self.max_workers = max_workers
         self.client = GitHubClient(self.token, max_retries)
         self.logger = Logger(log_level)
-        self.total_alerts = 0  # Track total alerts
-        self.active_alerts = 0 # Track active alerts
+        self.total_alerts = 0
+        self.inactive_alerts = 0
+        self.active_alerts = 0
+
 
     def generate_report(self):
         try:
             self.client.validate_token()
             repos = self.client.fetch_repositories(self.org)
 
+            if not repos:
+                logging.warning("No repositories found in the organization.")
+                print("__NO_REPOS__")
+                return
+
             with open(self.output_file, mode='w', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
-                writer.writerow(["Repository", "Alert ID", "Secret Type", "State", "Alert URL", "Created At", "Updated At"])
+                writer.writerow(["Repository", "Alert ID", "Secret Type", "State", "Alert URL", "Created At", "Updated At", "Resolved Reason"])
+
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     future_to_repo = {}
                     # Fetch open alerts
                     for repo in repos:
-                      future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "open")] = (repo, "open")
-                    # Fetch closed alerts if include_inactive is True
+                        future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "open")] = (repo, "open")
+
+                    # Fetch fixed and resolved alerts if include_inactive is True
                     if self.include_inactive:
                         for repo in repos:
-                            future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "fixed")] = (repo, "fixed") # Fixed, not Inactive.
+                            future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "fixed")] = (repo, "fixed")
+                        for repo in repos:
+                            future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "resolved")] = (repo, "resolved")
 
 
                     for future in as_completed(future_to_repo):
                         (repo, state) = future_to_repo[future]
                         try:
                             alerts = future.result()
+                            logging.info(f"Processing {repo['name']} ({state} alerts): Found {len(alerts)} alerts.")
                             for alert in alerts:
                                 self.total_alerts += 1
                                 if state == "open":
-                                    self.active_alerts += 1
+                                  self.active_alerts += 1
+                                else:
+                                    self.inactive_alerts +=1
+
+                                resolved_reason = alert.get('resolution_comment') if state == 'resolved' else ''
 
                                 writer.writerow([
                                     repo['name'],
                                     alert['number'],
-                                    alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
-                                    alert['state'],  # Use the alert's state directly
+                                     alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
+                                    alert['state'],
                                     alert['html_url'],
-                                    alert['created_at'], # Added created_at
-                                    alert['updated_at']
+                                    alert['created_at'],
+                                    alert['updated_at'],
+                                    resolved_reason
                                 ])
                         except Exception as e:
                             logging.exception(f"Error processing alerts for {repo['name']}: {e}")
@@ -172,6 +188,7 @@ class SecretScanner:
             logging.info(f"Report generated: {self.output_file}")
             logging.info(f"Total alerts found: {self.total_alerts}")
             logging.info(f"Active alerts: {self.active_alerts}")
+            logging.info(f"Inactive alerts: {self.inactive_alerts}")
 
 
         except Exception as e:
@@ -179,33 +196,9 @@ class SecretScanner:
             sys.exit(1)
 
     def get_stats(self):
-        """Returns a dictionary with the total and active alert counts."""
-        return {"total": self.total_alerts, "active": self.active_alerts}
+        return {"total": self.total_alerts, "active": self.active_alerts, "inactive": self.inactive_alerts}
 
 
-# ReportGenerator (modified to handle exceptions)
-class ReportGenerator:
-    @staticmethod
-    def _count_alerts_with_state(input_file, target_state):
-        count = 0
-        try:
-            with open(input_file, mode='r', encoding='utf-8') as file:
-                reader = csv.reader(file)
-                next(reader)  # Skip header
-                for row in reader:
-                    if len(row) > 3 and row[3].lower() == target_state.lower():  # Index 3 is "State"
-                        count += 1
-        except (IOError, FileNotFoundError) as e:
-            logging.error(f"Error reading report file: {e}")
-            return -1  # Return -1 to indicate an error
-        return count
-    @staticmethod
-    def count_alerts(input_file):
-        return ReportGenerator._count_alerts_with_state(input_file, "") # Count all.
-
-    @staticmethod
-    def count_active_alerts(input_file):
-        return ReportGenerator._count_alerts_with_state(input_file, "open")
 
 
 def main():
@@ -223,9 +216,8 @@ def main():
     try:
         scanner = SecretScanner(args.org, args.token, args.output, args.include_inactive, args.log_level, args.max_workers, args.max_retries)
         scanner.generate_report()
-        # Get Stats from SecretScanner Instance
         stats = scanner.get_stats()
-        print(f"__STATS_START__total={stats['total']},active={stats['active']}__STATS_END__") # Special string for workflow parsing
+        print(f"__STATS_START__total={stats['total']},active={stats['active']},inactive={stats['inactive']}__STATS_END__")
 
     except Exception as e:
         logging.exception(f"An error occurred: {e}")
