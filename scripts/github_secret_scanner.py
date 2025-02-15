@@ -119,7 +119,7 @@ class SecretScanner:
     def __init__(self, org, token, output_file, include_inactive=False, log_level='INFO', max_workers=10, max_retries=3):
         self.org = org
         self.token = token
-        self.output_file = output_file
+        self.output_file = output_file  # This is now relative to the .github repo
         self.include_inactive = include_inactive
         self.max_workers = max_workers
         self.client = GitHubClient(self.token, max_retries)
@@ -127,7 +127,6 @@ class SecretScanner:
         self.total_alerts = 0
         self.inactive_alerts = 0
         self.active_alerts = 0
-
 
     def generate_report(self):
         try:
@@ -143,14 +142,11 @@ class SecretScanner:
                 writer = csv.writer(file)
                 writer.writerow(["Repository", "Alert ID", "Secret Type", "State", "Alert URL", "Created At", "Updated At", "Resolved Reason"])
 
-
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     future_to_repo = {}
-                    # Fetch open alerts
                     for repo in repos:
                         future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "open")] = (repo, "open")
 
-                    # Fetch fixed and resolved alerts if include_inactive is True
                     if self.include_inactive:
                         for repo in repos:
                             future_to_repo[executor.submit(self.client.fetch_secret_alerts, self.org, repo['name'], "fixed")] = (repo, "fixed")
@@ -166,16 +162,16 @@ class SecretScanner:
                             for alert in alerts:
                                 self.total_alerts += 1
                                 if state == "open":
-                                  self.active_alerts += 1
+                                    self.active_alerts += 1
                                 else:
-                                    self.inactive_alerts +=1
+                                    self.inactive_alerts += 1
 
                                 resolved_reason = alert.get('resolution_comment') if state == 'resolved' else ''
 
                                 writer.writerow([
                                     repo['name'],
                                     alert['number'],
-                                     alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
+                                    alert.get('secret_type_display_name', alert.get('secret_type', 'Unknown')),
                                     alert['state'],
                                     alert['html_url'],
                                     alert['created_at'],
@@ -190,7 +186,6 @@ class SecretScanner:
             logging.info(f"Active alerts: {self.active_alerts}")
             logging.info(f"Inactive alerts: {self.inactive_alerts}")
 
-
         except Exception as e:
             logging.exception(f"Failed to generate report: {e}")
             sys.exit(1)
@@ -199,13 +194,11 @@ class SecretScanner:
         return {"total": self.total_alerts, "active": self.active_alerts, "inactive": self.inactive_alerts}
 
 
-
-
 def main():
     parser = argparse.ArgumentParser(description="GitHub Secret Scanner")
     parser.add_argument("--org", required=True, help="GitHub organization name")
     parser.add_argument("--token", required=True, help="GitHub token")
-    parser.add_argument("--output", required=True, help="Output CSV file path")
+    parser.add_argument("--output", required=True, help="Output CSV file path")  # Now relative path
     parser.add_argument("--include-inactive", action='store_true', help="Include inactive alerts in the report")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--max-workers", type=int, default=10, help="Maximum concurrent workers")
