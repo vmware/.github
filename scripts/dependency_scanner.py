@@ -169,6 +169,10 @@ class DependencyScanner:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"vulnerability_report_{timestamp}.csv"
 
+        reports_dir = "reports"  # Use a simple relative path
+        os.makedirs(reports_dir, exist_ok=True)  # Create 'reports' relative to CWD
+        filepath = os.path.join(reports_dir, filename)
+        
         all_vulnerabilities = []
         repositories = self.client.get_repositories(self.org_name, self.repo_list)
         if not repositories:
