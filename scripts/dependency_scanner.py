@@ -130,7 +130,6 @@ class GitHubClient:
 
         return repositories
 
-
     def get_dependabot_alerts(self, owner, repo_name):
         """Retrieves Dependabot alerts for a single repository (with pagination)."""
         alerts = []
@@ -139,34 +138,44 @@ class GitHubClient:
             response = self._request("GET", url)
             if response.status_code == 404:
                 logging.info(f"Dependabot alerts not available or repo not found for {owner}/{repo_name}.")
-                return []  # Return empty list, not None
-            response.raise_for_status()  # Handle other errors
+                return []
+            response.raise_for_status()
             alerts.extend(response.json())
             url = response.links.get("next", {}).get("url")
         return alerts
-
-    def get_dependency_version(self, owner, repo_name, dependency_name):
-        """Retrieves the current version of a dependency using the Dependency Graph API."""
-        # Use the compare API to get the diff between the base and HEAD, including dependency changes
-        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/compare/HEAD...main" # Assuming 'main' as default branch, change it to your branch.
+    
+    def get_dependency_version(self, owner, repo_name, manifest_path):
+        """Retrieves the current version from the manifest file using its path."""
+        # Construct the URL to the specific manifest file
+        manifest_url = f"{self.base_url}/repos/{owner}/{repo_name}/contents/{manifest_path}"
         try:
-            response = self._request("GET", url)
+            response = self._request("GET", manifest_url)
             response.raise_for_status()
-            data = response.json()
+            manifest_content = response.json()
 
-            # Find the dependency in the 'dependencies' list
-            for dep in data.get('dependencies', []):
-                if dep.get('package_url') and dependency_name in dep.get('package_url'):
-                    # Extract version information. It can be a dictionary or a string.
-                    if isinstance(dep.get('version'), dict):
-                         return dep['version'].get('version', 'N/A') #Handle nested dictionaries.
-                    else:
-                        return dep.get('version', 'N/A') #Handle simple strings
+            # Decode the content (it's base64 encoded)
+            import base64
+            decoded_content = base64.b64decode(manifest_content['content']).decode('utf-8')
 
-            return "N/A" # Dependency not found
+            #The parsing depends on file type.
+            if manifest_path.endswith(".json"):
+                manifest_data = json.loads(decoded_content)
+                #For package-lock.json
+                if 'packages' in manifest_data:
+                   for package_path, package_data in manifest_data['packages'].items():
+                       if package_path != '':
+                         return package_data.get('version', "N/A")
+                #for others .json files
+                elif 'version' in manifest_data:
+                    return manifest_data.get('version', "N/A")
+
+            return "N/A" # File format not supported
 
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to get dependency version for {dependency_name} in {owner}/{repo_name}: {e}")
+            logging.exception(f"Failed to get manifest content for {manifest_path} in {owner}/{repo_name}: {e}")
+            return "N/A"
+        except (ValueError, KeyError) as e:
+            logging.exception(f"Error parsing manifest file {manifest_path} in {owner}/{repo_name}: {e}")
             return "N/A"
 
 
@@ -221,13 +230,15 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
+                        # print(alert)  # Uncomment for debugging.
                         try:  # Robust error handling
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
+                            manifest_path = dependency.get("manifest_path", "N/A")
 
                             # --- CORRECTED VERSION RETRIEVAL ---
-                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], package_name)
+                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], manifest_path)
                             # --- END CORRECTED VERSION RETRIEVAL ---
 
                             security_advisory = alert.get("security_advisory", {})
@@ -260,7 +271,6 @@ class DependencyScanner:
         if not all_vulnerabilities:
             logging.info("No vulnerabilities found.")
             return
-
 
         with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
             fieldnames = [
