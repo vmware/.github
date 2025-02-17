@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import sys
 import time
+import json
 
 
 class Logger:
@@ -105,7 +106,8 @@ class GitHubClient:
             url = f"{self.base_url}/orgs/{org_name}/repos?per_page=100"
             while url:
                 response = self._request("GET", url)
-                repositories.extend([{"name": repo["name"], "owner": repo["owner"]["login"]} for repo in response.json()])
+                for repo in response.json():
+                    repositories.append({"name": repo["name"], "owner": repo["owner"]["login"]})
                 url = response.links.get("next", {}).get("url")
 
         elif repo_list:
@@ -127,24 +129,6 @@ class GitHubClient:
             repositories.append({"name": repo, "owner": owner})
 
         return repositories
-    
-    def get_package_version(self, owner, repo_name, ecosystem, package_name):
-        """Fetches the version of a package from its manifest file."""
-        # Construct the URL to the dependency graph manifest
-        manifest_url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/manifests"
-        response = self._request("GET", manifest_url)
-        response.raise_for_status()
-        manifests = response.json()
-
-        #Find the correct manifest based on ecosystem
-        package_version = "N/A"
-        for manifest_path, manifest_data in manifests.items():
-           if 'resolved' in manifest_data:
-                for resolved_dep in manifest_data['resolved']:
-                    if resolved_dep.get('package_name') == package_name and resolved_dep.get('manifest_path') and resolved_dep.get('ecosystem') == ecosystem:
-                        package_version = resolved_dep.get('version')
-                        return package_version
-        return package_version
 
 
     def get_dependabot_alerts(self, owner, repo_name):
@@ -160,6 +144,30 @@ class GitHubClient:
             alerts.extend(response.json())
             url = response.links.get("next", {}).get("url")
         return alerts
+
+    def get_dependency_version(self, owner, repo_name, dependency_name):
+        """Retrieves the current version of a dependency using the Dependency Graph API."""
+        # Use the compare API to get the diff between the base and HEAD, including dependency changes
+        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/compare/HEAD...main" # Assuming 'main' as default branch, change it to your branch.
+        try:
+            response = self._request("GET", url)
+            response.raise_for_status()
+            data = response.json()
+
+            # Find the dependency in the 'dependencies' list
+            for dep in data.get('dependencies', []):
+                if dep.get('package_url') and dependency_name in dep.get('package_url'):
+                    # Extract version information. It can be a dictionary or a string.
+                    if isinstance(dep.get('version'), dict):
+                         return dep['version'].get('version', 'N/A') #Handle nested dictionaries.
+                    else:
+                        return dep.get('version', 'N/A') #Handle simple strings
+
+            return "N/A" # Dependency not found
+
+        except requests.exceptions.RequestException as e:
+            logging.exception(f"Failed to get dependency version for {dependency_name} in {owner}/{repo_name}: {e}")
+            return "N/A"
 
 
 class DependencyScanner:
@@ -213,18 +221,17 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
-                        # print(alert) #Uncomment for debugging
                         try:  # Robust error handling
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
-                            # --- CORRECTED LOGIC ---
-                            ecosystem = pkg.get("ecosystem", "N/A")
-                            current_version = self.client.get_package_version(repo['owner'], repo['name'], ecosystem, package_name)
+
+                            # --- CORRECTED VERSION RETRIEVAL ---
+                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], package_name)
+                            # --- END CORRECTED VERSION RETRIEVAL ---
 
                             security_advisory = alert.get("security_advisory", {})
                             vulnerable_range = security_advisory.get("vulnerable_version_range", "N/A")
-                            # --- END CORRECTED LOGIC ---
                             severity = security_advisory.get("severity", "N/A")
 
                             security_vulnerability = alert.get("security_vulnerability", {})
@@ -246,7 +253,6 @@ class DependencyScanner:
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
                             continue
-
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
                     # Don't raise here; continue with the next repository
