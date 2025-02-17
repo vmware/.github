@@ -31,7 +31,7 @@ class GitHubClient:
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28", #Good practice
+            "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "dependency-alerts-report-script"
         }
         self.max_retries = max_retries
@@ -52,7 +52,7 @@ class GitHubClient:
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
-        session.mount("http://", adapter) #Not needed, just in case
+        session.mount("http://", adapter)
         return session
 
     def _handle_rate_limit(self):
@@ -127,6 +127,24 @@ class GitHubClient:
             repositories.append({"name": repo, "owner": owner})
 
         return repositories
+    
+    def get_package_version(self, owner, repo_name, ecosystem, package_name):
+        """Fetches the version of a package from its manifest file."""
+        # Construct the URL to the dependency graph manifest
+        manifest_url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/manifests"
+        response = self._request("GET", manifest_url)
+        response.raise_for_status()
+        manifests = response.json()
+
+        #Find the correct manifest based on ecosystem
+        package_version = "N/A"
+        for manifest_path, manifest_data in manifests.items():
+           if 'resolved' in manifest_data:
+                for resolved_dep in manifest_data['resolved']:
+                    if resolved_dep.get('package_name') == package_name and resolved_dep.get('manifest_path') and resolved_dep.get('ecosystem') == ecosystem:
+                        package_version = resolved_dep.get('version')
+                        return package_version
+        return package_version
 
 
     def get_dependabot_alerts(self, owner, repo_name):
@@ -169,10 +187,10 @@ class DependencyScanner:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"vulnerability_report_{timestamp}.csv"
 
-        reports_dir = "reports"  # Use a simple relative path
-        os.makedirs(reports_dir, exist_ok=True)  # Create 'reports' relative to CWD
+        reports_dir = "reports"
+        os.makedirs(reports_dir, exist_ok=True)
         filepath = os.path.join(reports_dir, filename)
-        
+
         all_vulnerabilities = []
         repositories = self.client.get_repositories(self.org_name, self.repo_list)
         if not repositories:
@@ -195,19 +213,23 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
-                        try:  # Robust error handling for potentially missing keys
+                        # print(alert) #Uncomment for debugging
+                        try:  # Robust error handling
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
-                            current_version = dependency.get("version", "N/A")
+                            # --- CORRECTED LOGIC ---
+                            ecosystem = pkg.get("ecosystem", "N/A")
+                            current_version = self.client.get_package_version(repo['owner'], repo['name'], ecosystem, package_name)
 
                             security_advisory = alert.get("security_advisory", {})
                             vulnerable_range = security_advisory.get("vulnerable_version_range", "N/A")
+                            # --- END CORRECTED LOGIC ---
                             severity = security_advisory.get("severity", "N/A")
 
                             security_vulnerability = alert.get("security_vulnerability", {})
                             first_patched = security_vulnerability.get("first_patched_version", {})
-                            update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"  # Handle None
+                            update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
 
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
@@ -217,23 +239,21 @@ class DependencyScanner:
                                 "Severity": severity,
                                 "Update Available": update_available
                             })
-                            self.total_vulnerabilities += 1 #counter
+                            self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
+                            continue
+                        except Exception as e:
+                            logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
                             continue
 
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
                     # Don't raise here; continue with the next repository
 
-
         if not all_vulnerabilities:
             logging.info("No vulnerabilities found.")
             return
-
-        reports_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'reports')
-        os.makedirs(reports_dir, exist_ok=True)
-        filepath = os.path.join(reports_dir, filename)
 
 
         with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
@@ -253,7 +273,7 @@ class DependencyScanner:
     def run_scan(self, filename=None):
         """Runs the complete scan and report generation."""
         self.generate_csv_report(filename)
-    
+
     def get_stats(self):
         return {"total": self.total_vulnerabilities, "processed_repos": self.processed_repos}
 
@@ -289,3 +309,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
