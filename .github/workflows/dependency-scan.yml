@@ -68,10 +68,10 @@ jobs:
           REPO_LIST: ${{ github.event.inputs.repo_list }}
           REPORT_FILE: "vulnerability_report_${{ steps.timestamp.outputs.timestamp }}.csv"
         run: |
-          mkdir -p reports
+
           COMMAND="python scripts/dependency_scanner.py \
             --token $GITHUB_TOKEN \
-            --output reports/$REPORT_FILE \
+            --output $REPORT_FILE \
             --log-level ${{ github.event.inputs.log_level || 'INFO' }} \
             --max-workers ${{ github.event.inputs.max_workers || 10 }} \
             --max-retries 3"
