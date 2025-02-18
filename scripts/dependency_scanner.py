@@ -5,8 +5,16 @@ import logging
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from requests.adapters import HTTPAdapter
+# Corrected import statement:
+from urllib3.util.retry import Retry  # Import Retry directly from urllib3.util
 import sys
+import time
 import json
+import re
+import base64
+import xml.etree.ElementTree as ET
+
 
 class Logger:
     _instance = None
@@ -20,8 +28,9 @@ class Logger:
             logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
         return cls._instance
 
+
 class GitHubClient:
-    def __init__(self, token, max_retries=3, timeout=10):
+    def __init__(self, token, max_retries=3, timeout=10):  # Increased timeout
         self.token = token
         self.base_url = "https://api.github.com"
         self.headers = {
@@ -31,7 +40,7 @@ class GitHubClient:
             "User-Agent": "dependency-alerts-report-script"
         }
         self.max_retries = max_retries
-        self.timeout = timeout
+        self.timeout = timeout  # Use the timeout
         self.session = self._create_session()
         self.logger = Logger()
         self.rate_limit_remaining = None
@@ -45,7 +54,7 @@ class GitHubClient:
             total=self.max_retries,
             backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"]
+            allowed_methods=["GET"]  # Only retry GET requests
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
@@ -56,18 +65,19 @@ class GitHubClient:
         if self.rate_limit_remaining is None:
             self.validate_token()
 
-        if self.rate_limit_remaining < 50:
+        if self.rate_limit_remaining < 50:  # More conservative threshold
             wait_time = (self.rate_limit_reset - datetime.now()).total_seconds() + 5
             if wait_time > 0:
                 logging.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.")
                 time.sleep(wait_time)
-            self.validate_token()
+            self.validate_token()  # Re-validate after waiting
 
     def _request(self, method, url, **kwargs):
         self._handle_rate_limit()
         try:
+            # Add timeout to the request
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-            response.raise_for_status()
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
             if 'X-RateLimit-Remaining' in response.headers:
                 self.rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
@@ -76,6 +86,9 @@ class GitHubClient:
 
         except requests.exceptions.RequestException as e:
             logging.exception(f"Request failed: {e}")
+            raise
+        except requests.exceptions.Timeout:  # Handle timeout specifically
+            logging.error(f"Request to {url} timed out after {self.timeout} seconds.")
             raise
 
     def validate_token(self):
@@ -154,7 +167,8 @@ class GitHubClient:
             return dependencies
         except requests.exceptions.RequestException as e:
             logging.exception(f"Failed to get SBOM for {owner}/{repo_name}: {e}")
-            return {}
+            return {} # Return empty dict in case of failure.
+
 
 class DependencyScanner:
     """
@@ -170,7 +184,7 @@ class DependencyScanner:
         self.repo_list = repo_list
         self.max_workers = max_workers
         self.client = GitHubClient(github_token, max_retries)
-        self.logger = Logger(log_level)
+        self.logger = Logger(log_level)  # Use the custom Logger class
         self.total_vulnerabilities = 0
         self.processed_repos = 0
 
@@ -205,10 +219,11 @@ class DependencyScanner:
                     self.processed_repos += 1
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
-                    # Get all current dependency versions from the SBOM *once* per repo
+                    # Get *all* current dependency versions from the SBOM *once* per repo
                     current_versions = self.client.get_sbom_dependencies(repo['owner'], repo['name'])
 
                     for alert in alerts:
+                        # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
                         try:
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
@@ -219,28 +234,37 @@ class DependencyScanner:
                             # --- End SBOM data ---
 
                             security_advisory = alert.get("security_advisory", {})
+                            # --- Use security_vulnerability, not vulnerabilities array ---
                             security_vulnerability = alert.get("security_vulnerability", {})
                             vulnerable_range = security_vulnerability.get("vulnerable_version_range", "N/A")
+                            # --- End Use security_vulnerability ---
+
                             severity = security_advisory.get("severity", "N/A")
-                            alert_url = alert.get("html_url", "N/A")
+                            alert_url = alert.get("html_url", "N/A")  # Get alert URL
+                            # Create Excel hyperlink formula
                             severity_link = f'=HYPERLINK("{alert_url}", "{severity}")'
+
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
+
+                            #print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
 
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
                                 "Package Name": package_name,
                                 "Current Version": current_version,
                                 "Vulnerable Versions": vulnerable_range,
-                                "Severity": severity_link,
+                                "Severity": severity_link,  # Use the hyperlink formula
                                 "Update Available": update_available
                             })
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
+                            print(f"KeyError: {e}") #KEEP
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
+                            print(f"Other Exception: {e}") #KEEP
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
