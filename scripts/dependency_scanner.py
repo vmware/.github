@@ -202,17 +202,24 @@ class GitHubClient:
                         return dep_data.get('version', 'N/A')
         except json.JSONDecodeError:
             # If JSON parsing fails, try parsing as yarn.lock
-             for line in content.splitlines():
+            for line in content.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):  # Skip empty lines and comments
-                  continue
-                # Check if ANY of the keys on this line contain the package name.
+                    continue
+
+                # --- CORRECTED YARN.LOCK LOGIC ---
+                # Check if the package name is present ANYWHERE in the comma-separated keys
                 if package_name in line:
-                    # Use a more robust regex to extract the version.
-                    match = re.search(r'version[:=]\s*"?([^\s",]+)"?', line)
-                    if match:
-                        return match.group(1)  # Group 1 contains the version
-        return "N/A" # Package not found
+                    parts = line.split(":")
+                    if len(parts) > 1:  # make sure a version exists.
+                        next_line = content.splitlines()[content.splitlines().index(line) + 1].strip() # Check the NEXT line for "version"
+                        if next_line.startswith("version"):
+                            match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line) #check in the next line
+                            if match:
+                                return match.group(1)
+                # --- END CORRECTED YARN.LOCK LOGIC ---
+
+        return "N/A"  # Package not found
 
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
