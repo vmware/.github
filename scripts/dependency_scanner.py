@@ -194,8 +194,10 @@ class GitHubClient:
             logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
             return "N/A"  # Don't crash the entire process.
 
+
     def _parse_npm_manifest(self, content, package_name):
         pass  # Removed: logic now in _parse_package_lock and _parse_yarn_lock
+
 
     def _parse_package_lock(self, content, package_name):
         """Parses a package-lock.json file."""
@@ -204,18 +206,17 @@ class GitHubClient:
             # Prioritize 'packages' section (v2/v3 format)
             if 'packages' in data:
                 for path, package_data in data['packages'].items():
-                    if path != "" and package_name in path :  # Corrected path check
+                    if path != "" and package_name in path :
                         return package_data.get('version', 'N/A')
 
             # Fallback to top-level 'dependencies' (v1 format)
             if 'dependencies' in data:
                 dep_info = data['dependencies'].get(package_name)
                 if dep_info:
-                    if isinstance(dep_info, dict):  # Check if it's a dictionary
+                    if isinstance(dep_info, dict):
                         return dep_info.get('version', 'N/A')
-                    elif isinstance(dep_info, str):  # Or a string
+                    elif isinstance(dep_info, str):
                         return dep_info
-
         except json.JSONDecodeError:
             logging.exception(f"Error decoding package-lock.json: {content}")
         return "N/A"  # Package not found
@@ -231,18 +232,16 @@ class GitHubClient:
             # --- CORRECTED YARN.LOCK LOGIC ---
             # Check if ANY of the keys on this line contain the package name.
             for key in line.split(","):  # Split into individual keys
-                key = key.strip().split(":")[0] # Get rid of ""
+                key = key.strip().split(":")[0] # split and Get rid of ""
                 if key.startswith(package_name + "@") or key == package_name: #check if starts with or equal
-                    # Find the next line that starts with "version"
-                    next_line = content.splitlines()[content.splitlines().index(line) + 1].strip()
+                    next_line = content.splitlines()[content.splitlines().index(line) + 1].strip() #check the NEXT line
                     if next_line.startswith("version"):
-                        match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line)
+                        match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line) # Use the same robust regex
                         if match:
-                            return match.group(1)  # Group 1 contains the version
+                            return match.group(1)
             # --- END CORRECTED YARN.LOCK LOGIC ---
 
         return "N/A"
-
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
         for line in content.splitlines():
@@ -267,28 +266,38 @@ class GitHubClient:
         return "N/A"
 
     def _parse_pom_xml(self, content, package_name):
-      try:
-          # Use regex to find the dependency within the <dependencies> section
-          match = re.search(rf'<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
-          if match:
-              version_str = match.group(1).strip()
-              # Check if it's a property reference
-              if version_str.startswith("${") and version_str.endswith("}"):
-                  property_name = version_str[2:-1]
-                  # Extract properties from the POM
-                  properties = {}
-                  properties_match = re.search(r'<properties>(.*?)</properties>', content, re.DOTALL)
-                  if properties_match:
-                      for prop_match in re.findall(r'<([^>]+)>(.*?)</\1>', properties_match.group(1)):
-                          prop_name, prop_value = prop_match
-                          properties[prop_name.strip()] = prop_value.strip()
-                  return properties.get(property_name, "N/A") # Get value from properties
-              else:
-                 return version_str
-          return "N/A" # Version not found
-      except Exception as e:
-          logging.exception(f"Error parsing pom.xml: {e}")
-          return "N/A"
+        """
+        Parses a pom.xml file (Maven) to extract the version of a given package.
+        Handles properties for version resolution, and handles groupID.
+        """
+        try:
+            # 1. Extract properties
+            properties = {}
+            properties_match = re.search(r'<properties>(.*?)</properties>', content, re.DOTALL)
+            if properties_match:
+                for prop_match in re.findall(r'<([^>]+)>(.*?)</\1>', properties_match.group(1)):
+                    prop_name, prop_value = prop_match
+                    properties[prop_name.strip()] = prop_value.strip()
+
+            # 2. Find the dependency and resolve its version
+            # This regex now also captures the groupId
+            match = re.search(rf'<groupId>(.*?)</groupId>\s*<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
+
+            if match:
+                version_str = match.group(2).strip() # group(2) is the <version> content
+
+                # Check if it's a property reference
+                if version_str.startswith("${") and version_str.endswith("}"):
+                    property_name = version_str[2:-1]  # Extract property name
+                    return properties.get(property_name, "N/A") # Lookup in properties, return "N/A" if not found
+                else:
+                    return version_str  # Return literal version
+
+            return "N/A"  # Dependency not found
+
+        except Exception as e:
+            logging.exception(f"Error parsing pom.xml: {e}")
+            return "N/A"
 
 class DependencyScanner:
     """
