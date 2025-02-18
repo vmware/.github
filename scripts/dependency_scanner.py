@@ -166,6 +166,8 @@ class GitHubClient:
         if manifest_path == "N/A":
             return "N/A"
 
+        logging.info(f"Parsing {ecosystem} manifest at {manifest_path} for package {package_name}.")
+      
         content = self.get_file_content(owner, repo_name, manifest_path)
         if not content:
             return "N/A"
