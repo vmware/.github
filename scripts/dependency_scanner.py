@@ -13,7 +13,6 @@ import json
 import re
 import base64
 
-
 class Logger:
     _instance = None
 
@@ -42,7 +41,6 @@ class GitHubClient:
         self.logger = Logger()
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
-
 
     def _create_session(self):
         session = requests.Session()
@@ -98,7 +96,6 @@ class GitHubClient:
         except requests.exceptions.RequestException as e:
             logging.exception(f"Token validation failed: {e}")
             raise
-
 
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
@@ -158,7 +155,7 @@ class GitHubClient:
             logging.error(f"Failed to get file content for {path} in {owner}/{repo_name}: {e}")
             return None
 
-    def get_dependency_version_from_manifest(self, owner, repo_name, manifest_path, package_name):
+    def get_dependency_version_from_manifest(self, owner, repo_name, manifest_path, package_name, ecosystem):
         """
         Gets the dependency version from the manifest file specified in the alert.
         This method handles different manifest file types and extracts the version.
@@ -171,46 +168,44 @@ class GitHubClient:
             return "N/A"
 
         try:
-            if manifest_path.endswith(".json"):
-                return self._parse_json_manifest(content, package_name)
-            elif manifest_path.endswith("requirements.txt"):
-                return self._parse_requirements_txt(content, package_name)
-            elif manifest_path.endswith("pom.xml"):
+            if ecosystem.lower() == "npm":
+                return self._parse_npm_manifest(content, package_name)
+            elif ecosystem.lower() == "maven":
                 return self._parse_pom_xml(content, package_name)
-            elif manifest_path.endswith(".lock"): #Generic lock file
-                return self._parse_generic_lockfile(content,package_name)
+            elif ecosystem.lower() == "pip":
+                return self._parse_requirements_txt(content, package_name)
+            elif ecosystem.lower() == "gomod":
+                return self._parse_go_mod(content, package_name)  # Add Go module parsing
             # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
             else:
-                logging.info(f"Unsupported manifest file type: {manifest_path}")
+                logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
                 return "N/A"
         except Exception as e:
             logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
-            return "N/A" # Don't crash the entire process.
+            return "N/A"  # Don't crash the entire process.
 
-
-    def _parse_json_manifest(self, content, package_name):
-        """Parses a JSON manifest file (e.g., package-lock.json, yarn.lock)."""
+    def _parse_npm_manifest(self, content, package_name):
+        """Parses package-lock.json and yarn.lock files."""
         try:
+            # Try parsing as JSON (package-lock.json)
             data = json.loads(content)
-            # Handle package-lock.json (npm)
             if 'packages' in data:
                 for path, package_data in data['packages'].items():
-                    if path != "" and "node_modules/" + package_name == path:
+                     if path != "" and "node_modules/" + package_name == path:
                         return package_data.get('version', 'N/A')
-            # Handle yarn.lock (simplified - assumes "name@version" format)
+            #If not found, check top level.
+            if 'dependencies' in data:
+                for dep_name, dep_data in data['dependencies'].items():
+                    if dep_name == package_name:
+                        return dep_data.get('version', 'N/A')
+        except json.JSONDecodeError:
+            # If JSON parsing fails, try parsing as yarn.lock
             for line in content.splitlines():
                 if line.startswith(package_name + "@"):
-                    match = re.search(r'version "([^"]+)"', line)
+                    match = re.search(r'version\s+"([^"]+)"', line)
                     if match:
                         return match.group(1)
-
-            # Generic fallback (look for top-level "version" if no specific structure found)
-            if 'version' in data:
-                return data.get('version', 'N/A')
-            return "N/A"
-        except json.JSONDecodeError:
-            logging.exception(f"Error decoding JSON manifest: {content}")
-            return "N/A"
+        return "N/A"
 
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
@@ -218,20 +213,13 @@ class GitHubClient:
             line = line.strip()
             if line.startswith(package_name + "=="):
                 return line.split("==")[1]  # Extract version
+            # Handle case where there's no '=='
+            elif line.startswith(package_name):
+               parts = line.split()
+               if len(parts) > 1:
+                   return parts[1] # Return version
         return "N/A"
-    
-    def _parse_generic_lockfile(self, content, package_name):
-        """
-        Parses a generic lockfile, attempting to extract version based on common patterns.
-        """
-        # Pattern to match: package_name followed by any characters, then "version", then the version string
-        pattern = re.compile(rf'{package_name}.*?version(?:[:=]|[\s]+)"?([^"\s]+)"?', re.IGNORECASE)
-        match = pattern.search(content)
-        if match:
-            return match.group(1)
-        
-        return "N/A"
-    
+
     def _parse_pom_xml(self, content, package_name):
       try:
           # Use regex to find the dependency within the <dependencies> section
@@ -242,6 +230,17 @@ class GitHubClient:
       except Exception as e:
           logging.exception(f"Error parsing pom.xml: {e}")
           return "N/A"
+
+    def _parse_go_mod(self, content, package_name):
+        """Parses a go.mod file (simplified)."""
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith(package_name + " "):  # e.g., "github.com/google/uuid v1.3.0"
+                parts = line.split()
+                if len(parts) >= 2:
+                    return parts[1]  # The version is the second part
+        return "N/A"
+
 
 class DependencyScanner:
     """
@@ -293,30 +292,30 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
-                        # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
+                        #print(json.dumps(alert, indent=2))  # Uncomment for debugging.
                         try:
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
-                            # --- USE MANIFEST PATH FROM ALERT ---
                             manifest_path = dependency.get("manifest_path", "N/A")
-                            current_version = self.client.get_dependency_version_from_manifest(
-                                repo['owner'], repo['name'], manifest_path, package_name
-                            )
-                            # --- END USE MANIFEST PATH ---
+                            ecosystem = pkg.get("ecosystem", "N/A")
+
+                            # --- Use dependency.version if available, otherwise fallback ---
+                            current_version = dependency.get("version")
+                            if current_version is None:  # If version is NOT in the alert
+                                current_version = self.client.get_dependency_version_from_manifest(
+                                    repo['owner'], repo['name'], manifest_path, package_name, ecosystem
+                                )
+                            # --- End Use Alert Data ---
+
 
                             security_advisory = alert.get("security_advisory", {})
-                            vulnerable_ranges = []
-                            for vulnerability in security_advisory.get("vulnerabilities", []):
-                                vulnerable_range_str = vulnerability.get("vulnerable_version_range", "N/A")
-                                vulnerable_ranges.append(vulnerable_range_str)
-                                #print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}")
-
-                            vulnerable_range = ", ".join(vulnerable_ranges)
-                            #print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")
+                            # --- Use security_vulnerability, not vulnerabilities array ---
+                            security_vulnerability = alert.get("security_vulnerability", {})
+                            vulnerable_range = security_vulnerability.get("vulnerable_version_range", "N/A")
+                            # --- End Use security_vulnerability ---
 
                             severity = security_advisory.get("severity", "N/A")
-                            security_vulnerability = alert.get("security_vulnerability", {})  # Not needed
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
 
@@ -333,11 +332,11 @@ class DependencyScanner:
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"KeyError: {e}")
+                            print(f"KeyError: {e}") #KEEP
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"Other Exception: {e}")
+                            print(f"Other Exception: {e}") #KEEP
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
