@@ -253,6 +253,9 @@ class DependencyScanner:
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
 
+                            print(f"DEBUG: vulnerable_range before append: {vulnerable_range}") # DEBUG: Add THIS line
+
+
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
                                 "Package Name": package_name,
@@ -264,9 +267,11 @@ class DependencyScanner:
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
+                            print(f"KeyError: {e}") # DEBUG
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
+                            print(f"Other Exception: {e}") # DEBUG
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
