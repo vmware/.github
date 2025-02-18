@@ -10,6 +10,7 @@ from requests.packages.urllib3.util.retry import Retry
 import sys
 import time
 import json
+import re
 
 
 class Logger:
@@ -143,40 +144,38 @@ class GitHubClient:
             alerts.extend(response.json())
             url = response.links.get("next", {}).get("url")
         return alerts
-    
-    def get_dependency_version(self, owner, repo_name, manifest_path):
-        """Retrieves the current version from the manifest file using its path."""
-        # Construct the URL to the specific manifest file
-        manifest_url = f"{self.base_url}/repos/{owner}/{repo_name}/contents/{manifest_path}"
+
+    def get_dependency_version(self, owner, repo_name, package_name, default_branch):
+        """Retrieves the current version of a dependency using the Dependency Graph API."""
+        # Use the compare API to get the diff between the base and HEAD, including dependency changes
+        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/compare/{default_branch}...HEAD"
         try:
-            response = self._request("GET", manifest_url)
+            response = self._request("GET", url)
             response.raise_for_status()
-            manifest_content = response.json()
+            data = response.json()
 
-            # Decode the content (it's base64 encoded)
-            import base64
-            decoded_content = base64.b64decode(manifest_content['content']).decode('utf-8')
+            # Find the dependency in the 'dependencies' list
+            for dep in data.get('dependencies', []):
+                if dep.get('package_url') and  dep.get('package_url').startswith("pkg:" + package_name):
+                   return dep.get('version', 'N/A')
 
-            #The parsing depends on file type.
-            if manifest_path.endswith(".json"):
-                manifest_data = json.loads(decoded_content)
-                #For package-lock.json
-                if 'packages' in manifest_data:
-                   for package_path, package_data in manifest_data['packages'].items():
-                       if package_path != '':
-                         return package_data.get('version', "N/A")
-                #for others .json files
-                elif 'version' in manifest_data:
-                    return manifest_data.get('version', "N/A")
-
-            return "N/A" # File format not supported
+            return "N/A" # Dependency not found
 
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to get manifest content for {manifest_path} in {owner}/{repo_name}: {e}")
+            logging.exception(f"Failed to get dependency version for {package_name} in {owner}/{repo_name}: {e}")
             return "N/A"
-        except (ValueError, KeyError) as e:
-            logging.exception(f"Error parsing manifest file {manifest_path} in {owner}/{repo_name}: {e}")
-            return "N/A"
+    
+    def get_default_branch(self, owner, repo_name):
+        """Gets the default branch name for a repository."""
+        url = f"{self.base_url}/repos/{owner}/{repo_name}"
+        try:
+            response = self._request("GET", url)
+            response.raise_for_status()
+            repo_data = response.json()
+            return repo_data.get("default_branch", "main")  # Default to 'main' if not found
+        except requests.exceptions.RequestException as e:
+            logging.exception(f"Failed to get default branch for {owner}/{repo_name}: {e}")
+            return "main" # Default value
 
 
 class DependencyScanner:
@@ -228,31 +227,37 @@ class DependencyScanner:
                     self.processed_repos += 1
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
+                    # Get the default branch for the repository *once* per repo
+                    default_branch = self.client.get_default_branch(repo['owner'], repo['name'])
+
                     for alert in alerts:
+                        # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
                         try:
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
-                            manifest_path = dependency.get("manifest_path", "N/A")
-                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], manifest_path)
+                            #manifest_path = dependency.get("manifest_path", "N/A") # Not needed anymore
+
+                            # --- CORRECTED VERSION RETRIEVAL ---
+                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], package_name, default_branch)
+                            # --- END CORRECTED VERSION RETRIEVAL ---
 
                             security_advisory = alert.get("security_advisory", {})
                             vulnerable_ranges = []
                             for vulnerability in security_advisory.get("vulnerabilities", []):
                                 vulnerable_range_str = vulnerability.get("vulnerable_version_range", "N/A")
                                 vulnerable_ranges.append(vulnerable_range_str)
-                                print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}")  # KEEP THIS
+                                #print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}")
 
                             vulnerable_range = ", ".join(vulnerable_ranges)
-                            print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")  # KEEP THIS
+                            #print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")
 
                             severity = security_advisory.get("severity", "N/A")
                             security_vulnerability = alert.get("security_vulnerability", {})
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
 
-                            # --- NEW DEBUG PRINT ---
-                            print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
+                            #print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
 
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
@@ -265,11 +270,11 @@ class DependencyScanner:
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"KeyError: {e}") #KEEP
+                            print(f"KeyError: {e}")
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"Other Exception: {e}") #KEEP
+                            print(f"Other Exception: {e}")
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
@@ -291,7 +296,7 @@ class DependencyScanner:
             writer.writeheader()
             writer.writerows(all_vulnerabilities)
         logging.info(f"CSV report generated: {filepath}")
-            
+
     def run_scan(self, filename=None):
         """Runs the complete scan and report generation."""
         self.generate_csv_report(filename)
