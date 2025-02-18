@@ -99,6 +99,7 @@ class GitHubClient:
             logging.exception(f"Token validation failed: {e}")
             raise
 
+
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
         repositories = []
@@ -171,13 +172,20 @@ class GitHubClient:
 
         try:
             if ecosystem.lower() == "npm":
-                return self._parse_npm_manifest(content, package_name)
+                # Handle package-lock.json and yarn.lock differently
+                if manifest_path.endswith("package-lock.json"):
+                    return self._parse_package_lock(content, package_name)
+                elif manifest_path.endswith("yarn.lock"):
+                    return self._parse_yarn_lock(content, package_name)
+                else:
+                    logging.info(f"Unsupported manifest file for npm ecosystem: {manifest_path}")
+                    return "N/A"
             elif ecosystem.lower() == "maven":
                 return self._parse_pom_xml(content, package_name)
             elif ecosystem.lower() == "pip":
                 return self._parse_requirements_txt(content, package_name)
-            elif ecosystem.lower() == "go":  # Corrected ecosystem name
-                return self._parse_go_mod(content, package_name)  # Call the go.mod parser
+            elif ecosystem.lower() == "go":
+                return self._parse_go_mod(content, package_name)
             # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
             else:
                 logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
@@ -186,37 +194,54 @@ class GitHubClient:
             logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
             return "N/A"  # Don't crash the entire process.
 
-
     def _parse_npm_manifest(self, content, package_name):
-        """Parses package-lock.json and yarn.lock files."""
+        pass  # Removed: logic now in _parse_package_lock and _parse_yarn_lock
+
+    def _parse_package_lock(self, content, package_name):
+        """Parses a package-lock.json file."""
         try:
-            # Try parsing as JSON (package-lock.json)
             data = json.loads(content)
+            # Prioritize 'packages' section (v2/v3 format)
             if 'packages' in data:
                 for path, package_data in data['packages'].items():
-                     if path != "" and "node_modules/" + package_name == path:
+                    if path != "" and package_name in path :  # Corrected path check
                         return package_data.get('version', 'N/A')
-            #If not found, check top level.
+
+            # Fallback to top-level 'dependencies' (v1 format)
             if 'dependencies' in data:
-                for dep_name, dep_data in data['dependencies'].items():
-                    if dep_name == package_name:
-                        return dep_data.get('version', 'N/A')
+                dep_info = data['dependencies'].get(package_name)
+                if dep_info:
+                    if isinstance(dep_info, dict):  # Check if it's a dictionary
+                        return dep_info.get('version', 'N/A')
+                    elif isinstance(dep_info, str):  # Or a string
+                        return dep_info
+
         except json.JSONDecodeError:
-            # If JSON parsing fails, try parsing as yarn.lock
-             for line in content.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):  # Skip empty lines and comments
-                  continue
-                # Check if ANY of the keys on this line contain the package name.
-                for key in line.split(","):  # Split into individual keys
-                    key = key.strip().split(":")[0] # Get rid of ""
-                    if key.startswith(package_name + "@") or key == package_name: #check if starts with or equal
-                        next_line = content.splitlines()[content.splitlines().index(line) + 1].strip() # Check the NEXT line for "version"
-                        if next_line.startswith("version"):
-                            match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line) #check in the next line
-                            if match:
-                                return match.group(1)  # Group 1 contains the version
-        return "N/A" # Package not found
+            logging.exception(f"Error decoding package-lock.json: {content}")
+        return "N/A"  # Package not found
+
+
+    def _parse_yarn_lock(self, content, package_name):
+        """Parses a yarn.lock file."""
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):  # Skip empty lines and comments
+                continue
+
+            # --- CORRECTED YARN.LOCK LOGIC ---
+            # Check if ANY of the keys on this line contain the package name.
+            for key in line.split(","):  # Split into individual keys
+                key = key.strip().split(":")[0] # Get rid of ""
+                if key.startswith(package_name + "@") or key == package_name: #check if starts with or equal
+                    # Find the next line that starts with "version"
+                    next_line = content.splitlines()[content.splitlines().index(line) + 1].strip()
+                    if next_line.startswith("version"):
+                        match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line)
+                        if match:
+                            return match.group(1)  # Group 1 contains the version
+            # --- END CORRECTED YARN.LOCK LOGIC ---
+
+        return "N/A"
 
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
@@ -230,39 +255,16 @@ class GitHubClient:
                if len(parts) > 1:
                    return parts[1]
         return "N/A"
-    
+
     def _parse_go_mod(self, content, package_name):
-      """
-      Parses a go.mod file to find the version of a specific package.
-      Handles direct and indirect dependencies, and quoted module paths.
-      """
-      in_require_block = False
-      for line in content.splitlines():
-          line = line.strip()
-          if line.startswith("require ("):
-              in_require_block = True
-              continue
-          elif line.startswith(")"):
-              in_require_block = False
-              continue
-          if in_require_block:
-              # Handles quoted and unquoted module paths
-              parts = line.split()
-              if len(parts) >= 2:
-                  module_path = parts[0].strip('"')  # Remove quotes if present
-                  if module_path == package_name:
-                      version = parts[1]
-                      # Handle indirect dependencies, marked with "// indirect"
-                      if len(parts) > 2 and parts[2] == "//":
-                          if "indirect" in parts[2:]:
-                            version = f"{version} (indirect)" # Mark as indirect
-                      return version
-          #Handle requires outside the require block.
-          elif line.startswith("require " + package_name):
-              parts = line.split()
-              if len(parts) >= 3: # require + package + version
-                  return parts[2]
-      return "N/A"  # Not found
+        """Parses a go.mod file (simplified)."""
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith(package_name + " "):  # e.g., "github.com/google/uuid v1.3.0"
+                parts = line.split()
+                if len(parts) >= 2:
+                    return parts[1]  # The version is the second part
+        return "N/A"
 
     def _parse_pom_xml(self, content, package_name):
       try:
