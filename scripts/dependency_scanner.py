@@ -208,13 +208,12 @@ class DependencyScanner:
         os.makedirs(reports_dir, exist_ok=True)
         filepath = os.path.join(reports_dir, filename)
 
-        all_vulnerabilities = []
+        all_vulnerabilities = []  # We'll still use this, even in the simplified version
         repositories = self.client.get_repositories(self.org_name, self.repo_list)
         if not repositories:
             logging.warning("No repositories found to scan.")
-            print("__NO_REPOS__") #For github actions
+            print("__NO_REPOS__")
             return
-
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_repo = {
@@ -230,79 +229,49 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
-                        # print(alert)  # Uncomment for debugging.
-                        print("----- DEBUG: Raw Alert Data -----")  # Clear indicator
-                        print(json.dumps(alert, indent=2))        # Pretty-print the JSON
-                        print("----------------------------------")
-                        
-                        try:  # Robust error handling
-                            dependency = alert.get("dependency", {})
-                            pkg = dependency.get("package", {})
-                            package_name = pkg.get("name", "N/A")
-                            manifest_path = dependency.get("manifest_path", "N/A")
-
-                            # --- CORRECTED VERSION RETRIEVAL ---
-                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], manifest_path)
-                            # --- END CORRECTED VERSION RETRIEVAL ---
-
-                            # --- CORRECTED VULNERABLE RANGE LOGIC ---
+                        try:
+                            # --- EXTREME DEBUGGING: Simplify everything ---
                             security_advisory = alert.get("security_advisory", {})
                             vulnerable_ranges = []
                             for vulnerability in security_advisory.get("vulnerabilities", []):
-                                vulnerable_ranges.append(vulnerability.get("vulnerable_version_range", "N/A"))
-                            vulnerable_range = ", ".join(vulnerable_ranges)  # Join multiple ranges
-                            # --- END CORRECTED VULNERABLE RANGE LOGIC ---
-                            
-                            security_advisory = alert.get("security_advisory", {})
-                            vulnerable_range = security_advisory.get("vulnerable_version_range", "N/A")
-                            severity = security_advisory.get("severity", "N/A")
+                                vulnerable_range_str = vulnerability.get("vulnerable_version_range", "N/A")
+                                vulnerable_ranges.append(vulnerable_range_str)
+                                print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}") # Debug each one
 
-                            security_vulnerability = alert.get("security_vulnerability", {})
-                            first_patched = security_vulnerability.get("first_patched_version", {})
-                            update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
+                            vulnerable_range = ", ".join(vulnerable_ranges)
+                            print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")
 
-                            print(f"DEBUG: vulnerable_range before append: {vulnerable_range}") # DEBUG: Add THIS line
-
-
+                            # Temporarily just append a simplified dictionary
                             all_vulnerabilities.append({
-                                "Repository Name": f"{repo['owner']}/{repo['name']}",
-                                "Package Name": package_name,
-                                "Current Version": current_version,
-                                "Vulnerable Versions": vulnerable_range,
-                                "Severity": severity,
-                                "Update Available": update_available
+                                "Repository Name": repo['name'],  # Use a simple value
+                                "Vulnerable Versions": vulnerable_range, # ONLY this field
                             })
-                            self.total_vulnerabilities += 1
+                            # --- END EXTREME DEBUGGING ---
+
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"KeyError: {e}") # DEBUG
+                            print(f"KeyError: {e}")
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"Other Exception: {e}") # DEBUG
+                            print(f"Other Exception: {e}")
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
-                    # Don't raise here; continue with the next repository
 
         if not all_vulnerabilities:
             logging.info("No vulnerabilities found.")
             return
 
+        # Simplified writing for debugging
         with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = [
-                "Repository Name",
-                "Package Name",
-                "Current Version",
-                "Vulnerable Versions",
-                "Severity",
-                "Update Available",
-            ]
+            fieldnames = ["Repository Name", "Vulnerable Versions"]  # Only these two columns
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(all_vulnerabilities)
         logging.info(f"CSV report generated: {filepath}")
 
+    
     def run_scan(self, filename=None):
         """Runs the complete scan and report generation."""
         self.generate_csv_report(filename)
