@@ -179,12 +179,14 @@ class GitHubClient:
                 return self._parse_requirements_txt(content, package_name)
             elif ecosystem.lower() == "gomod":
                 return self._parse_go_mod(content, package_name)
+            # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
             else:
                 logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
                 return "N/A"
         except Exception as e:
             logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
-            return "N/A"
+            return "N/A"  # Don't crash the entire process.
+
 
     def _parse_npm_manifest(self, content, package_name):
         """Parses package-lock.json and yarn.lock files."""
@@ -202,24 +204,21 @@ class GitHubClient:
                         return dep_data.get('version', 'N/A')
         except json.JSONDecodeError:
             # If JSON parsing fails, try parsing as yarn.lock
-            for line in content.splitlines():
+             for line in content.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):  # Skip empty lines and comments
-                    continue
-
-                # --- CORRECTED YARN.LOCK LOGIC ---
-                # Check if the package name is present ANYWHERE in the comma-separated keys
-                if package_name in line:
-                    parts = line.split(":")
-                    if len(parts) > 1:  # make sure a version exists.
+                  continue
+                # Check if ANY of the keys on this line contain the package name.
+                for key in line.split(","):  # Split into individual keys
+                    key = key.strip().split(":")[0] # Get rid of ""
+                    if key.startswith(package_name + "@") or key == package_name: #check if starts with or equal
                         next_line = content.splitlines()[content.splitlines().index(line) + 1].strip() # Check the NEXT line for "version"
                         if next_line.startswith("version"):
                             match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line) #check in the next line
                             if match:
-                                return match.group(1)
-                # --- END CORRECTED YARN.LOCK LOGIC ---
+                                return match.group(1)  # Group 1 contains the version
+        return "N/A" # Package not found
 
-        return "N/A"  # Package not found
 
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
@@ -233,7 +232,7 @@ class GitHubClient:
                if len(parts) > 1:
                    return parts[1]
         return "N/A"
-    
+
     def _parse_go_mod(self, content, package_name):
         """Parses a go.mod file (simplified)."""
         for line in content.splitlines():
@@ -250,7 +249,7 @@ class GitHubClient:
           match = re.search(rf'<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
           if match:
               version_str = match.group(1).strip()
-              # Check if version is a property
+              # Check if it's a property reference
               if version_str.startswith("${") and version_str.endswith("}"):
                   property_name = version_str[2:-1]
                   # Extract properties from the POM
@@ -267,8 +266,6 @@ class GitHubClient:
       except Exception as e:
           logging.exception(f"Error parsing pom.xml: {e}")
           return "N/A"
-
-
 
 class DependencyScanner:
     """
@@ -337,14 +334,21 @@ class DependencyScanner:
                             # --- End Use Alert Data ---
 
                             security_advisory = alert.get("security_advisory", {})
+                            # --- Use security_vulnerability, not vulnerabilities array ---
                             security_vulnerability = alert.get("security_vulnerability", {})
                             vulnerable_range = security_vulnerability.get("vulnerable_version_range", "N/A")
+                            # --- End Use security_vulnerability ---
+
                             severity = security_advisory.get("severity", "N/A")
                             alert_url = alert.get("html_url", "N/A")  # Get alert URL
                             # Create Excel hyperlink formula
                             severity_link = f'=HYPERLINK("{alert_url}", "{severity}")'
+
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
+
+                            #print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
+
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
                                 "Package Name": package_name,
