@@ -5,15 +5,8 @@ import logging
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
 import sys
-import time
 import json
-import re
-import base64
-import xml.etree.ElementTree as ET
-
 
 class Logger:
     _instance = None
@@ -27,19 +20,18 @@ class Logger:
             logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
         return cls._instance
 
-
 class GitHubClient:
-    def __init__(self, token, max_retries=3, timeout=10):  # Increased timeout
+    def __init__(self, token, max_retries=3, timeout=10):
         self.token = token
         self.base_url = "https://api.github.com"
         self.headers = {
             "Authorization": f"Bearer {self.token}",
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/vnd.github+json",  # This is crucial for the SBOM API
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "dependency-alerts-report-script"
         }
         self.max_retries = max_retries
-        self.timeout = timeout  # Use the timeout
+        self.timeout = timeout
         self.session = self._create_session()
         self.logger = Logger()
         self.rate_limit_remaining = None
@@ -53,7 +45,7 @@ class GitHubClient:
             total=self.max_retries,
             backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"]  # Only retry GET requests
+            allowed_methods=["GET"]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
@@ -64,19 +56,18 @@ class GitHubClient:
         if self.rate_limit_remaining is None:
             self.validate_token()
 
-        if self.rate_limit_remaining < 50:  # More conservative threshold
+        if self.rate_limit_remaining < 50:
             wait_time = (self.rate_limit_reset - datetime.now()).total_seconds() + 5
             if wait_time > 0:
                 logging.info(f"Rate limit approaching. Waiting for {wait_time:.0f} seconds.")
                 time.sleep(wait_time)
-            self.validate_token()  # Re-validate after waiting
+            self.validate_token()
 
     def _request(self, method, url, **kwargs):
         self._handle_rate_limit()
         try:
-            # Add timeout to the request
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
 
             if 'X-RateLimit-Remaining' in response.headers:
                 self.rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
@@ -85,9 +76,6 @@ class GitHubClient:
 
         except requests.exceptions.RequestException as e:
             logging.exception(f"Request failed: {e}")
-            raise
-        except requests.exceptions.Timeout:  # Handle timeout specifically
-            logging.error(f"Request to {url} timed out after {self.timeout} seconds.")
             raise
 
     def validate_token(self):
@@ -151,207 +139,22 @@ class GitHubClient:
             url = response.links.get("next", {}).get("url")
         return alerts
 
-    def get_file_content(self, owner, repo_name, path):
-        """Retrieves the content of a file from a GitHub repository."""
-        url = f"{self.base_url}/repos/{owner}/{repo_name}/contents/{path}"
+    def get_sbom_dependencies(self, owner, repo_name):
+        """Retrieves the SBOM for a repository and extracts dependency information."""
+        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/sbom"
         try:
             response = self._request("GET", url)
             response.raise_for_status()
-            content = response.json()['content']
-            return base64.b64decode(content).decode('utf-8')
+            sbom_data = response.json()
+            dependencies = {}
+            # Extract dependency information from the SBOM
+            for package in sbom_data.get("sbom", {}).get("packages", []):
+                if "name" in package and "versionInfo" in package:
+                    dependencies[package["name"]] = package["versionInfo"]
+            return dependencies
         except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to get file content for {path} in {owner}/{repo_name}: {e}")
-            return None
-
-    def get_dependency_version_from_manifest(self, owner, repo_name, manifest_path, package_name, ecosystem):
-        """
-        Gets the dependency version from the manifest file specified in the alert.
-        This method handles different manifest file types and extracts the version.
-        """
-        if manifest_path == "N/A":
-            return "N/A"
-
-        content = self.get_file_content(owner, repo_name, manifest_path)
-        if not content:
-            return "N/A"
-
-        try:
-            if ecosystem.lower() == "npm":
-                # Handle package-lock.json and yarn.lock differently
-                if manifest_path.endswith("package-lock.json"):
-                    return self._parse_package_lock(content, package_name)
-                elif manifest_path.endswith("yarn.lock"):
-                    return self._parse_yarn_lock(content, package_name)
-                else:
-                    logging.info(f"Unsupported manifest file for npm ecosystem: {manifest_path}")
-                    return "N/A"
-            elif ecosystem.lower() == "maven":
-                return self._parse_pom_xml(content, package_name)
-            elif ecosystem.lower() == "pip":
-                return self._parse_requirements_txt(content, package_name)
-            elif ecosystem.lower() == "go":
-                return self._parse_go_mod(content, package_name)
-            elif ecosystem.lower() == "rubygems":  # Corrected ecosystem name
-                return self._parse_gemfile_lock(content, package_name)
-            elif ecosystem.lower() == "cargo":  # Rust
-                return self._parse_cargo_lock(content, package_name)
-            # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
-            else:
-                logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
-                return "N/A"
-        except Exception as e:
-            logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
-            return "N/A"  # Don't crash the entire process.
-
-
-    def _parse_npm_manifest(self, content, package_name):
-        pass  # Removed: logic now in _parse_package_lock and _parse_yarn_lock
-
-    def _parse_package_lock(self, content, package_name):
-      """Parses a package-lock.json file."""
-      try:
-          data = json.loads(content)
-          # Prioritize 'packages' section (v2/v3 format)
-          if 'packages' in data:
-              for path, package_data in data['packages'].items():
-                  if path != "" and package_name in path:  # Corrected path check
-                      return package_data.get('version', 'N/A')
-
-          # Fallback to top-level 'dependencies' (v1 format)
-          if 'dependencies' in data:
-              dep_info = data['dependencies'].get(package_name)
-              if dep_info:
-                  if isinstance(dep_info, dict):  # Check if it's a dictionary
-                      return dep_info.get('version', 'N/A')
-                  elif isinstance(dep_info, str):  # Or a string
-                      return dep_info
-      except json.JSONDecodeError:
-          logging.exception(f"Error decoding package-lock.json: {content}")
-      return "N/A"  # Package not found
-
-
-    def _parse_yarn_lock(self, content, package_name):
-      """Parses a yarn.lock file."""
-      for line in content.splitlines():
-          line = line.strip()
-          if not line or line.startswith("#"):  # Skip empty lines and comments
-              continue
-
-          # --- CORRECTED YARN.LOCK LOGIC ---
-          # Check if ANY of the keys on this line contain the package name.
-          for key in line.split(","):  # Split into individual keys
-              key = key.strip().split(":")[0] #remove quotes
-              if key.startswith(package_name + "@") or key == package_name:
-                  # Find the next line that starts with "version"
-                  next_line = content.splitlines()[content.splitlines().index(line) + 1].strip()
-                  if next_line.startswith("version"):
-                      match = re.search(r'version[:=]\s*"?([^\s",]+)"?', next_line)
-                      if match:
-                          return match.group(1)  # Group 1 contains the version
-          # --- END CORRECTED YARN.LOCK LOGIC ---
-
-      return "N/A"
-
-    def _parse_requirements_txt(self, content, package_name):
-        """Parses a requirements.txt file."""
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith(package_name + "=="):
-                return line.split("==")[1]  # Extract version
-            # Handle case where there's no '=='
-            elif line.startswith(package_name):
-               parts = line.split()
-               if len(parts) > 1:
-                   return parts[1]
-        return "N/A"
-
-    def _parse_go_mod(self, content, package_name):
-      """Parses a go.mod file (simplified)."""
-      in_require_block = False
-      for line in content.splitlines():
-          line = line.strip()
-          if line.startswith("require ("):
-              in_require_block = True
-              continue
-          elif line.startswith(")"):
-              in_require_block = False
-              continue
-          if in_require_block:
-              # Handles quoted and unquoted module paths
-              parts = line.split()
-              if len(parts) >= 2:
-                  module_path = parts[0].strip('"')  # Remove quotes if present
-                  if module_path == package_name:
-                      version = parts[1]
-                      # Handle indirect dependencies, marked with "// indirect"
-                      if len(parts) > 2 and parts[2] == "//":
-                          if "indirect" in parts[2:]:
-                            version = f"{version} (indirect)" # Mark as indirect
-                      return version
-          #Handle requires outside the require block.
-          elif line.startswith("require " + package_name):
-              parts = line.split()
-              if len(parts) >= 3: # require + package + version
-                  return parts[2]
-      return "N/A"
-
-    def _parse_pom_xml(self, content, package_name):
-      try:
-          # Use regex to find the dependency within the <dependencies> section
-          match = re.search(rf'<groupId>(.*?)</groupId>\s*<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
-          if match:
-              version_str = match.group(2).strip() # group(2) is the <version> content
-              # Check if it's a property reference
-              if version_str.startswith("${") and version_str.endswith("}"):
-                  property_name = version_str[2:-1]
-                  # Extract properties from the POM
-                  properties = {}
-                  properties_match = re.search(r'<properties>(.*?)</properties>', content, re.DOTALL)
-                  if properties_match:
-                      for prop_match in re.findall(r'<([^>]+)>(.*?)</\1>', properties_match.group(1)):
-                          prop_name, prop_value = prop_match
-                          properties[prop_name.strip()] = prop_value.strip()
-                  return properties.get(property_name, "N/A") # Get value from properties
-              else:
-                 return version_str
-          return "N/A" # Version not found
-      except Exception as e:
-          logging.exception(f"Error parsing pom.xml: {e}")
-          return "N/A"
-
-    def _parse_gemfile_lock(self, content, package_name):
-        """Parses a Gemfile.lock file (simplified)."""
-        # Gemfile.lock has a section for each source, and nested sections.
-        # We'll do a simple line-by-line search for the package name.
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith(package_name + " ("):  # e.g., "rails (6.1.4.1)"
-                match = re.search(r'\(([^)]+)\)', line)
-                if match:
-                    return match.group(1)
-        return "N/A"
-
-    def _parse_cargo_lock(self, content, package_name):
-      """Parses a Cargo.lock file."""
-      in_package_section = False
-      found_package = False
-
-      for line in content.splitlines():
-          line = line.strip()
-          if line.startswith("[[package]]"):
-              in_package_section = True
-              continue
-          elif line.startswith("["): #other section
-              in_package_section = False
-
-          if in_package_section:
-              if line.startswith(f'name = "{package_name}"'):
-                  found_package = True #marks when a package is found.
-                  continue #continues to get next line
-              if found_package and line.startswith("version = "):
-                  version = line.split("=")[1].strip().strip('"')
-                  return version
-      return "N/A"  # Package not found
+            logging.exception(f"Failed to get SBOM for {owner}/{repo_name}: {e}")
+            return {}
 
 class DependencyScanner:
     """
@@ -367,7 +170,7 @@ class DependencyScanner:
         self.repo_list = repo_list
         self.max_workers = max_workers
         self.client = GitHubClient(github_token, max_retries)
-        self.logger = Logger(log_level)  # Use the custom Logger class
+        self.logger = Logger(log_level)
         self.total_vulnerabilities = 0
         self.processed_repos = 0
 
@@ -402,55 +205,42 @@ class DependencyScanner:
                     self.processed_repos += 1
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
+                    # Get all current dependency versions from the SBOM *once* per repo
+                    current_versions = self.client.get_sbom_dependencies(repo['owner'], repo['name'])
+
                     for alert in alerts:
-                        # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
                         try:
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
                             package_name = pkg.get("name", "N/A")
-                            manifest_path = dependency.get("manifest_path", "N/A")
-                            ecosystem = pkg.get("ecosystem", "N/A")
 
-                             # --- Use dependency.version if available, otherwise fallback ---
-                            current_version = dependency.get("version")
-                            if current_version is None:  # If version is NOT in the alert
-                                current_version = self.client.get_dependency_version_from_manifest(
-                                    repo['owner'], repo['name'], manifest_path, package_name, ecosystem
-                                )
-                            # --- End Use Alert Data ---
+                            # --- Use SBOM data for current version ---
+                            current_version = current_versions.get(package_name, "N/A")
+                            # --- End SBOM data ---
 
                             security_advisory = alert.get("security_advisory", {})
-                            # --- Use security_vulnerability, not vulnerabilities array ---
                             security_vulnerability = alert.get("security_vulnerability", {})
                             vulnerable_range = security_vulnerability.get("vulnerable_version_range", "N/A")
-                            # --- End Use security_vulnerability ---
-
                             severity = security_advisory.get("severity", "N/A")
-                            alert_url = alert.get("html_url", "N/A")  # Get alert URL
-                            # Create Excel hyperlink formula
+                            alert_url = alert.get("html_url", "N/A")
                             severity_link = f'=HYPERLINK("{alert_url}", "{severity}")'
-
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
-
-                            #print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
 
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
                                 "Package Name": package_name,
                                 "Current Version": current_version,
                                 "Vulnerable Versions": vulnerable_range,
-                                "Severity": severity_link,  # Use the hyperlink formula
+                                "Severity": severity_link,
                                 "Update Available": update_available
                             })
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"KeyError: {e}") #KEEP
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"Other Exception: {e}") #KEEP
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
@@ -512,3 +302,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
