@@ -42,6 +42,7 @@ class GitHubClient:
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
 
+
     def _create_session(self):
         session = requests.Session()
         session.headers.update(self.headers)
@@ -97,6 +98,7 @@ class GitHubClient:
             logging.exception(f"Token validation failed: {e}")
             raise
 
+
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
         repositories = []
@@ -142,7 +144,7 @@ class GitHubClient:
             alerts.extend(response.json())
             url = response.links.get("next", {}).get("url")
         return alerts
-    
+
     def get_dependency_versions(self, owner, repo_name):
         """
         Retrieves all dependencies and their versions for a repository using the Dependency Graph manifests API.
@@ -159,15 +161,19 @@ class GitHubClient:
             for manifest_path, manifest_info in manifests_data.items():
                 if 'resolved' in manifest_info:  # Check if resolved dependencies are available
                     for dep in manifest_info['resolved']:
-                        package_name = dep.get('package_name')
-                        version = dep.get('version')
-                        if package_name and version:  # Ensure both name and version exist
+                        # --- CORRECTED: Access package_url and version correctly ---
+                        package_url = dep.get('package_url')
+                        if package_url:  # Make sure package_url exists
+                            package_name = package_url.split(':')[1].split('@')[0] # Extract name from PURL
+                            version = package_url.split('@')[1] # Extract the version
                             dependencies[package_name] = version
+                        # --- END CORRECTED ---
             return dependencies
 
         except requests.exceptions.RequestException as e:
             logging.exception(f"Failed to get dependency versions for {owner}/{repo_name}: {e}")
             return {}  # Return an empty dictionary on error
+
 
 class DependencyScanner:
     """
