@@ -245,6 +245,14 @@ class DependencyScanner:
                             current_version = self.client.get_dependency_version(repo['owner'], repo['name'], manifest_path)
                             # --- END CORRECTED VERSION RETRIEVAL ---
 
+                            # --- CORRECTED VULNERABLE RANGE LOGIC ---
+                            security_advisory = alert.get("security_advisory", {})
+                            vulnerable_ranges = []
+                            for vulnerability in security_advisory.get("vulnerabilities", []):
+                                vulnerable_ranges.append(vulnerability.get("vulnerable_version_range", "N/A"))
+                            vulnerable_range = ", ".join(vulnerable_ranges)  # Join multiple ranges
+                            # --- END CORRECTED VULNERABLE RANGE LOGIC ---
+                            
                             security_advisory = alert.get("security_advisory", {})
                             vulnerable_range = security_advisory.get("vulnerable_version_range", "N/A")
                             severity = security_advisory.get("severity", "N/A")
