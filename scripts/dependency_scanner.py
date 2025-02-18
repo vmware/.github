@@ -42,7 +42,6 @@ class GitHubClient:
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
 
-
     def _create_session(self):
         session = requests.Session()
         session.headers.update(self.headers)
@@ -98,7 +97,6 @@ class GitHubClient:
             logging.exception(f"Token validation failed: {e}")
             raise
 
-
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
         repositories = []
@@ -144,39 +142,32 @@ class GitHubClient:
             alerts.extend(response.json())
             url = response.links.get("next", {}).get("url")
         return alerts
-
-    def get_dependency_version(self, owner, repo_name, package_name, default_branch):
-        """Retrieves the current version of a dependency using the Dependency Graph API."""
-        # Use the compare API to get the diff between the base and HEAD, including dependency changes
-        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/compare/{default_branch}...HEAD"
-        try:
-            response = self._request("GET", url)
-            response.raise_for_status()
-            data = response.json()
-
-            # Find the dependency in the 'dependencies' list
-            for dep in data.get('dependencies', []):
-                if dep.get('package_url') and  dep.get('package_url').startswith("pkg:" + package_name):
-                   return dep.get('version', 'N/A')
-
-            return "N/A" # Dependency not found
-
-        except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to get dependency version for {package_name} in {owner}/{repo_name}: {e}")
-            return "N/A"
     
-    def get_default_branch(self, owner, repo_name):
-        """Gets the default branch name for a repository."""
-        url = f"{self.base_url}/repos/{owner}/{repo_name}"
+    def get_dependency_versions(self, owner, repo_name):
+        """
+        Retrieves all dependencies and their versions for a repository using the Dependency Graph manifests API.
+        Returns a dictionary where keys are package names and values are versions.
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo_name}/dependency-graph/manifests"
         try:
             response = self._request("GET", url)
             response.raise_for_status()
-            repo_data = response.json()
-            return repo_data.get("default_branch", "main")  # Default to 'main' if not found
-        except requests.exceptions.RequestException as e:
-            logging.exception(f"Failed to get default branch for {owner}/{repo_name}: {e}")
-            return "main" # Default value
+            manifests_data = response.json()
+            dependencies = {}
 
+            # Iterate through all manifests in the repository
+            for manifest_path, manifest_info in manifests_data.items():
+                if 'resolved' in manifest_info:  # Check if resolved dependencies are available
+                    for dep in manifest_info['resolved']:
+                        package_name = dep.get('package_name')
+                        version = dep.get('version')
+                        if package_name and version:  # Ensure both name and version exist
+                            dependencies[package_name] = version
+            return dependencies
+
+        except requests.exceptions.RequestException as e:
+            logging.exception(f"Failed to get dependency versions for {owner}/{repo_name}: {e}")
+            return {}  # Return an empty dictionary on error
 
 class DependencyScanner:
     """
@@ -227,8 +218,8 @@ class DependencyScanner:
                     self.processed_repos += 1
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
-                    # Get the default branch for the repository *once* per repo
-                    default_branch = self.client.get_default_branch(repo['owner'], repo['name'])
+                    # Get *all* current dependency versions for the repo.  This is a single API call per repo.
+                    current_versions = self.client.get_dependency_versions(repo['owner'], repo['name'])
 
                     for alert in alerts:
                         # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
@@ -239,7 +230,8 @@ class DependencyScanner:
                             #manifest_path = dependency.get("manifest_path", "N/A") # Not needed anymore
 
                             # --- CORRECTED VERSION RETRIEVAL ---
-                            current_version = self.client.get_dependency_version(repo['owner'], repo['name'], package_name, default_branch)
+                            # Get the version from the pre-fetched dictionary
+                            current_version = current_versions.get(package_name, "N/A")
                             # --- END CORRECTED VERSION RETRIEVAL ---
 
                             security_advisory = alert.get("security_advisory", {})
@@ -247,10 +239,10 @@ class DependencyScanner:
                             for vulnerability in security_advisory.get("vulnerabilities", []):
                                 vulnerable_range_str = vulnerability.get("vulnerable_version_range", "N/A")
                                 vulnerable_ranges.append(vulnerable_range_str)
-                                #print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}")
+                                #print(f"DEBUG: Individual vulnerable_range: {vulnerable_range_str}")  # KEEP THIS
 
                             vulnerable_range = ", ".join(vulnerable_ranges)
-                            #print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")
+                            #print(f"DEBUG: Combined vulnerable_range: {vulnerable_range}")  # KEEP THIS
 
                             severity = security_advisory.get("severity", "N/A")
                             security_vulnerability = alert.get("security_vulnerability", {})
@@ -270,11 +262,11 @@ class DependencyScanner:
                             self.total_vulnerabilities += 1
                         except KeyError as e:
                             logging.warning(f"Missing key in alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"KeyError: {e}")
+                            print(f"KeyError: {e}") #KEEP
                             continue
                         except Exception as e:
                             logging.exception(f"Error processing alert data for repo {repo['owner']}/{repo['name']}: {e}. Skipping.")
-                            print(f"Other Exception: {e}")
+                            print(f"Other Exception: {e}") #KEEP
                             continue
                 except Exception as e:
                     logging.exception(f"Error processing repo {repo['owner']}/{repo['name']}: {e}")
