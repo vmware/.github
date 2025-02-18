@@ -13,6 +13,7 @@ import json
 import re
 import base64
 
+
 class Logger:
     _instance = None
 
@@ -41,6 +42,7 @@ class GitHubClient:
         self.logger = Logger()
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
+
 
     def _create_session(self):
         session = requests.Session()
@@ -96,6 +98,7 @@ class GitHubClient:
         except requests.exceptions.RequestException as e:
             logging.exception(f"Token validation failed: {e}")
             raise
+
 
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
@@ -175,14 +178,13 @@ class GitHubClient:
             elif ecosystem.lower() == "pip":
                 return self._parse_requirements_txt(content, package_name)
             elif ecosystem.lower() == "gomod":
-                return self._parse_go_mod(content, package_name)  # Add Go module parsing
-            # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
+                return self._parse_go_mod(content, package_name)
             else:
                 logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
                 return "N/A"
         except Exception as e:
             logging.exception(f"Error in get_dependency_version_from_manifest: {e}")
-            return "N/A"  # Don't crash the entire process.
+            return "N/A"
 
     def _parse_npm_manifest(self, content, package_name):
         """Parses package-lock.json and yarn.lock files."""
@@ -200,12 +202,17 @@ class GitHubClient:
                         return dep_data.get('version', 'N/A')
         except json.JSONDecodeError:
             # If JSON parsing fails, try parsing as yarn.lock
-            for line in content.splitlines():
-                if line.startswith(package_name + "@"):
-                    match = re.search(r'version\s+"([^"]+)"', line)
+             for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):  # Skip empty lines and comments
+                  continue
+                # Check if ANY of the keys on this line contain the package name.
+                if package_name in line:
+                    # Use a more robust regex to extract the version.
+                    match = re.search(r'version[:=]\s*"?([^\s",]+)"?', line)
                     if match:
-                        return match.group(1)
-        return "N/A"
+                        return match.group(1)  # Group 1 contains the version
+        return "N/A" # Package not found
 
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
@@ -217,20 +224,9 @@ class GitHubClient:
             elif line.startswith(package_name):
                parts = line.split()
                if len(parts) > 1:
-                   return parts[1] # Return version
+                   return parts[1]
         return "N/A"
-
-    def _parse_pom_xml(self, content, package_name):
-      try:
-          # Use regex to find the dependency within the <dependencies> section
-          match = re.search(rf'<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
-          if match:
-              return match.group(1)
-          return "N/A"
-      except Exception as e:
-          logging.exception(f"Error parsing pom.xml: {e}")
-          return "N/A"
-
+    
     def _parse_go_mod(self, content, package_name):
         """Parses a go.mod file (simplified)."""
         for line in content.splitlines():
@@ -240,6 +236,31 @@ class GitHubClient:
                 if len(parts) >= 2:
                     return parts[1]  # The version is the second part
         return "N/A"
+
+    def _parse_pom_xml(self, content, package_name):
+      try:
+          # Use regex to find the dependency within the <dependencies> section
+          match = re.search(rf'<artifactId>{package_name}</artifactId>.*?<version>(.*?)</version>', content, re.DOTALL)
+          if match:
+              version_str = match.group(1).strip()
+              # Check if version is a property
+              if version_str.startswith("${") and version_str.endswith("}"):
+                  property_name = version_str[2:-1]
+                  # Extract properties from the POM
+                  properties = {}
+                  properties_match = re.search(r'<properties>(.*?)</properties>', content, re.DOTALL)
+                  if properties_match:
+                      for prop_match in re.findall(r'<([^>]+)>(.*?)</\1>', properties_match.group(1)):
+                          prop_name, prop_value = prop_match
+                          properties[prop_name.strip()] = prop_value.strip()
+                  return properties.get(property_name, "N/A") # Get value from properties
+              else:
+                 return version_str
+          return "N/A" # Version not found
+      except Exception as e:
+          logging.exception(f"Error parsing pom.xml: {e}")
+          return "N/A"
+
 
 
 class DependencyScanner:
@@ -292,7 +313,7 @@ class DependencyScanner:
                     logging.info(f"Processed {repo['owner']}/{repo['name']}: Found {len(alerts)} alerts.")
 
                     for alert in alerts:
-                        #print(json.dumps(alert, indent=2))  # Uncomment for debugging.
+                        # print(json.dumps(alert, indent=2))  # Uncomment for debugging.
                         try:
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
@@ -300,7 +321,7 @@ class DependencyScanner:
                             manifest_path = dependency.get("manifest_path", "N/A")
                             ecosystem = pkg.get("ecosystem", "N/A")
 
-                            # --- Use dependency.version if available, otherwise fallback ---
+                             # --- Use dependency.version if available, otherwise fallback ---
                             current_version = dependency.get("version")
                             if current_version is None:  # If version is NOT in the alert
                                 current_version = self.client.get_dependency_version_from_manifest(
@@ -308,25 +329,21 @@ class DependencyScanner:
                                 )
                             # --- End Use Alert Data ---
 
-
                             security_advisory = alert.get("security_advisory", {})
-                            # --- Use security_vulnerability, not vulnerabilities array ---
                             security_vulnerability = alert.get("security_vulnerability", {})
                             vulnerable_range = security_vulnerability.get("vulnerable_version_range", "N/A")
-                            # --- End Use security_vulnerability ---
-
                             severity = security_advisory.get("severity", "N/A")
+                            alert_url = alert.get("html_url", "N/A")  # Get alert URL
+                            # Create Excel hyperlink formula
+                            severity_link = f'=HYPERLINK("{alert_url}", "{severity}")'
                             first_patched = security_vulnerability.get("first_patched_version", {})
                             update_available = first_patched.get("identifier", "N/A") if first_patched else "N/A"
-
-                            #print(f"DEBUG: Data before append: {repo['owner']}/{repo['name']}, {package_name}, {current_version}, {vulnerable_range}, {severity}, {update_available}")
-
                             all_vulnerabilities.append({
                                 "Repository Name": f"{repo['owner']}/{repo['name']}",
                                 "Package Name": package_name,
                                 "Current Version": current_version,
                                 "Vulnerable Versions": vulnerable_range,
-                                "Severity": severity,
+                                "Severity": severity_link,  # Use the hyperlink formula
                                 "Update Available": update_available
                             })
                             self.total_vulnerabilities += 1
