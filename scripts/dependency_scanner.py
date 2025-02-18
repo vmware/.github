@@ -231,6 +231,10 @@ class DependencyScanner:
 
                     for alert in alerts:
                         # print(alert)  # Uncomment for debugging.
+                        print("----- DEBUG: Raw Alert Data -----")  # Clear indicator
+                        print(json.dumps(alert, indent=2))        # Pretty-print the JSON
+                        print("----------------------------------")
+                        
                         try:  # Robust error handling
                             dependency = alert.get("dependency", {})
                             pkg = dependency.get("package", {})
