@@ -99,7 +99,6 @@ class GitHubClient:
             logging.exception(f"Token validation failed: {e}")
             raise
 
-
     def get_repositories(self, org_name, repo_list=None):
         """Retrieves a list of repositories to scan.  Prioritizes org, then list."""
         repositories = []
@@ -166,8 +165,6 @@ class GitHubClient:
         if manifest_path == "N/A":
             return "N/A"
 
-        logging.info(f"Parsing {ecosystem} manifest at {manifest_path} for package {package_name}.")
-      
         content = self.get_file_content(owner, repo_name, manifest_path)
         if not content:
             return "N/A"
@@ -179,8 +176,8 @@ class GitHubClient:
                 return self._parse_pom_xml(content, package_name)
             elif ecosystem.lower() == "pip":
                 return self._parse_requirements_txt(content, package_name)
-            elif ecosystem.lower() == "gomod":
-                return self._parse_go_mod(content, package_name)
+            elif ecosystem.lower() == "go":  # Corrected ecosystem name
+                return self._parse_go_mod(content, package_name)  # Call the go.mod parser
             # Add more elif blocks for other manifest types (Gemfile.lock, go.mod, etc.)
             else:
                 logging.info(f"Unsupported ecosystem (manifest parsing not implemented): {ecosystem}")
@@ -221,7 +218,6 @@ class GitHubClient:
                                 return match.group(1)  # Group 1 contains the version
         return "N/A" # Package not found
 
-
     def _parse_requirements_txt(self, content, package_name):
         """Parses a requirements.txt file."""
         for line in content.splitlines():
@@ -234,16 +230,39 @@ class GitHubClient:
                if len(parts) > 1:
                    return parts[1]
         return "N/A"
-
+    
     def _parse_go_mod(self, content, package_name):
-        """Parses a go.mod file (simplified)."""
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith(package_name + " "):  # e.g., "github.com/google/uuid v1.3.0"
-                parts = line.split()
-                if len(parts) >= 2:
-                    return parts[1]  # The version is the second part
-        return "N/A"
+      """
+      Parses a go.mod file to find the version of a specific package.
+      Handles direct and indirect dependencies, and quoted module paths.
+      """
+      in_require_block = False
+      for line in content.splitlines():
+          line = line.strip()
+          if line.startswith("require ("):
+              in_require_block = True
+              continue
+          elif line.startswith(")"):
+              in_require_block = False
+              continue
+          if in_require_block:
+              # Handles quoted and unquoted module paths
+              parts = line.split()
+              if len(parts) >= 2:
+                  module_path = parts[0].strip('"')  # Remove quotes if present
+                  if module_path == package_name:
+                      version = parts[1]
+                      # Handle indirect dependencies, marked with "// indirect"
+                      if len(parts) > 2 and parts[2] == "//":
+                          if "indirect" in parts[2:]:
+                            version = f"{version} (indirect)" # Mark as indirect
+                      return version
+          #Handle requires outside the require block.
+          elif line.startswith("require " + package_name):
+              parts = line.split()
+              if len(parts) >= 3: # require + package + version
+                  return parts[2]
+      return "N/A"  # Not found
 
     def _parse_pom_xml(self, content, package_name):
       try:
