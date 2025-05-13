@@ -1,0 +1,44 @@
+name: Reusable CLA Check
+
+on:
+  workflow_call:
+    secrets:
+      GH_TOKEN_CLA_ASSISTANT:
+        description: 'PAT for CLA Assistant Lite to comment, label, etc.'
+        required: true
+      GIST_URL_CLA:
+        description: 'Gist URL for CLA signatures (e.g., https://gist.github.com/username/gistid)'
+        required: true
+      # Optional: custom CLA message settings if needed by cla-assistant-lite
+      # LOCK_MSG: { required: false }
+      # SIGN_MSG: { required: false }
+      # REOPEN_MSG: { required: false }
+
+permissions:
+  pull-requests: write # To add comments, labels
+  issues: write        # To add comments
+  statuses: write      # To update commit status
+
+jobs:
+  cla_check:
+    runs-on: ubuntu-latest
+    if: github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened'
+    steps:
+      - name: CLA Assistant
+        uses: cla-assistant/github-action@v2.3.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_CLA_ASSISTANT }}
+          # cla-assistant-lite uses a GIST URL that should contain CLA.csv
+          # and optionally a `CONTRIBUTOR_LICENSE_AGREEMENT.md`
+        with:
+          path-to-signatures: ${{ secrets.GIST_URL_CLA }}/CLA.csv
+          path-to-document: ${{ secrets.GIST_URL_CLA }} # Link to the CLA text (e.g., in the Gist description or a file)
+          # branch: 'main' # Or your default branch for storing signatures if Gist is a repo
+          allowlist: bot*,dependabot[bot],github-actions[bot] # Users/bots to ignore
+
+          # Optional: Custom messages (see cla-assistant-lite docs)
+          # lock-pullrequest-after:
+          # create-file-commit-message:
+          # revisit-pullrequest-message:
+          # sigRequiredComment:
+          # signedComment:
