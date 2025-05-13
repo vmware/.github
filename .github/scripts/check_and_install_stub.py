@@ -2,7 +2,7 @@ name: Manage CLA Stubs Org-Wide
 
 on:
   schedule:
-    - cron: '0 3 * * *' # Daily at 3 AM UTC
+   # - cron: '0 3 * * *' # Daily at 3 AM UTC
   workflow_dispatch: # Allows manual triggering
 
 permissions: {} # Top-level permissions. Will be defined per-job or rely on PAT.
