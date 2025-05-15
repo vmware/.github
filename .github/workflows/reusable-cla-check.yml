@@ -23,13 +23,14 @@ on:
         description: 'URL or path to the CLA document text.'
         required: false # Made optional, can default
         type: string
-        default: 'https://github.com/${{ github.repository_owner }}/.github/blob/main/.github/CONTRIBUTOR_LICENSE_AGREEMENT.md' # Dynamic default
+        default: 'https://vmware.github.io/cla-docs/GenericCLA.html' # Dynamic default
+        # default: 'https://github.com/${{ github.repository_owner }}/.github/blob/main/.github/CONTRIBUTOR_LICENSE_AGREEMENT.md' # Dynamic default
       # Path to the CSV signature file within THIS .github repository.
       signature_file_path:
         description: 'Path to the CSV signature file within this .github repository.'
         required: false
         type: string
-        default: '.github/signatures/CLA.csv' # Default path
+        default: 'signatures/CLA.csv' # Default path
       # Branch in THIS .github repository where signatures are stored and committed.
       signature_branch:
         description: 'Branch in this .github repository where signatures are stored and committed.'
