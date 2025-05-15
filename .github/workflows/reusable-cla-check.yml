@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: CLA Assistant Lite
         # Use the official cla-assistant/github-action. Pin to a specific version for stability.
-        uses: cla-assistant/github-action@v2.3.1
+        uses: vmware/cla-assistant@v2.6.1
         env:
           # Pass the dedicated PAT for CLA Assistant actions to the environment.
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN_CLA_ASSISTANT }}
