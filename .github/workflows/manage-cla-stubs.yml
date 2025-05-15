@@ -6,9 +6,9 @@
 name: Manage CLA Stubs Org-Wide
 
 on:
-  schedule:
+  # schedule:
     # Run daily at 3 AM UTC. Adjust cron schedule as needed.
-    - cron: '0 3 * * *'
+   #  - cron: '0 3 * * *'
   workflow_dispatch: # Allows manual triggering from the GitHub Actions UI.
     inputs:
       specific_repos:
