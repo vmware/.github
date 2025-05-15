@@ -1,12 +1,12 @@
 # File: .github/.github/workflows/manage-cla-stubs.yml
 # Purpose: Periodically manages CLA trigger stubs across organization repositories.
-# Includes a step to build the licensee Docker image once per workflow run.
+# Builds the licensee Docker image within each processing job.
 
 name: Manage CLA Stubs Org-Wide
 
 on:
   schedule:
-    - cron: '0 3 * * *' # Daily at 3 AM UTC
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       specific_repos:
@@ -18,14 +18,14 @@ on:
         required: false
         default: 'v9.16.1' # Pin to a known stable version of licensee
 
-permissions: {} # Keep top-level permissions minimal; ORG_PAT provides necessary permissions.
+permissions: {}
 
 env:
   EXCLUDE_REPOS_CSV: ${{ vars.EXCLUDE_REPOS || '.github' }}
   INCLUDE_REPOS_CSV: ${{ vars.INCLUDE_REPOS || '' }}
   PERMISSIVE_SPDX_IDS_CSV: ${{ vars.PERMISSIVE_SPDX_IDS || 'MIT,Apache-2.0,BSD-3-Clause,ISC,BSD-2-Clause,CC0-1.0,Unlicense' }}
-  # Define the image tag to be used consistently across jobs
-  LOCAL_LICENSEE_IMAGE_TAG: 'local-org-licensee:latest'
+  # Define the image tag to be used consistently
+  LOCAL_LICENSEE_IMAGE_TAG: 'local-org-licensee:latest' # This tag will be built on each runner
 
 jobs:
   discover_repositories:
@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Get Organization Repositories List
         id: get_repos
-        uses: actions/github-script@v7.0.1 # Pin to specific version
+        uses: actions/github-script@v7.0.1
         env:
           INCLUDE_REPOS_CSV: ${{ env.INCLUDE_REPOS_CSV }}
           EXCLUDE_REPOS_CSV: ${{ env.EXCLUDE_REPOS_CSV }}
@@ -45,7 +45,7 @@ jobs:
         with:
           github-token: ${{ secrets.ORG_PAT }}
           script: |
-            // JavaScript code to list and filter repositories.
+            // ... (JavaScript for discovery - same as before) ...
             const includeReposList = (process.env.INCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
             const excludeReposList = (process.env.EXCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
             const specificReposInput = (process.env.SPECIFIC_REPOS_INPUT || "").split(',').map(r => r.trim()).filter(r => r);
@@ -86,55 +86,37 @@ jobs:
               .addRaw(`Discovered <strong>${finalRepos.length}</strong> repositories to process based on include/exclude rules.`)
               .addSeparator().write();
 
-  build_licensee_image:
-    name: Build Licensee Docker Image
-    runs-on: ubuntu-latest
-    needs: [discover_repositories] # Can run in parallel with discover or after, depending on preference
-    if: needs.discover_repositories.outputs.repository_count > 0 # Only build if there are repos to process
-    outputs:
-      # This output will be used by the process_repositories job.
-      # It's already defined in the 'env' block for the workflow, but setting it as an output
-      # from this job explicitly signals its availability and successful build.
-      image_tag: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
-    steps:
-      - name: Checkout licensee source code
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: licensee/licensee # The official licensee repository
-          path: licensee-src          # Checkout to a subdirectory
-          # Use the version tag from workflow_dispatch input or a default.
-          ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }} 
-          # Using 'v9.16.1' as default, which is licensee's latest stable as of mid-2024.
-          # Check https://github.com/licensee/licensee/tags for latest stable tag.
-
-      - name: Build licensee Docker image
-        run: |
-          echo "Building licensee Docker image from ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }}"
-          docker build ./licensee-src --tag ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
-          echo "Successfully built Docker image: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}"
-        # No need to set job output here explicitly if the env var is used directly by downstream jobs,
-        # but it's good practice if you want to be very explicit about what this job provides.
-        # For that, you'd use:
-        # id: build_step
-        # echo "image_tag=${{ env.LOCAL_LICENSEE_IMAGE_TAG }}" >> $GITHUB_OUTPUT (in the run step)
-        # And then the job output would be: image_tag: ${{ steps.build_step.outputs.image_tag }}
-
   process_repositories:
     name: Process Repository (${{ matrix.repository_full_name }})
-    # This job now depends on 'build_licensee_image' to ensure the image is built before use.
-    needs: [discover_repositories, build_licensee_image]
-    # Only run if repositories were found AND the image build was successful (implied by needs).
+    needs: [discover_repositories] # Does not need a separate build job anymore
     if: needs.discover_repositories.outputs.repository_count > 0
     runs-on: ubuntu-latest
     strategy:
       matrix:
         repository_full_name: ${{ fromJson(needs.discover_repositories.outputs.repositories_json) }}
-      fail-fast: false # Continue processing other repos if one fails.
+      fail-fast: false
     
     steps:
       - name: Checkout .github repo (for our management scripts)
         uses: actions/checkout@v4.1.1
         # This checks out the content of THIS .github repository.
+
+      - name: Checkout licensee source code
+        uses: actions/checkout@v4.1.1
+        with:
+          repository: licensee/licensee # The official licensee repository
+          path: licensee-src          # Checkout to a subdirectory to avoid conflicts
+          # Use the version tag from workflow_dispatch input or a default.
+          ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }} 
+          # Pin to a specific tag of licensee for stability (e.g., 'v9.16.1')
+
+      - name: Build licensee Docker image locally
+        run: |
+          echo "Building licensee Docker image (${{ env.LOCAL_LICENSEE_IMAGE_TAG }}) from ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }}"
+          docker build ./licensee-src --tag ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
+          echo "Successfully built Docker image: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}"
+          # Verify image exists locally
+          docker images ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v5.0.0
@@ -142,7 +124,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python dependencies
-        run: pip install PyGithub==1.59.1 # Pin PyGithub version for stability.
+        run: pip install PyGithub==1.59.1
 
       - name: Check license and manage CLA stub for ${{ matrix.repository_full_name }}
         id: manage_stub_step
@@ -153,23 +135,17 @@ jobs:
           PERMISSIVE_SPDX_IDS: ${{ env.PERMISSIVE_SPDX_IDS_CSV }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           # Pass the locally built image tag to the Python script.
-          # This tag comes from the workflow-level 'env' block, ensuring consistency.
           LICENSEE_DOCKER_IMAGE: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
 
       - name: Record action for ${{ matrix.repository_full_name }} to Job Summary
-        if: always() # Run even if previous steps fail, to capture status.
+        if: always()
         run: |
-          # Extract the status from the Python script's stdout.
           STATUS_OUTPUT=$(echo "${{ steps.manage_stub_step.outputs.stdout }}" | grep REPO_PROCESSED_STATUS=)
-          FINAL_STATUS=${STATUS_OUTPUT#*=} # Get the value after '='.
-          ICON="✅" # Default to success emoji
-          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
-            ICON="❌ Error"
-          elif [[ "${FINAL_STATUS}" == "skipped_"* ]]; then # Check if status starts with "skipped_"
-            ICON="⚪ Skipped"
-          elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then
-            ICON="📝 Action"
-          fi
+          FINAL_STATUS=${STATUS_OUTPUT#*=}
+          ICON="✅"
+          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then ICON="❌ Error";
+          elif [[ "${FINAL_STATUS}" == "skipped_"* ]]; then ICON="⚪ Skipped";
+          elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then ICON="📝 Action"; fi
           
           echo "#### ${{ matrix.repository_full_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${FINAL_STATUS:-'unknown_script_output'}" >> $GITHUB_STEP_SUMMARY
@@ -178,32 +154,24 @@ jobs:
 
   summarize_run:
     name: Final Run Summary
-    if: always() # Run this job even if previous jobs fail.
-    # This job depends on the completion of all matrix jobs in 'process_repositories'.
-    needs: [discover_repositories, build_licensee_image, process_repositories]
+    if: always()
+    needs: [discover_repositories, process_repositories] # Removed build_licensee_image from needs here
     runs-on: ubuntu-latest
     steps:
       - name: Create final summary of the run
         run: |
           echo "### CLA Stub Management Full Run Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Total Repositories Discovered for Processing: **${{ needs.discover_repositories.outputs.repository_count || 0 }}**" >> $GITHUB_STEP_SUMMARY
+          # No separate build job status to report now, as it's part of each matrix job.
+          # You could infer overall build success if all matrix jobs succeeded, but that's indirect.
           
-          # Summarize build job status
-          if [[ "${{ needs.build_licensee_image.result }}" == "success" ]]; then
-            echo "- Licensee Docker Image Build: ✅ Success (Image: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }})" >> $GITHUB_STEP_SUMMARY
-          elif [[ "${{ needs.build_licensee_image.result }}" == "skipped" ]]; then
-            echo "- Licensee Docker Image Build: ⚪ Skipped (likely no repos to process)" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- Licensee Docker Image Build: ❌ Failure" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          # Summarize processing job status
           RESULT_MSG="ℹ️ **Overall Repository Processing Result:** Status - ${{ needs.process_repositories.result }}."
           if [[ "${{ needs.process_repositories.result }}" == "failure" ]]; then
-            RESULT_MSG="⚠️ **Overall Repository Processing Result:** At least one repository failed processing."
+            RESULT_MSG="⚠️ **Overall Repository Processing Result:** At least one repository failed processing. This could be due to image build, license check, or API errors."
           elif [[ "${{ needs.process_repositories.result }}" == "success" ]]; then
             RESULT_MSG="✅ **Overall Repository Processing Result:** All processed repositories completed without error."
           elif [[ "${{ needs.process_repositories.result }}" == "skipped" ]]; then
-            RESULT_MSG="⚪ **Overall Repository Processing Result:** Processing job was skipped (e.g., image build failed or no repos)."
+            RESULT_MSG="⚪ **Overall Repository Processing Result:** Processing job was skipped."
           fi
           echo "$RESULT_MSG Check individual 'Process Repository' job logs and their summaries for details." >> $GITHUB_STEP_SUMMARY
+          
