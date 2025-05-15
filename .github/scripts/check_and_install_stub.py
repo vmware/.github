@@ -39,7 +39,9 @@ name: CLA Check Trigger
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-
+  issue_comment
+    types: [created]
+    
 jobs:
   call_cla_check:
     uses: {ORG_NAME}/.github/.github/workflows/reusable-cla-check.yml@main # Pin to a specific ref
