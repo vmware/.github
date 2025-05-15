@@ -21,7 +21,7 @@ if not ORG_NAME:
 # Default URL to your CLA document stored within the .github repository itself.
 # This will be embedded in the stub workflow.
 # Adjust if your CLA document is hosted elsewhere or has a different name/path.
-DEFAULT_CLA_DOCUMENT_URL_IN_STUB = f"https://github.com/{ORG_NAME}/.github/blob/main/.github/CONTRIBUTOR_LICENSE_AGREEMENT.md"
+DEFAULT_CLA_DOCUMENT_URL_IN_STUB = f"https://{ORG_NAME}.github.io/cla-docs/GenericCLA.html"
 # You could make this configurable via an environment variable passed from manage-cla-stubs.yml:
 # CLA_DOCUMENT_URL_FOR_STUB_ENV = os.environ.get("CLA_DOCUMENT_URL_FOR_STUBS", DEFAULT_CLA_DOCUMENT_URL_IN_STUB)
 
