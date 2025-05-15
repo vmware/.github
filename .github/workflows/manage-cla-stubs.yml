@@ -136,20 +136,48 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           # Pass the locally built image tag to the Python script.
           LICENSEE_DOCKER_IMAGE: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
-
+          
       - name: Record action for ${{ matrix.repository_full_name }} to Job Summary
-        if: always()
+        if: always() # Run even if previous steps fail, to capture status.
         run: |
-          STATUS_OUTPUT=$(echo "${{ steps.manage_stub_step.outputs.stdout }}" | grep REPO_PROCESSED_STATUS=)
-          FINAL_STATUS=${STATUS_OUTPUT#*=}
-          ICON="✅"
-          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then ICON="❌ Error";
-          elif [[ "${FINAL_STATUS}" == "skipped_"* ]]; then ICON="⚪ Skipped";
-          elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then ICON="📝 Action"; fi
+          echo "Debug: manage_stub_step stdout was: [${{ steps.manage_stub_step.outputs.stdout }}]"
+          echo "Debug: manage_stub_step outcome was: [${{ steps.manage_stub_step.outcome }}]"
+
+          # Attempt to parse the status from stdout if available
+          # Initialize FINAL_STATUS to reflect the outcome if stdout parsing fails
+          FINAL_STATUS="status_unknown_due_to_step_failure"
+          if [[ "${{ steps.manage_stub_step.outcome }}" == "success" ]]; then
+            FINAL_STATUS="success_script_did_not_error" # Default if successful but no specific status
+          fi
+
+          # Try to get the more specific status if stdout is available
+          # Use a temporary variable to avoid issues if grep finds nothing
+          PYTHON_STDOUT_CAPTURE="${{ steps.manage_stub_step.outputs.stdout }}"
+          STATUS_LINE=$(echo "${PYTHON_STDOUT_CAPTURE}" | grep REPO_PROCESSED_STATUS= || true) # Prevent grep from failing the line if no match
+
+          if [[ -n "${STATUS_LINE}" ]]; then # If STATUS_LINE is not empty
+            PARSED_STATUS=${STATUS_LINE#*=}
+            if [[ -n "${PARSED_STATUS}" ]]; then # If PARSED_STATUS is not empty after extraction
+              FINAL_STATUS="${PARSED_STATUS}"
+            fi
+          elif [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
+             FINAL_STATUS="script_failed_see_logs" # If script failed and we couldn't parse specific status
+          fi
+
+          ICON="ℹ️ Unknown" # Default icon
+          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
+            ICON="❌ Error"
+          elif [[ "${{ steps.manage_stub_step.outcome }}" == "success" ]]; then
+            # If successful, refine icon based on parsed status
+            if [[ "${FINAL_STATUS}" == "skipped_"* ]]; then ICON="⚪ Skipped";
+            elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then ICON="📝 Action";
+            elif [[ "${FINAL_STATUS}" == "success_script_did_not_error" || "${FINAL_STATUS}" == "skipped_stub_up_to_date" || "${FINAL_STATUS}" == "skipped_permissive_no_stub" ]]; then ICON="✅ Success/NoOp";
+            else ICON="✅ Success (Status: ${FINAL_STATUS})"; fi # Catch other success statuses
+          fi
           
           echo "#### ${{ matrix.repository_full_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: ${FINAL_STATUS:-'unknown_script_output'}" >> $GITHUB_STEP_SUMMARY
-          echo "- Result: ${ICON} (${{ steps.manage_stub_step.outcome }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Parsed Status: ${FINAL_STATUS}" >> $GITHUB_STEP_SUMMARY # Use the determined FINAL_STATUS
+          echo "- Step Outcome: ${ICON} (${{ steps.manage_stub_step.outcome }})" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
 
   summarize_run:
