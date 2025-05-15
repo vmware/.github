@@ -1,0 +1,58 @@
+# File: .github/.github/workflows/reusable-cla-check.yml
+# Purpose: This is the centralized, reusable workflow that performs the actual CLA check.
+# It is called by stub workflows in target repositories.
+
+name: Reusable CLA Check
+
+# Triggered by a 'workflow_call' from another workflow.
+on:
+  workflow_call:
+    # Define secrets that this reusable workflow expects to be passed by the caller.
+    secrets:
+      GH_TOKEN_CLA_ASSISTANT:
+        description: 'Personal Access Token (PAT) for CLA Assistant Lite to comment, label, and update PR statuses. Must have repo scope.'
+        required: true
+      GIST_URL_CLA:
+        description: 'URL of the Gist containing CLA signatures (e.g., https://gist.github.com/username/gistid). The Gist should contain a CLA.csv file.'
+        required: true
+
+# Define the permissions this workflow needs in the context of the CALLER's repository.
+# These permissions are granted to the GITHUB_TOKEN of the job within this reusable workflow.
+# However, cla-assistant-lite typically uses its own PAT (GH_TOKEN_CLA_ASSISTANT).
+permissions:
+  pull-requests: write # To add comments, labels to pull requests.
+  issues: write        # To add comments to issues (if applicable for CLA bot).
+  statuses: write      # To update commit statuses (e.g., CLA check pending/passed).
+
+jobs:
+  cla_check:
+    runs-on: ubuntu-latest
+    # Conditional execution: Only run if the PR event is 'opened', 'synchronize' (new commits pushed), or 'reopened'.
+    # This prevents redundant runs on other PR activities. The caller stub also has this.
+    if: github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened'
+    steps:
+      - name: CLA Assistant Lite
+        # Use the official cla-assistant/github-action. Pin to a specific version for stability.
+        uses: cla-assistant/github-action@v2.3.1
+        env:
+          # Pass the dedicated PAT for CLA Assistant actions to the environment.
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_CLA_ASSISTANT }}
+        with:
+          # Path to the CSV file containing signatures. Assumes 'CLA.csv' at the root of the Gist.
+          path-to-signatures: ${{ secrets.GIST_URL_CLA }}/CLA.csv
+          # Link to the CLA document text itself (e.g., a .md file in the Gist or a link in the Gist description).
+          path-to-document: ${{ secrets.GIST_URL_CLA }}
+          # If your Gist is a versioned repository, specify the branch where CLA.csv is.
+          # branch: 'main'
+          # Comma-separated list of GitHub usernames/bot names to ignore for CLA checks.
+          allowlist: bot*,dependabot[bot],github-actions[bot],renovate[bot]
+
+          # --- Optional cla-assistant-lite configurations ---
+          # Lock PRs from non-members until CLA is signed (true/false).
+          # lock-pullrequest-after: 'true'
+          # Custom message when CLA is required.
+          # sigRequiredComment: 'Thank you for your contribution! To proceed, please sign our Contributor License Agreement.'
+          # Custom message when CLA is signed.
+          # signedComment: 'CLA signed. Thank you!'
+          # Custom commit message if the action creates a file (e.g. when using gist as a repo and it commits to it)
+          # create-file-commit-message: 'feat: Add new signature to CLA.csv for @contributorName'

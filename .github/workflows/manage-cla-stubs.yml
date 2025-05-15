@@ -1,0 +1,201 @@
+# File: .github/.github/workflows/manage-cla-stubs.yml
+# Purpose: This workflow runs periodically (or on demand) to manage CLA trigger stubs
+# across repositories in the organization. It discovers repositories, and for each,
+# calls the check_and_install_stub.py script.
+
+name: Manage CLA Stubs Org-Wide
+
+on:
+  schedule:
+    # Run daily at 3 AM UTC. Adjust cron schedule as needed.
+    - cron: '0 3 * * *'
+  workflow_dispatch: # Allows manual triggering from the GitHub Actions UI.
+    inputs:
+      specific_repos:
+        description: 'Comma-separated list of specific repos to process (e.g., owner/repo1,owner/repo2). Overrides INCLUDE/EXCLUDE logic if provided.'
+        required: false
+        default: '' # Default to empty, meaning normal include/exclude logic applies.
+
+# Top-level permissions are kept empty or minimal.
+# The ORG_PAT secret will provide the necessary permissions for cross-repository operations.
+permissions: {}
+
+# Environment variables available to all jobs in this workflow.
+# These should be configured as Organization Variables in GitHub settings.
+env:
+  # Repositories to exclude from processing (comma-separated).
+  # The .github repo itself should usually be excluded.
+  EXCLUDE_REPOS_CSV: ${{ vars.EXCLUDE_REPOS || '.github,some-other-excluded-repo' }}
+  # Repositories to explicitly include. If empty, all non-excluded repos are considered.
+  INCLUDE_REPOS_CSV: ${{ vars.INCLUDE_REPOS || '' }}
+  # Comma-separated list of SPDX license identifiers considered permissive.
+  PERMISSIVE_SPDX_IDS_CSV: ${{ vars.PERMISSIVE_SPDX_IDS || 'MIT,Apache-2.0,BSD-3-Clause,ISC,BSD-2-Clause,CC0-1.0,Unlicense' }}
+
+jobs:
+  discover_repositories:
+    name: Discover Repositories
+    runs-on: ubuntu-latest
+    outputs:
+      # Output a JSON string array of repository full names to be processed.
+      repositories_json: ${{ steps.get_repos.outputs.repo_list_json }}
+      # Output the count of repositories to be processed.
+      repository_count: ${{ steps.get_repos.outputs.repo_count }}
+    steps:
+      - name: Get Organization Repositories List
+        id: get_repos
+        # Use actions/github-script to interact with the GitHub API using JavaScript.
+        # Pin to a specific version for stability (e.g., @v7.0.1).
+        uses: actions/github-script@v7
+        env:
+          # Pass environment variables (from workflow 'env' block) to the script.
+          INCLUDE_REPOS_CSV: ${{ env.INCLUDE_REPOS_CSV }}
+          EXCLUDE_REPOS_CSV: ${{ env.EXCLUDE_REPOS_CSV }}
+          SPECIFIC_REPOS_INPUT: ${{ github.event.inputs.specific_repos }} # From manual dispatch input
+        with:
+          # Use the ORG_PAT secret which has permissions to list organization repositories
+          # and read their content.
+          github-token: ${{ secrets.ORG_PAT }}
+          script: |
+            // JavaScript code to list and filter repositories.
+            const includeReposList = (process.env.INCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
+            const excludeReposList = (process.env.EXCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
+            const specificReposInput = (process.env.SPECIFIC_REPOS_INPUT || "").split(',').map(r => r.trim()).filter(r => r);
+            let reposToProcess = [];
+
+            // If specific repos are provided via manual dispatch, use them directly.
+            if (specificReposInput.length > 0) {
+              console.log("Processing only specifically provided repositories (from manual input):", specificReposInput);
+              reposToProcess = specificReposInput.map(repoName => {
+                // Ensure full name format (owner/repo).
+                if (repoName.includes('/')) return repoName;
+                return `${context.repo.owner}/${repoName}`; // Assumes repo is in the current org if owner not specified.
+              });
+            } else if (includeReposList.length > 0) { // Else, if an include list is defined, use it.
+              console.log("Processing only explicitly included repositories (from VARS_INCLUDE_REPOS):", includeReposList);
+              reposToProcess = includeReposList.map(repoName => `${context.repo.owner}/${repoName}`);
+            } else { // Otherwise, fetch all non-archived repositories in the organization.
+              console.log("Fetching all non-archived repositories for organization:", context.repo.owner);
+              for await (const response of github.paginate.iterator(github.rest.repos.listForOrg, {
+                org: context.repo.owner,
+                type: 'all', // Consider 'public', 'private', 'internal' as needed.
+                per_page: 100
+              })) {
+                for (const repo of response.data) {
+                  if (!repo.archived) { // Skip archived repositories.
+                     reposToProcess.push(repo.full_name);
+                  }
+                }
+              }
+              console.log(`Found ${reposToProcess.length} non-archived repositories in the organization.`);
+            }
+            
+            // Final filtering: remove any repositories that are in the exclude list.
+            // This ensures exclusion takes precedence even if a repo was in an include list.
+            const finalRepos = reposToProcess.filter(fullName => {
+                const repoName = fullName.split('/')[1]; // Get just the repo name part.
+                return !excludeReposList.includes(repoName);
+            });
+
+            console.log(`Final list of ${finalRepos.length} repositories to process:`, finalRepos);
+            // Set outputs for use in subsequent jobs (e.g., matrix strategy).
+            core.setOutput('repo_list_json', JSON.stringify(finalRepos));
+            core.setOutput('repo_count', finalRepos.length);
+            
+            // Add to Job Summary for visibility in the GitHub Actions UI.
+            await core.summary
+              .addHeading('Repository Discovery Phase')
+              .addRaw(`Discovered <strong>${finalRepos.length}</strong> repositories to process based on include/exclude rules.`)
+              .addSeparator()
+              .write();
+
+  process_repositories:
+    name: Process Repository (${{ matrix.repository_full_name }})
+    needs: discover_repositories # This job depends on the output of 'discover_repositories'.
+    # Only run this job if there are repositories to process.
+    if: needs.discover_repositories.outputs.repository_count > 0
+    runs-on: ubuntu-latest
+    strategy:
+      # Create a matrix of jobs, one for each repository to process.
+      matrix:
+        repository_full_name: ${{ fromJson(needs.discover_repositories.outputs.repositories_json) }}
+      # fail-fast: false ensures that if one matrix job fails, others will continue to run.
+      fail-fast: false
+    
+    steps:
+      - name: Checkout .github repo (for scripts)
+        # Checks out the content of THIS .github repository, so the Python script is available.
+        uses: actions/checkout@v4.1.1 # Pin to a specific version.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.0.0 # Pin to a specific version.
+        with:
+          python-version: '3.10' # Specify Python version.
+
+      - name: Install Python dependencies
+        run: pip install PyGithub==1.59.1 # Pin PyGithub version for stability.
+
+      - name: Check license and manage CLA stub for ${{ matrix.repository_full_name }}
+        id: manage_stub_step # Give the step an ID to reference its outputs.
+        # Execute the Python script.
+        run: python .github/scripts/check_and_install_stub.py
+        env:
+          # Pass necessary environment variables to the Python script.
+          TARGET_REPO_FULL_NAME: ${{ matrix.repository_full_name }}
+          ORG_PAT: ${{ secrets.ORG_PAT }} # The powerful PAT for cross-repo operations.
+          PERMISSIVE_SPDX_IDS: ${{ env.PERMISSIVE_SPDX_IDS_CSV }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }} # Pass org name to script.
+
+      - name: Record action for ${{ matrix.repository_full_name }} to Job Summary
+        # This step runs 'always()' to ensure it executes even if 'manage_stub_step' fails,
+        # allowing for status recording.
+        if: always()
+        run: |
+          # Extract the status from the Python script's stdout.
+          # The script prints "REPO_PROCESSED_STATUS=some_status_code".
+          STATUS_OUTPUT=$(echo "${{ steps.manage_stub_step.outputs.stdout }}" | grep REPO_PROCESSED_STATUS=)
+          FINAL_STATUS=${STATUS_OUTPUT#*=} # Get the value after '='. Default if not found.
+
+          # Determine success/failure emoji based on step outcome.
+          ICON="✅" # Default to success
+          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
+            ICON="❌ Error"
+          elif [[ "${FINAL_STATUS}" == "skipped_"* ]]; then
+            ICON="⚪ Skipped"
+          elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then
+            ICON="📝 Action"
+          fi
+          
+          # Append to the GitHub Job Summary.
+          echo "#### ${{ matrix.repository_full_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${FINAL_STATUS:-'unknown_script_output'}" >> $GITHUB_STEP_SUMMARY
+          echo "- Result: ${ICON} (${{ steps.manage_stub_step.outcome }})" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+
+  summarize_run:
+    name: Final Run Summary
+    # This job runs 'always()' to ensure a summary is generated even if other jobs fail.
+    if: always()
+    needs: [discover_repositories, process_repositories] # Depends on both previous jobs.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create final summary of the run
+        run: |
+          echo "### CLA Stub Management Full Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Repositories Discovered for Processing: **${{ needs.discover_repositories.outputs.repository_count || 0 }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Report overall status of the matrix job.
+          if [[ "${{ needs.process_repositories.result }}" == "failure" ]]; then
+            echo "⚠️ **Overall Result:** At least one repository failed processing. Check individual 'Process Repository' job logs for details." >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.process_repositories.result }}" == "success" ]]; then
+            echo "✅ **Overall Result:** All processed repositories completed without error (check logs for specific actions taken)." >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.process_repositories.result }}" == "skipped" ]]; then
+            echo "⚪ **Overall Result:** Processing job was skipped (e.g., no repositories found)." >> $GITHUB_STEP_SUMMARY
+          else
+             echo "ℹ️ **Overall Result:** Processing status - ${{ needs.process_repositories.result }}." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "For detailed outcomes per repository, please inspect the logs of the 'Process Repository (repository_name)' jobs." >> $GITHUB_STEP_SUMMARY
+          # Note: A more advanced summary would involve collecting artifacts from each matrix job
+          # and parsing them here to list individual successes/failures.
+          # The current approach relies on users checking the matrix job summaries/logs.
