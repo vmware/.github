@@ -5,6 +5,11 @@
 name: Reusable CLA Check (Repo Signatures)
 
 on:
+  issue_comment:  # this was added for these two cases
+    types: [created]
+  pull_request_target:
+    types: [opened,closed,synchronize]
+    
   workflow_call:
     secrets:
       # This PAT is used by cla-assistant/github-action for:
@@ -67,7 +72,7 @@ jobs:
 
       - name: CLA Assistant Lite (Signatures in Repo)
         # Use the official cla-assistant/github-action. Pin to a specific version.
-        uses: cla-assistant/github-action@v2.3.1
+        uses: contributor-assistant/github-action@v2.6.1
         env:
           # Provide the dedicated PAT. This PAT needs permissions for:
           # 1. PR interactions (comments, labels, statuses) on the *target repository* (where the PR was opened).
