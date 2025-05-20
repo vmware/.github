@@ -74,6 +74,9 @@ jobs:
           # 1. PR interactions (comments, labels, statuses) on the *target repository* (where the PR was opened).
           # 2. Contents Read & Write permissions on *this .github repository* to read/commit CLA.csv.
           GITHUB_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+          # PERSONAL_ACCESS_TOKEN is REQUIRED for writing signatures to a remote repository.
+          # We can use the same PAT if it has the necessary permissions for the .github repo.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}          
         with:
           # --- Configuration for Centralized Signatures ---
           # Organization where the .github repository (hosting signatures) resides.
