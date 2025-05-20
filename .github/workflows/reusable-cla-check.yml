@@ -31,7 +31,7 @@ on:
         description: 'Path to the CSV signature file within this .github repository.'
         required: false
         type: string
-        default: '.github/signatures/CLA.csv' # Default path
+        default: 'signatures/CLA.json' # Default path
       # Branch in THIS .github repository where signatures are stored and committed.
       signature_branch:
         description: 'Branch in this .github repository where signatures are stored and committed.'
@@ -75,6 +75,12 @@ jobs:
           # 2. Contents Read & Write permissions on *this .github repository* to read/commit CLA.csv.
           GITHUB_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
         with:
+          # --- Configuration for Centralized Signatures ---
+          # Organization where the .github repository (hosting signatures) resides.
+          remote-organization-name: ${{ github.repository_owner }} # e.g., 'vmware'
+          # Name of the repository hosting the signatures (i.e., '.github').
+          remote-repository-name: '.github' # The name of your .github repository
+       
           # Path to the signature CSV file within the checked-out .github repository.
           path-to-signatures: ${{ inputs.signature_file_path }}
           # Path or URL to the CLA document text.
