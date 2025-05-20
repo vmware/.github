@@ -44,12 +44,12 @@ on:
         default: 'main' # Default branch (e.g., main or your .github repo's default)
 
 # Permissions this reusable workflow's GITHUB_TOKEN needs in the context of the CALLER's repository (target repo).
-# cla-assistant/github-action primarily uses its own GH_TOKEN_CLA_ASSISTANT for its operations.
+# cla-assistant/github-action primarily uses its own CONTRIBUTOR_ASSISTANT_PAT for its operations.
 permissions:
   pull-requests: write # For commenting/labeling on the target PR.
   issues: write        # For commenting on issues on the target PR.
   statuses: write      # For setting commit statuses on the target PR.
-  # Contents: write on THIS .github repo is handled by the GH_TOKEN_CLA_ASSISTANT PAT,
+  # Contents: write on THIS .github repo is handled by the CONTRIBUTOR_ASSISTANT_PAT PAT,
   # not this workflow's GITHUB_TOKEN.
 
 jobs:
@@ -77,7 +77,7 @@ jobs:
           # Provide the dedicated PAT. This PAT needs permissions for:
           # 1. PR interactions (comments, labels, statuses) on the *target repository* (where the PR was opened).
           # 2. Contents Read & Write permissions on *this .github repository* to read/commit CLA.csv.
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_CLA_ASSISTANT }}
+          GITHUB_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
         with:
           # Path to the signature CSV file within the checked-out .github repository.
           path-to-signatures: ${{ inputs.signature_file_path }}
