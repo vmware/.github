@@ -18,7 +18,7 @@ on:
       # It requires:
       # - Pull requests: R/W, Issues: R/W, Commit statuses: R/W (for all target repos).
       # - Contents: R/W (for THIS .github repository to manage CLA.csv).
-      GH_TOKEN_CLA_ASSISTANT:
+      CONTRIBUTOR_ASSISTANT_PAT:
         description: 'PAT for CLA Assistant Lite (PR interaction on target repos AND signature commits to this .github repo).'
         required: true
     inputs:
