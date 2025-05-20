@@ -31,7 +31,7 @@ on:
         description: 'Path to the CSV signature file within this .github repository.'
         required: false
         type: string
-        default: 'signatures/CLA.csv' # Default path
+        default: '.github/signatures/CLA.csv' # Default path
       # Branch in THIS .github repository where signatures are stored and committed.
       signature_branch:
         description: 'Branch in this .github repository where signatures are stored and committed.'
