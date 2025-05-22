@@ -9,13 +9,13 @@ from github import Github, GithubException, RateLimitExceededException, UnknownO
 
 MAX_RETRIES_CLONE = 3
 RETRY_DELAY_SECONDS = 10
+LICENSEE_CONFIDENCE_THRESHOLD = "90" # Lowered confidence threshold
 
 def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=None):
     """
     Runs a shell command, captures its output, and handles errors robustly.
     Returns a tuple: (success, stdout, stderr)
     """
-    # print(f"DEBUG: Executing: {' '.join(command_args)} {'in ' + cwd if cwd else ''}") # Very verbose
     try:
         process = subprocess.Popen(
             command_args,
@@ -24,14 +24,13 @@ def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=os.environ.copy() # Pass current environment
+            env=os.environ.copy()
         )
         stdout, stderr = process.communicate(input=an_input)
         
         if check_return_code and process.returncode != 0:
             print(f"Command failed with exit code {process.returncode}: {' '.join(command_args)}")
             print(f"Stderr: {stderr.strip()}")
-            # print(f"Stdout: {stdout.strip()}") # Often not useful on error
             return False, stdout.strip(), stderr.strip()
         return True, stdout.strip(), stderr.strip()
 
@@ -42,13 +41,25 @@ def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=
         print(f"An unexpected error occurred while running command {' '.join(command_args)}: {e}")
         return False, "", str(e)
 
-# In .github/scripts/scan_org_licenses_licensee.py
-# ... (imports and other functions remain the same) ...
+def extract_license_from_entry(license_entry_obj):
+    """Helper to extract SPDX ID or name from a license object/dictionary."""
+    if not isinstance(license_entry_obj, dict):
+        return None
+    
+    spdx_id = license_entry_obj.get("spdx_id")
+    if spdx_id and spdx_id != "NOASSERTION":
+        return spdx_id
+    
+    name = license_entry_obj.get("name")
+    if name:
+        return name
+    return None
+
 
 def detect_license_with_licensee_cli(repo_dir_path):
     """Runs licensee detect in the given directory and parses the output."""
-    command = ["licensee", "detect", "--json", "."]
-    # print(f"Detecting license in: {repo_dir_path}") # Debug
+    command = ["licensee", "detect", "--json", ".", f"--confidence={LICENSEE_CONFIDENCE_THRESHOLD}"]
+    # print(f"Detecting license in: {repo_dir_path} with command: {' '.join(command)}")
     success, stdout_raw, stderr_raw = run_command_robust(command, cwd=repo_dir_path, check_return_code=False)
 
     if not stdout_raw and not success:
@@ -59,88 +70,81 @@ def detect_license_with_licensee_cli(repo_dir_path):
     if not json_output_str or json_output_str == "null":
         if "No license found" in stderr_raw.lower():
              return "NONE_FOUND_BY_LICENSEE"
-        print(f"Licensee produced empty or null JSON output for {repo_dir_path}. Stderr: {stderr_raw}")
+        print(f"Licensee produced empty or null JSON output for {repo_dir_path} with confidence {LICENSEE_CONFIDENCE_THRESHOLD}. Stderr: {stderr_raw}")
         return "LICENSEE_EMPTY_OUTPUT"
 
     try:
         license_data = json.loads(json_output_str)
-        if not license_data:
+        if not license_data: # Handles empty JSON object {}
             return "NONE_FOUND_BY_LICENSEE"
 
-        # Attempt 1: Prioritize "matched_license" if it's valid and has an SPDX ID or name
+        # print(f"DEBUG: Full licensee JSON for {repo_dir_path} (Confidence: {LICENSEE_CONFIDENCE_THRESHOLD}): {json_output_str}")
+
+        # Attempt 1: Top-level "license" key (if present and is an object/dict)
+        # This would mirror the summary `License:` field in non-JSON output.
+        top_level_license_obj = license_data.get("license") # Note: licensee might not have a single top-level "license" object.
+                                                            # More commonly, it uses "matched_license" or the "licenses" array.
+        if isinstance(top_level_license_obj, dict):
+            license_id = extract_license_from_entry(top_level_license_obj)
+            if license_id:
+                # print(f"Found via top-level 'license' object: {license_id} for {repo_dir_path}")
+                return license_id
+        elif isinstance(top_level_license_obj, str): # Sometimes it might be just a string for the top-level license
+            # print(f"Found via top-level 'license' string: {top_level_license_obj} for {repo_dir_path}")
+            return top_level_license_obj
+
+
+        # Attempt 2: "matched_license" (this is what licensee often uses for the primary match)
         matched_license_obj = license_data.get("matched_license")
-        if matched_license_obj and isinstance(matched_license_obj, dict):
-            spdx_id = matched_license_obj.get("spdx_id")
-            name = matched_license_obj.get("name")
-            if spdx_id and spdx_id != "NOASSERTION":
-                # print(f"Found via 'matched_license' (SPDX): {spdx_id} for {repo_dir_path}")
-                return spdx_id
-            if name:
-                # print(f"Found via 'matched_license' (Name): {name} for {repo_dir_path}")
-                return name
+        if isinstance(matched_license_obj, dict):
+            license_id = extract_license_from_entry(matched_license_obj)
+            if license_id:
+                # print(f"Found via 'matched_license' object: {license_id} for {repo_dir_path}")
+                return license_id
         
-        # Attempt 2: If "matched_license" wasn't conclusive, check the top-level "licenses" array.
+        # Attempt 3: Iterate through the "licenses" array (list of all potential licenses)
         licenses_array = license_data.get("licenses")
         if isinstance(licenses_array, list) and licenses_array:
-            # print(f"DEBUG: 'matched_license' inconclusive for {repo_dir_path}. Examining 'licenses' array (length {len(licenses_array)}).")
-            # print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
-
-            # Sort licenses by confidence (descending), then by whether it's featured (true first)
-            # Licensee might not always provide 'confidence' as a number, handle gracefully
             def get_confidence(lic_entry):
                 conf = lic_entry.get("confidence")
-                try:
-                    return float(conf) if conf is not None else 0.0
-                except (ValueError, TypeError):
-                    return 0.0 # Treat non-numeric confidence as low
+                try: return float(conf) if conf is not None else 0.0
+                except (ValueError, TypeError): return 0.0
 
-            # Prioritize featured, then by confidence
             sorted_licenses = sorted(
                 licenses_array,
-                key=lambda lic: (lic.get("featured") is True, get_confidence(lic)),
-                reverse=True # True for featured comes first, higher confidence comes first
+                key=lambda lic: (isinstance(lic,dict) and lic.get("featured") is True, get_confidence(lic)),
+                reverse=True
             )
             
             if sorted_licenses:
-                best_license_entry = sorted_licenses[0] # Take the top one after sorting
-                # print(f"DEBUG: Best from 'licenses' array (after sort): {best_license_entry}")
-                spdx_id = best_license_entry.get("spdx_id")
-                name = best_license_entry.get("name")
-                if spdx_id and spdx_id != "NOASSERTION":
-                    # print(f"Found via 'licenses' array (SPDX - best): {spdx_id} for {repo_dir_path}")
-                    return spdx_id
-                if name:
-                    # print(f"Found via 'licenses' array (Name - best): {name} for {repo_dir_path}")
-                    return name
+                best_license_entry = sorted_licenses[0]
+                license_id = extract_license_from_entry(best_license_entry)
+                if license_id:
+                    # print(f"Found via 'licenses' array (best after sort): {license_id} for {repo_dir_path}")
+                    return license_id
             
-            # If we got here, the licenses array was present but couldn't extract a good ID
-            print(f"DEBUG: 'licenses' array was present for {repo_dir_path} but no usable SPDX/Name found in chosen entry (or array was empty after filtering).")
-            print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
-            return "UNKNOWN_LICENSEE_ARRAY_CONTENT"
+            # print(f"DEBUG: 'licenses' array was present for {repo_dir_path} but no usable ID found in chosen entry.")
 
-        # Attempt 3: Check "matched_files" as seen in the example (less common for top-level license)
-        # This is more for when licensee identifies specific files that match known licenses.
+        # Attempt 4: Iterate through "matched_files" array.
+        # Each file can have its own license determination.
         matched_files_array = license_data.get("matched_files")
         if isinstance(matched_files_array, list) and matched_files_array:
-            # print(f"DEBUG: No clear license from 'matched_license' or 'licenses'. Checking 'matched_files' for {repo_dir_path}.")
-            # print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
-            # Typically, if there are matched files, the first one is the most prominent.
-            # This assumes a structure like the example: matched_files[0].license.spdx_id
-            first_matched_file = matched_files_array[0]
-            if isinstance(first_matched_file, dict):
-                license_in_file = first_matched_file.get("license")
-                if isinstance(license_in_file, dict):
-                    spdx_id = license_in_file.get("spdx_id")
-                    name = license_in_file.get("name")
-                    if spdx_id and spdx_id != "NOASSERTION":
-                        # print(f"Found via 'matched_files[0].license' (SPDX): {spdx_id} for {repo_dir_path}")
-                        return spdx_id
-                    if name:
-                        # print(f"Found via 'matched_files[0].license' (Name): {name} for {repo_dir_path}")
-                        return name
+            # Look for the license with the highest confidence among all matched files
+            # Or, more simply, the first one that clearly states a license.
+            # This can get complex if multiple files have different licenses.
+            # For now, let's take the first one that has a determinable license.
+            for file_match_entry in matched_files_array:
+                if isinstance(file_match_entry, dict):
+                    license_in_file_obj = file_match_entry.get("license")
+                    license_id = extract_license_from_entry(license_in_file_obj)
+                    if license_id:
+                        # print(f"Found via 'matched_files[x].license': {license_id} from file {file_match_entry.get('filename')} for {repo_dir_path}")
+                        return license_id # Return the first one found this way
+            # print(f"DEBUG: 'matched_files' array was present for {repo_dir_path} but no usable ID found within its entries.")
+
 
         # If none of the above parsing strategies yielded a result
-        print(f"DEBUG: No conclusive license found after checking 'matched_license', 'licenses', and 'matched_files' for {repo_dir_path}.")
+        print(f"DEBUG: No conclusive license found after all parsing strategies for {repo_dir_path} (Confidence: {LICENSEE_CONFIDENCE_THRESHOLD}).")
         print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
         return "NONE_FOUND_BY_LICENSEE"
 
@@ -151,8 +155,10 @@ def detect_license_with_licensee_cli(repo_dir_path):
         print(f"Unexpected error parsing licensee output for {repo_dir_path}: {e}. JSON was: {json_output_str}")
         return "LICENSEE_PARSE_ERROR"
 
-# The main() function and other parts of the script remain unchanged from the previous "complete script" version.
-# You only need to replace the detect_license_with_licensee_cli function.
+# --- main() function remains IDENTICAL to the previous "complete script" version ---
+# Make sure to copy the main() function from the previous "complete script"
+# provided in the response before this one.
+# For brevity, I am not repeating it here.
 
 def main():
     organization_name = os.environ.get("ORGANIZATION_TO_SCAN")
@@ -166,14 +172,12 @@ def main():
         print("Error: GH_TOKEN_FOR_SCAN environment variable is not set. Token is needed for API and git operations.")
         sys.exit(1)
 
-    print(f"Python script starting scan for organization: {organization_name} using licensee CLI")
+    print(f"Python script starting scan for organization: {organization_name} using licensee CLI with confidence >= {LICENSEE_CONFIDENCE_THRESHOLD}%")
     print(f"Output file will be: {output_filename}")
 
     g = None 
     try:
         g = Github(github_token)
-        print("PyGithub object initialized.")
-        
         try:
             user = g.get_user()
             print(f"Authenticated to GitHub API as: {user.login}")
@@ -226,22 +230,19 @@ def main():
         print("Starting to iterate through public repositories...")
         
         for repo in repos_paginator:
-            repo_count += 1 # Total repos encountered from paginator
+            repo_count += 1
             print("-----------------------------------------------------")
             print(f"Processing repository: {repo.full_name} (Discovered: {repo_count})")
             
-            # Skip archived repositories if desired (can save a lot of time/resources)
             if repo.archived:
                 print(f"Skipping archived repository: {repo.full_name}")
                 all_licenses_info.append({"repository_name": repo.name, "license": "ARCHIVED_REPO_SKIPPED"})
                 continue
 
-            # Skip empty repositories if desired
-            if repo.size == 0: # Size in KB; 0 often means empty or nearly empty
+            if repo.size == 0:
                  print(f"Skipping potentially empty repository (size 0 KB): {repo.full_name}")
                  all_licenses_info.append({"repository_name": repo.name, "license": "EMPTY_REPO_SKIPPED"})
                  continue
-
 
             current_license_info = {"repository_name": repo.name, "license": "ERROR_PROCESSING_REPO"}
             temp_clone_dir = tempfile.mkdtemp(prefix=f"repo_licensee_{repo.name.replace('/', '_')}_")
@@ -250,7 +251,7 @@ def main():
             for attempt in range(1, MAX_RETRIES_CLONE + 1):
                 clone_command = ["git", "clone", "--depth", "1", "--quiet", repo.clone_url, temp_clone_dir]
                 
-                if attempt > 1: # Cleanup before retry
+                if attempt > 1:
                     for item_name in os.listdir(temp_clone_dir):
                         item_path = os.path.join(temp_clone_dir, item_name)
                         try:
@@ -261,13 +262,13 @@ def main():
                         except Exception as e_rm:
                             print(f"Warning: Failed to remove {item_path} for retry: {e_rm}")
 
-                success, stdout, stderr = run_command_robust(clone_command, check_return_code=True)
+                success, stdout_clone, stderr_clone = run_command_robust(clone_command, check_return_code=True)
                 
                 if success:
                     cloned_successfully = True
                     break
                 else:
-                    print(f"Clone failed for {repo.full_name} (attempt {attempt}). Stderr: {stderr}")
+                    print(f"Clone failed for {repo.full_name} (attempt {attempt}). Stderr: {stderr_clone}")
                     if attempt < MAX_RETRIES_CLONE:
                         time.sleep(RETRY_DELAY_SECONDS)
                     else:
@@ -280,16 +281,12 @@ def main():
                 print(f"License for {repo.name}: {license_id}")
             
             all_licenses_info.append(current_license_info)
-            processed_repo_count +=1 # Repos we actually attempted to process (not just discovered)
+            processed_repo_count +=1
             
             try:
                 shutil.rmtree(temp_clone_dir)
             except Exception as e_clean:
                 print(f"Error cleaning up temp directory {temp_clone_dir}: {e_clean}")
-            
-            # Optional: brief pause to be nice to API during repo listing, though PyGithub handles pagination waits
-            # if repo_count % 50 == 0: time.sleep(1)
-
 
     except UnknownObjectException:
         print(f"Error: Organization '{organization_name}' not found or not accessible via API.")
@@ -304,7 +301,6 @@ def main():
             json.dump(all_licenses_info, f_out, indent=2)
         print(f"Output file '{output_filename}' written with {len(all_licenses_info)} entries (discovered {repo_count} repos, attempted to process {processed_repo_count}).")
 
-
     print("-----------------------------------------------------")
     print(f"Python + Licensee CLI: Public license scan finished. Report: {output_filename}")
     if repo_count == 0:
@@ -312,6 +308,6 @@ def main():
     elif processed_repo_count == 0 and repo_count > 0:
         print(f"Discovered {repo_count} repositories, but none were processed (e.g., all archived/empty or errors before processing).")
 
-
 if __name__ == "__main__":
     main()
+    
