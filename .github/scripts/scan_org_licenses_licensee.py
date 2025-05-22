@@ -9,7 +9,7 @@ from github import Github, GithubException, RateLimitExceededException, UnknownO
 
 MAX_RETRIES_CLONE = 3
 RETRY_DELAY_SECONDS = 10
-LICENSEE_CONFIDENCE_THRESHOLD = "75" # Lowered confidence threshold
+LICENSEE_CONFIDENCE_THRESHOLD = "70" # Lowered confidence threshold
 
 def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=None):
     """
