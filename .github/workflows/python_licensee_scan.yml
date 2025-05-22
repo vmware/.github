@@ -1,0 +1,138 @@
+name: Python + Licensee CLI Org Public License Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      organization:
+        description: 'GitHub organization name (e.g., "my-org")'
+        required: true
+        type: string
+      github_token:
+        description: 'Optional GitHub PAT. If empty for manual run, secrets.GITHUB_TOKEN will be used.'
+        required: false
+        type: string
+      output_filename:
+        description: 'Name of the output JSON file'
+        required: false
+        default: 'organization_public_licenses_licensee.json'
+        type: string
+  schedule:
+    - cron: '0 2 * * 1' # Example: Run every Monday at 2 AM UTC
+
+jobs:
+  scan_licenses_with_licensee_cli:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # For checkout and GITHUB_TOKEN to read public repo data & clone
+
+    steps:
+      - name: Checkout repository (to get the Python script)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' 
+
+      - name: Install Python dependencies
+        run: pip install PyGithub
+
+      - name: Set up Ruby and Bundler
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1' 
+
+      - name: Install licensee CLI
+        run: gem install licensee
+
+      - name: Install/Ensure GitHub CLI (for auth setup)
+        run: |
+          if ! type -p gh &>/dev/null; then
+            echo "GitHub CLI not found, installing..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq curl
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+            && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+            && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+            && sudo apt-get update -qq \
+            && sudo apt-get install -y -qq gh
+          else
+            echo "GitHub CLI already installed."
+          fi
+          gh --version
+
+      - name: Prepare environment variables for Python script
+        id: prep_env
+        run: |
+          _ORG_SOURCE=""
+          _TOKEN_SOURCE=""
+          _OUTPUT_FILENAME_VAL=""
+
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            if [ -z "${{ secrets.ORG_NAME_FOR_SCAN }}" ]; then
+              echo "Error: ORG_NAME_FOR_SCAN secret is not set for scheduled run."
+              exit 1
+            fi
+            echo "ORGANIZATION_TO_SCAN=${{ secrets.ORG_NAME_FOR_SCAN }}" >> $GITHUB_ENV
+            _ORG_SOURCE="secrets.ORG_NAME_FOR_SCAN"
+            
+            echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+            _TOKEN_SOURCE="secrets.GITHUB_TOKEN (scheduled)"
+            
+            _OUTPUT_FILENAME_VAL="organization_public_licenses_licensee_scheduled.json"
+          else # workflow_dispatch
+            if [ -z "${{ github.event.inputs.organization }}" ]; then
+              echo "Error: 'organization' input is not set for manual run."
+              exit 1
+            fi
+            echo "ORGANIZATION_TO_SCAN=${{ github.event.inputs.organization }}" >> $GITHUB_ENV
+            _ORG_SOURCE="inputs.organization"
+
+            if [ -n "${{ github.event.inputs.github_token }}" ]; then
+              echo "GH_TOKEN_FOR_SCAN=${{ github.event.inputs.github_token }}" >> $GITHUB_ENV
+              _TOKEN_SOURCE="inputs.github_token (manual)"
+            else
+              echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+              _TOKEN_SOURCE="secrets.GITHUB_TOKEN (manual fallback)"
+            fi
+            
+            _OUTPUT_FILENAME_VAL="${{ github.event.inputs.output_filename }}"
+            if [ -z "$_OUTPUT_FILENAME_VAL" ]; then # Use default if input is empty
+                _OUTPUT_FILENAME_VAL="organization_public_licenses_licensee.json" 
+            fi
+          fi
+          echo "OUTPUT_FILENAME_TO_USE=$_OUTPUT_FILENAME_VAL" >> $GITHUB_ENV
+          echo "Prepared Env Vars: ORG_FROM='$_ORG_SOURCE', TOKEN_FROM='$_TOKEN_SOURCE', OUTPUT_FILE='$_OUTPUT_FILENAME_VAL'"
+
+      - name: Authenticate GitHub CLI (for git clone)
+        env:
+          GH_TOKEN: ${{ env.GH_TOKEN_FOR_SCAN }} 
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            echo "Authenticating GitHub CLI with token (for git)..."
+            echo "$GH_TOKEN" | gh auth login --with-token
+            gh auth setup-git # This configures git to use the token for HTTPS clones
+            echo "gh auth login and gh auth setup-git successful."
+          else
+            echo "Warning: No GitHub token available (GH_TOKEN_FOR_SCAN is empty)."
+            echo "Public repo clones might work, but API access by Python will fail without a token."
+            # For public repos, git clone might not need auth, but PyGithub in Python script will.
+            # The Python script already checks for GH_TOKEN_FOR_SCAN.
+          fi
+          echo "Verifying gh auth status:"
+          gh auth status || echo "gh auth status indicated not logged in or failed to check."
+
+
+      - name: Run Python script with Licensee CLI
+        env:
+          ORGANIZATION_TO_SCAN: ${{ env.ORGANIZATION_TO_SCAN }}
+          GH_TOKEN_FOR_SCAN: ${{ env.GH_TOKEN_FOR_SCAN }} 
+          OUTPUT_FILENAME_TO_USE: ${{ env.OUTPUT_FILENAME_TO_USE }}
+        run: python .github/scripts/scan_org_licenses_licensee.py # Ensure this path is correct
+
+      - name: Upload license report
+        if: always() 
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-licensee-cli-report
+          path: ${{ env.OUTPUT_FILENAME_TO_USE }}
+          if-no-files-found: warn 
