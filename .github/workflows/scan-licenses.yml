@@ -141,4 +141,3 @@ jobs:
           name: license-scan-results
           path: license_scan_results.json
           retention-days: 7
-          
