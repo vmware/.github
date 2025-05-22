@@ -1,0 +1,165 @@
+name: Scan Organization Repositories for Licenses
+
+on:
+  # This workflow can be triggered manually from the GitHub Actions UI.
+  workflow_dispatch:
+    inputs:
+      organization_name:
+        description: 'GitHub Organization Name to scan (e.g., your-org-name)'
+        required: true
+        default: 'github' # Replace with a default organization if desired
+      include_archived:
+        description: 'Include archived repositories?'
+        required: false
+        default: 'false'
+        type: boolean
+      include_private:
+        description: 'Include private repositories? (Requires PAT with "repo" scope)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  scan-licenses:
+    runs-on: ubuntu-latest
+
+    env:
+      # GITHUB_TOKEN has read-only access to public repos in the same account.
+      # For private repos or private organizations, you might need a Personal Access Token (PAT)
+      # with 'repo' scope and 'read:org' scope. Store it in GitHub Secrets (e.g., YOUR_PAT_SECRET)
+      # and replace secrets.GITHUB_TOKEN below with secrets.YOUR_PAT_SECRET.
+      # For this specific workflow, GITHUB_TOKEN might be sufficient for public repos,
+      # but for private, a PAT is almost always required.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Max time licensee is allowed to run per repo (in seconds)
+      LICENSEE_TIMEOUT: 120
+
+    steps:
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.x' # Use a recent stable Ruby version
+
+      - name: Install licensee gem
+        run: gem install licensee
+
+      - name: Install GitHub CLI (gh)
+        # gh CLI is often pre-installed on GitHub-hosted runners, but this ensures it.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Create temporary directory for cloning repositories
+        id: create_temp_dir
+        run: |
+          TEMP_CLONES_DIR="temp_clones_${{ github.run_id }}"
+          mkdir -p "$TEMP_CLONES_DIR"
+          echo "temp_dir=$TEMP_CLONES_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Scan Repositories
+        id: scan
+        run: |
+          ORG_NAME="${{ github.event.inputs.organization_name }}"
+          TEMP_CLONE_BASE_DIR="${{ steps.create_temp_dir.outputs.temp_dir }}"
+          INCLUDE_ARCHIVED="${{ github.event.inputs.include_archived }}"
+          INCLUDE_PRIVATE="${{ github.event.inputs.include_private }}"
+          OUTPUT_FILE="license_scan_results_${ORG_NAME}_${{ github.run_id }}.json"
+
+          echo "Scanning organization: $ORG_NAME"
+          echo "Include archived: $INCLUDE_ARCHIVED"
+          echo "Include private: $INCLUDE_PRIVATE"
+          echo "Temporary clone directory: $TEMP_CLONE_BASE_DIR"
+
+          # Build gh repo list command arguments
+          GH_REPO_LIST_ARGS="$ORG_NAME --json name,archived,private -L 1000" # -L 1000 for max results per page
+          if [ "$INCLUDE_ARCHIVED" = "false" ]; then
+            GH_REPO_LIST_ARGS="$GH_REPO_LIST_ARGS --no-archived"
+          fi
+          if [ "$INCLUDE_PRIVATE" = "false" ]; then
+            GH_REPO_LIST_ARGS="$GH_REPO_LIST_ARGS --public"
+          else
+            GH_REPO_LIST_ARGS="$GH_REPO_LIST_ARGS --all" # --all includes private
+          fi
+
+
+          # Get all repository names for the organization
+          # Using jq to parse the JSON output and filter based on 'private' field if necessary.
+          # We fetch all (public/private/archived) and then filter in jq for more control.
+          REPO_NAMES_JSON=$(gh repo list $GH_REPO_LIST_ARGS)
+
+          # Extract names, filtering out private if not requested, and archived if not requested.
+          REPO_NAMES=$(echo "$REPO_NAMES_JSON" | jq -r '
+            .[] | select(
+              ($ARGS.include_private == "true" or .private == false) and
+              ($ARGS.include_archived == "true" or .archived == false)
+            ) | .name
+          ' --arg include_private "$INCLUDE_PRIVATE" --arg include_archived "$INCLUDE_ARCHIVED")
+
+          if [ -z "$REPO_NAMES" ]; then
+            echo "No repositories found for organization '$ORG_NAME' with the specified filters, or 'gh repo list' failed."
+            echo "[]" | jq . > "$OUTPUT_FILE" # Create an empty JSON file
+            echo "results_file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT" # Set output for artifact upload
+            exit 0
+          fi
+
+          # Initialize JSON array for results
+          RESULTS_ARRAY="[]"
+
+          # Loop through each repository name
+          echo "$REPO_NAMES" | while IFS= read -r REPO_NAME; do
+            echo "--- Processing repository: $REPO_NAME ---"
+            REPO_URL="https://github.com/$ORG_NAME/$REPO_NAME.git"
+            CLONE_DIR="$TEMP_CLONE_BASE_DIR/$REPO_NAME"
+
+            # Clone the repository (shallow clone for speed)
+            # Use --quiet to suppress cloning output unless there's an error
+            if ! git clone --depth 1 --quiet "$REPO_URL" "$CLONE_DIR"; then
+              echo "WARNING: Failed to clone $REPO_URL. Skipping."
+              # Append a placeholder for failed clones
+              RESULTS_ARRAY=$(echo "$RESULTS_ARRAY" | jq --arg repo "$REPO_NAME" '. + [{"repository name": $repo, "license": "Clone Failed"}]')
+              continue
+            fi
+
+            # Run licensee to detect license
+            # Use `timeout` to prevent hanging if licensee gets stuck on a very large repo or strange file
+            # Default to empty licenses array if licensee times out or fails for any other reason
+            LICENSE_INFO=$(timeout "$LICENSEE_TIMEOUT" licensee detect --json "$CLONE_DIR" 2>/dev/null || echo '{"licenses":[]}')
+
+            # Extract license SPDX ID, default to "No License Found"
+            # jq -r for raw output.
+            # .licenses[0].spdx_id for the SPDX ID of the first license found.
+            # // "No License Found" provides a default if the 'licenses' array is empty,
+            #    or if the 'spdx_id' field is null/missing (though licensee usually provides it).
+            LICENSE_SPDX=$(echo "$LICENSE_INFO" | jq -r '.licenses[0].spdx_id // "No License Found"')
+
+            echo "  Detected License: $LICENSE_SPDX"
+
+            # Append to the in-memory JSON array.
+            # We use a temporary file to safely append results from within the while loop.
+            # This is critical because `RESULTS_ARRAY=$(...)` inside `while` loop
+            # does not modify the variable in the parent shell.
+            echo "$RESULTS_ARRAY" | jq --arg repo "$REPO_NAME" --arg license "$LICENSE_SPDX" '. + [{"repository name": $repo, "license": $license}]' > "${TEMP_CLONE_BASE_DIR}/current_results.json"
+            RESULTS_ARRAY=$(cat "${TEMP_CLONE_BASE_DIR}/current_results.json")
+
+
+            # Clean up cloned repository to save disk space
+            rm -rf "$CLONE_DIR"
+          done
+
+          # Write the final JSON array to the output file
+          echo "$RESULTS_ARRAY" | jq . > "$OUTPUT_FILE"
+          echo "Scan completed. Results written to $OUTPUT_FILE"
+
+          # Set output for artifact upload
+          echo "results_file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload License Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-scan-results-${{ github.event.inputs.organization_name }}
+          path: ${{ steps.scan.outputs.results_file }}
+          retention-days: 7 # Keep the artifact for 7 days
+
+      - name: Cleanup temporary directory
+        if: always() # Run this step even if previous steps fail
+        run: rm -rf ${{ steps.create_temp_dir.outputs.temp_dir }}
