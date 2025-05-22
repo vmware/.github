@@ -9,7 +9,7 @@ from github import Github, GithubException, RateLimitExceededException, UnknownO
 
 MAX_RETRIES_CLONE = 3
 RETRY_DELAY_SECONDS = 10
-LICENSEE_CONFIDENCE_THRESHOLD = "80" # Lowered confidence threshold
+LICENSEE_CONFIDENCE_THRESHOLD = "85" # Lowered confidence threshold
 
 def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=None):
     """
@@ -59,7 +59,6 @@ def extract_license_from_entry(license_entry_obj):
 def detect_license_with_licensee_cli(repo_dir_path):
     """Runs licensee detect in the given directory and parses the output."""
     command = ["licensee", "detect", "--json", ".", f"--confidence={LICENSEE_CONFIDENCE_THRESHOLD}"]
-    # print(f"Detecting license in: {repo_dir_path} with command: {' '.join(command)}")
     success, stdout_raw, stderr_raw = run_command_robust(command, cwd=repo_dir_path, check_return_code=False)
 
     if not stdout_raw and not success:
@@ -75,77 +74,68 @@ def detect_license_with_licensee_cli(repo_dir_path):
 
     try:
         license_data = json.loads(json_output_str)
-        if not license_data: # Handles empty JSON object {}
-            return "NONE_FOUND_BY_LICENSEE"
+        if not license_data:
+            return "NONE_FOUND_BY_LICENSEE" # Empty JSON object means no license
 
         # print(f"DEBUG: Full licensee JSON for {repo_dir_path} (Confidence: {LICENSEE_CONFIDENCE_THRESHOLD}): {json_output_str}")
 
-        # Attempt 1: Top-level "license" key (if present and is an object/dict)
-        # This would mirror the summary `License:` field in non-JSON output.
-        top_level_license_obj = license_data.get("license") # Note: licensee might not have a single top-level "license" object.
-                                                            # More commonly, it uses "matched_license" or the "licenses" array.
-        if isinstance(top_level_license_obj, dict):
-            license_id = extract_license_from_entry(top_level_license_obj)
-            if license_id:
-                # print(f"Found via top-level 'license' object: {license_id} for {repo_dir_path}")
-                return license_id
-        elif isinstance(top_level_license_obj, str): # Sometimes it might be just a string for the top-level license
-            # print(f"Found via top-level 'license' string: {top_level_license_obj} for {repo_dir_path}")
-            return top_level_license_obj
-
-
-        # Attempt 2: "matched_license" (this is what licensee often uses for the primary match)
+        # Attempt 1: "matched_license" - This is usually licensee's primary determination
         matched_license_obj = license_data.get("matched_license")
-        if isinstance(matched_license_obj, dict):
-            license_id = extract_license_from_entry(matched_license_obj)
-            if license_id:
-                # print(f"Found via 'matched_license' object: {license_id} for {repo_dir_path}")
-                return license_id
+        license_id_from_matched = extract_license_from_entry(matched_license_obj)
+        if license_id_from_matched:
+            # print(f"Found via 'matched_license': {license_id_from_matched} for {repo_dir_path}")
+            return license_id_from_matched
         
-        # Attempt 3: Iterate through the "licenses" array (list of all potential licenses)
+        # Attempt 2: "licenses" array - If matched_license is null or not conclusive
         licenses_array = license_data.get("licenses")
         if isinstance(licenses_array, list) and licenses_array:
-            def get_confidence(lic_entry):
-                conf = lic_entry.get("confidence")
+            # print(f"DEBUG: 'matched_license' was not conclusive for {repo_dir_path}. Examining 'licenses' array (length {len(licenses_array)}).")
+            
+            def get_confidence(lic_entry_dict): # Renamed for clarity
+                conf = lic_entry_dict.get("confidence")
                 try: return float(conf) if conf is not None else 0.0
                 except (ValueError, TypeError): return 0.0
 
-            sorted_licenses = sorted(
-                licenses_array,
-                key=lambda lic: (isinstance(lic,dict) and lic.get("featured") is True, get_confidence(lic)),
-                reverse=True
-            )
-            
-            if sorted_licenses:
-                best_license_entry = sorted_licenses[0]
-                license_id = extract_license_from_entry(best_license_entry)
-                if license_id:
-                    # print(f"Found via 'licenses' array (best after sort): {license_id} for {repo_dir_path}")
-                    return license_id
-            
-            # print(f"DEBUG: 'licenses' array was present for {repo_dir_path} but no usable ID found in chosen entry.")
+            # Filter out entries that are not dictionaries before sorting
+            valid_license_entries = [entry for entry in licenses_array if isinstance(entry, dict)]
 
-        # Attempt 4: Iterate through "matched_files" array.
-        # Each file can have its own license determination.
+            if not valid_license_entries:
+                # print(f"DEBUG: 'licenses' array for {repo_dir_path} contained no valid dictionary entries.")
+                # Fall through to check matched_files or return NONE_FOUND
+                pass
+            else:
+                sorted_licenses = sorted(
+                    valid_license_entries,
+                    key=lambda lic_entry_dict: (lic_entry_dict.get("featured") is True, get_confidence(lic_entry_dict)),
+                    reverse=True
+                )
+                
+                if sorted_licenses: # Should always be true if valid_license_entries was not empty
+                    best_license_entry = sorted_licenses[0]
+                    license_id_from_array = extract_license_from_entry(best_license_entry)
+                    if license_id_from_array:
+                        # print(f"Found via 'licenses' array (best after sort): {license_id_from_array} for {repo_dir_path}")
+                        return license_id_from_array
+        
+        # Attempt 3: Check "matched_files" array as a fallback if the above didn't yield anything.
+        # This is less ideal for a single repository-wide license but can be an indicator.
+        # We'll take the first usable license found in any matched file.
         matched_files_array = license_data.get("matched_files")
         if isinstance(matched_files_array, list) and matched_files_array:
-            # Look for the license with the highest confidence among all matched files
-            # Or, more simply, the first one that clearly states a license.
-            # This can get complex if multiple files have different licenses.
-            # For now, let's take the first one that has a determinable license.
+            # print(f"DEBUG: No clear license from 'matched_license' or 'licenses'. Checking 'matched_files' for {repo_dir_path}.")
             for file_match_entry in matched_files_array:
                 if isinstance(file_match_entry, dict):
-                    license_in_file_obj = file_match_entry.get("license")
-                    license_id = extract_license_from_entry(license_in_file_obj)
-                    if license_id:
-                        # print(f"Found via 'matched_files[x].license': {license_id} from file {file_match_entry.get('filename')} for {repo_dir_path}")
-                        return license_id # Return the first one found this way
-            # print(f"DEBUG: 'matched_files' array was present for {repo_dir_path} but no usable ID found within its entries.")
+                    license_in_file_obj = file_match_entry.get("license") # The 'license' object within a matched_file
+                    license_id_from_file = extract_license_from_entry(license_in_file_obj)
+                    if license_id_from_file:
+                        # print(f"Found via 'matched_files[x].license': {license_id_from_file} from file {file_match_entry.get('filename')} for {repo_dir_path}")
+                        return license_id_from_file 
+            # print(f"DEBUG: 'matched_files' array was present for {repo_dir_path} but no usable ID found within its entries' 'license' objects.")
 
 
         # If none of the above parsing strategies yielded a result
         print(f"DEBUG: No conclusive license found after all parsing strategies for {repo_dir_path} (Confidence: {LICENSEE_CONFIDENCE_THRESHOLD}).")
-        print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
+        print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}") # This log is CRITICAL
         return "NONE_FOUND_BY_LICENSEE"
 
     except json.JSONDecodeError:
@@ -155,10 +145,7 @@ def detect_license_with_licensee_cli(repo_dir_path):
         print(f"Unexpected error parsing licensee output for {repo_dir_path}: {e}. JSON was: {json_output_str}")
         return "LICENSEE_PARSE_ERROR"
 
-# --- main() function remains IDENTICAL to the previous "complete script" version ---
-# Make sure to copy the main() function from the previous "complete script"
-# provided in the response before this one.
-# For brevity, I am not repeating it here.
+
 
 def main():
     organization_name = os.environ.get("ORGANIZATION_TO_SCAN")
