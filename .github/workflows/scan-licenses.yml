@@ -6,7 +6,7 @@ on:
       organization_name:
         description: 'GitHub Organization Name to scan'
         required: true
-        default: ${{ github.event.repository.owner.login }} # Defaults to the organization of the repo where workflow is run
+        default: ${{ github.event.repository.owner.login }}
       max_clone_retries:
         description: 'Max retries for git clone operations'
         required: false
@@ -20,12 +20,21 @@ jobs:
   license_scan:
     runs-on: ubuntu-latest
     permissions:
-      contents: read # Required for actions/checkout
-      organization: read # Required for gh repo list to access org repos
-      pull-requests: write # To allow cloning private repos using GITHUB_TOKEN
-      # If you are scanning private repos, the GITHUB_TOKEN needs appropriate read permissions
-      # on those repositories, which is usually handled by the default token's scope
-      # when triggered from within the organization.
+      contents: read # Required for actions/checkout and for the GITHUB_TOKEN to clone *this* repository
+      # If scanning private repositories in the organization, the default GITHUB_TOKEN's
+      # permissions might be sufficient *if* the workflow is run from within the organization
+      # and the token has organization-level read access (which is not a direct 'permission'
+      # you grant here, but rather a property of the token itself).
+      # For robust access to ALL private repos in an organization,
+      # you might need a Personal Access Token (PAT) with 'read:org' and 'repo' scopes
+      # stored as a repository secret (e.g., secrets.ORG_PAT) and used instead of GITHUB_TOKEN.
+      # Example for PAT:
+      # env:
+      #   GH_TOKEN_FOR_CLI: ${{ secrets.ORG_PAT }}
+      #   GITHUB_TOKEN: ${{ secrets.ORG_PAT }} # For git clone
+      # pull-requests: write # Not strictly needed for this workflow unless you're modifying PRs
+                            # Kept from previous response for completeness if you needed it,
+                            # but can be removed for this specific license scanning purpose.
 
     steps:
       - name: Checkout repository
@@ -34,15 +43,14 @@ jobs:
       - name: Setup Node.js (for licensee)
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # licensee requires Node.js
+          node-version: '20'
 
       - name: Install licensee
         run: npm install -g licensee
 
       - name: Set up GitHub CLI
         run: |
-          # gh CLI is usually pre-installed on GitHub Actions runners,
-          # but this step ensures it's available and configured.
+          # Configure gh CLI to use the default GITHUB_TOKEN for API calls (like gh repo list)
           echo "GH_TOKEN_FOR_CLI=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
           gh auth setup-git
 
@@ -52,7 +60,9 @@ jobs:
           ORG_NAME: ${{ github.event.inputs.organization_name }}
           MAX_RETRIES: ${{ github.event.inputs.max_clone_retries }}
           RETRY_DELAY: ${{ github.event.inputs.clone_retry_delay_seconds }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Passed to shell for cloning private repos
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Used here explicitly for cloning private repos
+          # If using a PAT:
+          # GITHUB_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
           set -euo pipefail
 
@@ -63,30 +73,24 @@ jobs:
           echo "Starting license scan for organization: $ORG_NAME"
           mkdir -p "$CLONE_DIR"
 
-          # Initialize a temporary file for JSON Lines output
-          # This is more efficient than building a large JSON array in shell variables
           > "$TEMP_JSONL_FILE"
 
-          # Get all repositories for the organization
-          # --limit 9999 ensures we get all of them, as default is often 30-100
-          # --json name,url extracts the repo name and clone URL
           echo "Fetching repository list for $ORG_NAME..."
-          REPO_LIST_JSON=$(gh repo list "$ORG_NAME" --json name,url --limit 9999 || { echo "Failed to fetch repository list. Check ORG_NAME and GITHUB_TOKEN permissions."; exit 1; })
+          # gh repo list uses the GITHUB_TOKEN (via GH_TOKEN_FOR_CLI) to authenticate
+          REPO_LIST_JSON=$(gh repo list "$ORG_NAME" --json name,url --limit 9999 || { echo "Failed to fetch repository list. Check ORG_NAME and GITHUB_TOKEN permissions/scope."; exit 1; })
 
-          # Loop through each repository
           echo "$REPO_LIST_JSON" | jq -c '.[]' | while IFS= read -r repo_json; do
               REPO_NAME=$(echo "$repo_json" | jq -r '.name')
               REPO_URL=$(echo "$repo_json" | jq -r '.url')
               REPO_DIR="$CLONE_DIR/$REPO_NAME"
 
               echo "--- Processing repository: $REPO_NAME ---"
-              DETECTED_LICENSE="Not Detected" # Default if licensee finds nothing or clone fails
+              DETECTED_LICENSE="Not Detected"
 
               CLONE_SUCCESS=false
               for i in $(seq 1 "$MAX_RETRIES"); do
                   echo "Attempt $i/$MAX_RETRIES to clone $REPO_NAME..."
-                  # Use the GITHUB_TOKEN directly in the URL for cloning private repos
-                  # The GH_TOKEN_FOR_CLI in env is for the `gh` CLI, not git.
+                  # Use the GITHUB_TOKEN (or PAT) directly in the URL for cloning private repos
                   if git clone --depth 1 "https://oauth2:$GITHUB_TOKEN@github.com/$ORG_NAME/$REPO_NAME.git" "$REPO_DIR" &> /dev/null; then
                       CLONE_SUCCESS=true
                       echo "Successfully cloned $REPO_NAME"
@@ -99,15 +103,13 @@ jobs:
 
               if [ "$CLONE_SUCCESS" = "true" ]; then
                   pushd "$REPO_DIR" > /dev/null
-                  LICENSEE_OUTPUT=$(licensee detect --json . || true) # Use || true to prevent script exit on licensee errors
+                  LICENSEE_OUTPUT=$(licensee detect --json . || true)
                   popd > /dev/null
 
-                  # Check if licensee detected a license and extract its SPDX ID
-                  # Using // "No license found" provides a fallback if spdx_id is null or missing
                   if echo "$LICENSEE_OUTPUT" | jq -e '.license.spdx_id' &> /dev/null; then
                       DETECTED_LICENSE=$(echo "$LICENSEE_OUTPUT" | jq -r '.license.spdx_id')
                       echo "License detected for $REPO_NAME: $DETECTED_LICENSE"
-                  elif echo "$LICENSEE_OUTPUT" | jq -e '.licenses[0].spdx_id' &> /dev/null; then # Handle multiple licenses if returned differently
+                  elif echo "$LICENSEE_OUTPUT" | jq -e '.licenses[0].spdx_id' &> /dev/null; then
                       DETECTED_LICENSE=$(echo "$LICENSEE_OUTPUT" | jq -r '.licenses[0].spdx_id')
                       echo "License detected for $REPO_NAME (first of many): $DETECTED_LICENSE"
                   else
@@ -118,18 +120,15 @@ jobs:
                   echo "Failed to clone $REPO_NAME after multiple attempts."
               fi
 
-              # Add result to temporary JSON Lines file
               jq -n \
                 --arg name "$REPO_NAME" \
                 --arg license "$DETECTED_LICENSE" \
                 '{ "repository name": $name, "license": $license }' >> "$TEMP_JSONL_FILE"
 
-              # Clean up cloned repository
               rm -rf "$REPO_DIR"
           done
 
           echo "All repositories processed. Compiling final JSON output."
-          # Convert the JSON Lines file to a single JSON array
           jq -s '.' "$TEMP_JSONL_FILE" > "$SCAN_RESULTS_FILE"
 
           echo "Scan complete. Results saved to $SCAN_RESULTS_FILE"
