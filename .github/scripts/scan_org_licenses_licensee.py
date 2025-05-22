@@ -15,7 +15,7 @@ def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=
     Runs a shell command, captures its output, and handles errors robustly.
     Returns a tuple: (success, stdout, stderr)
     """
-    print(f"Executing: {' '.join(command_args)} {'in ' + cwd if cwd else ''}")
+    # print(f"DEBUG: Executing: {' '.join(command_args)} {'in ' + cwd if cwd else ''}") # Very verbose
     try:
         process = subprocess.Popen(
             command_args,
@@ -31,7 +31,7 @@ def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=
         if check_return_code and process.returncode != 0:
             print(f"Command failed with exit code {process.returncode}: {' '.join(command_args)}")
             print(f"Stderr: {stderr.strip()}")
-            print(f"Stdout: {stdout.strip()}")
+            # print(f"Stdout: {stdout.strip()}") # Often not useful on error
             return False, stdout.strip(), stderr.strip()
         return True, stdout.strip(), stderr.strip()
 
@@ -54,21 +54,27 @@ def detect_license_with_licensee_cli(repo_dir):
 
     if not stdout.strip() or stdout.strip() == "null":
         if "No license found" in stderr or "No license found" in stdout : # Check common messages
-            print(f"Licensee reported no license found for directory: {repo_dir}")
+            # print(f"Licensee reported no license found for directory: {repo_dir}") # Can be verbose
+            pass
         else:
             print(f"Licensee produced empty or null output for directory: {repo_dir}. Stderr: {stderr}")
         return "NONE_FOUND_BY_LICENSEE"
 
     try:
         license_data = json.loads(stdout)
-        if not license_data or not license_data.get("matched_license"):
-             # Check if it's because no license was found by licensee
-            if license_data and "licenses" in license_data and not license_data["licenses"]:
-                return "NONE_FOUND_BY_LICENSEE"
-            return "NO_MATCHED_LICENSE_KEY"
+        if not license_data:
+            return "NONE_FOUND_BY_LICENSEE" # Empty JSON from licensee often means no license
+
+        matched_license_obj = license_data.get("matched_license")
         
-        spdx_id = license_data["matched_license"].get("spdx_id")
-        name = license_data["matched_license"].get("name")
+        if not matched_license_obj:
+            # Check if it's because no license was found by licensee (e.g. licensee >= 9.15 "licenses": [])
+            if "licenses" in license_data and isinstance(license_data["licenses"], list) and not license_data["licenses"]:
+                return "NONE_FOUND_BY_LICENSEE"
+            return "NO_MATCHED_LICENSE_KEY" # Key missing, licensee output format changed?
+        
+        spdx_id = matched_license_obj.get("spdx_id")
+        name = matched_license_obj.get("name")
         
         return spdx_id or name or "UNKNOWN_LICENSEE_OUTPUT"
         
@@ -81,83 +87,119 @@ def detect_license_with_licensee_cli(repo_dir):
 
 def main():
     organization_name = os.environ.get("ORGANIZATION_TO_SCAN")
-    github_token = os.environ.get("GH_TOKEN_FOR_SCAN") # Used by PyGithub and for git clone via gh auth setup-git
+    github_token = os.environ.get("GH_TOKEN_FOR_SCAN")
     output_filename = os.environ.get("OUTPUT_FILENAME_TO_USE", "organization_public_licenses_licensee.json")
 
     if not organization_name:
         print("Error: ORGANIZATION_TO_SCAN environment variable is not set.")
         sys.exit(1)
     if not github_token:
-        # While public clones might not need it, PyGithub will, and consistent auth is good.
-        print("Error: GH_TOKEN_FOR_SCAN environment variable is not set. Token is needed for API and potentially git operations.")
+        print("Error: GH_TOKEN_FOR_SCAN environment variable is not set. Token is needed for API and git operations.")
         sys.exit(1)
 
     print(f"Python script starting scan for organization: {organization_name} using licensee CLI")
     print(f"Output file will be: {output_filename}")
 
+    g = None 
     try:
         g = Github(github_token)
-        user = g.get_user() # Verify token and get rate limit info
-        print(f"Authenticated to GitHub API as: {user.login}")
-        print(f"API Rate limit: {g.get_rate_limit().core.remaining}/{g.get_rate_limit().core.limit}")
-    except Exception as e:
-        print(f"Error initializing GitHub API or authenticating: {e}")
+        print("PyGithub object initialized.")
+        
+        try:
+            user = g.get_user()
+            print(f"Authenticated to GitHub API as: {user.login}")
+            rate_limit_info = g.get_rate_limit().core
+            reset_time_str = rate_limit_info.reset.strftime('%Y-%m-%d %H:%M:%S UTC') if rate_limit_info.reset else 'N/A'
+            print(f"API Rate limit: {rate_limit_info.remaining}/{rate_limit_info.limit}, Resets at: {reset_time_str}")
+        except GithubException as ge_user:
+            is_integration_error = ge_user.status == 403 and "integration" in str(ge_user.data).lower()
+            is_forbidden_generic = ge_user.status == 403
+            
+            if is_integration_error:
+                print(f"Warning (non-critical): Could not get authenticated user info (g.get_user()): {ge_user.status} - {ge_user.data}. This can happen with GITHUB_TOKEN. Proceeding...")
+            elif is_forbidden_generic:
+                print(f"Warning (potentially critical): GET /user failed with 403 Forbidden: {ge_user.data}. The provided token may lack 'read:user' or similar scope if it's a PAT. Proceeding cautiously...")
+            else:
+                print(f"Error during g.get_user() call: {ge_user.status} - {ge_user.data}")
+                if ge_user.status == 401:
+                    print("This is a 401 Unauthorized error. The token is likely invalid or expired. Exiting.")
+                    sys.exit(1)
+                print("Proceeding, but initial user verification failed with an unexpected error.")
+            
+            if g: 
+                try:
+                    rate_limit_info = g.get_rate_limit().core
+                    reset_time_str = rate_limit_info.reset.strftime('%Y-%m-%d %H:%M:%S UTC') if rate_limit_info.reset else 'N/A'
+                    print(f"API Rate limit (fetched separately): {rate_limit_info.remaining}/{rate_limit_info.limit}, Resets at: {reset_time_str}")
+                except Exception as e_rl:
+                    print(f"Warning: Could not fetch rate limit information separately: {e_rl}")
+        except Exception as e_user_other:
+            print(f"Unexpected error during g.get_user() or initial rate limit check: {e_user_other}")
+            print("Proceeding despite this initial error.")
+
+    except Exception as e_init:
+        print(f"CRITICAL Error initializing PyGithub object with token: {e_init}. This usually means the token is malformed or there's a fundamental issue with PyGithub or network.")
         sys.exit(1)
     
+    if not g:
+        print("CRITICAL: PyGithub object (g) could not be initialized. Exiting.")
+        sys.exit(1)
+
     all_licenses_info = []
     repo_count = 0
+    processed_repo_count = 0
 
     try:
         org = g.get_organization(organization_name)
-        print(f"Fetching public repositories for organization: {org.login}")
+        print(f"Successfully fetched organization object for: {org.login}")
         
         repos_paginator = org.get_repos(type="public")
+        print("Starting to iterate through public repositories...")
         
         for repo in repos_paginator:
-            repo_count += 1
+            repo_count += 1 # Total repos encountered from paginator
             print("-----------------------------------------------------")
-            print(f"Processing repository: {repo.full_name} ({repo_count})")
+            print(f"Processing repository: {repo.full_name} (Discovered: {repo_count})")
             
+            # Skip archived repositories if desired (can save a lot of time/resources)
+            if repo.archived:
+                print(f"Skipping archived repository: {repo.full_name}")
+                all_licenses_info.append({"repository_name": repo.name, "license": "ARCHIVED_REPO_SKIPPED"})
+                continue
+
+            # Skip empty repositories if desired
+            if repo.size == 0: # Size in KB; 0 often means empty or nearly empty
+                 print(f"Skipping potentially empty repository (size 0 KB): {repo.full_name}")
+                 all_licenses_info.append({"repository_name": repo.name, "license": "EMPTY_REPO_SKIPPED"})
+                 continue
+
+
             current_license_info = {"repository_name": repo.name, "license": "ERROR_PROCESSING_REPO"}
             temp_clone_dir = tempfile.mkdtemp(prefix=f"repo_licensee_{repo.name.replace('/', '_')}_")
-            print(f"Temporary clone directory: {temp_clone_dir}")
-
+            
             cloned_successfully = False
             for attempt in range(1, MAX_RETRIES_CLONE + 1):
-                print(f"Attempt {attempt}/{MAX_RETRIES_CLONE} to clone {repo.full_name}...")
-                # git CLI will use token due to `gh auth setup-git` in workflow
-                # Using repo.clone_url which is the HTTPS URL
                 clone_command = ["git", "clone", "--depth", "1", "--quiet", repo.clone_url, temp_clone_dir]
                 
-                # Clean dir before retrying clone if it's not the first attempt
-                if attempt > 1:
-                    if os.path.exists(temp_clone_dir): # Dir was created by previous failed attempt
-                        # shutil.rmtree(temp_clone_dir) # Remove old one
-                        # temp_clone_dir = tempfile.mkdtemp(prefix=f"repo_licensee_{repo.name.replace('/', '_')}_") # Make new one
-                        # Or better: clean inside the existing temp_clone_dir
-                        for item_name in os.listdir(temp_clone_dir):
-                            item_path = os.path.join(temp_clone_dir, item_name)
-                            try:
-                                if os.path.isdir(item_path) and not os.path.islink(item_path):
-                                    shutil.rmtree(item_path)
-                                else:
-                                    os.unlink(item_path)
-                            except Exception as e_rm:
-                                print(f"Warning: Failed to remove {item_path} for retry: {e_rm}")
-                    else: # Should not happen if tempfile.mkdtemp succeeded
-                         temp_clone_dir = tempfile.mkdtemp(prefix=f"repo_licensee_{repo.name.replace('/', '_')}_")
+                if attempt > 1: # Cleanup before retry
+                    for item_name in os.listdir(temp_clone_dir):
+                        item_path = os.path.join(temp_clone_dir, item_name)
+                        try:
+                            if os.path.isdir(item_path) and not os.path.islink(item_path):
+                                shutil.rmtree(item_path)
+                            else:
+                                os.unlink(item_path)
+                        except Exception as e_rm:
+                            print(f"Warning: Failed to remove {item_path} for retry: {e_rm}")
 
-
-                success, stdout, stderr = run_command_robust(clone_command)
+                success, stdout, stderr = run_command_robust(clone_command, check_return_code=True)
                 
                 if success:
-                    print("Clone successful.")
                     cloned_successfully = True
                     break
                 else:
                     print(f"Clone failed for {repo.full_name} (attempt {attempt}). Stderr: {stderr}")
                     if attempt < MAX_RETRIES_CLONE:
-                        print(f"Retrying in {RETRY_DELAY_SECONDS} seconds...")
                         time.sleep(RETRY_DELAY_SECONDS)
                     else:
                         print(f"Max retries reached for cloning {repo.full_name}.")
@@ -166,39 +208,41 @@ def main():
             if cloned_successfully:
                 license_id = detect_license_with_licensee_cli(temp_clone_dir)
                 current_license_info["license"] = license_id
+                print(f"License for {repo.name}: {license_id}")
             
             all_licenses_info.append(current_license_info)
+            processed_repo_count +=1 # Repos we actually attempted to process (not just discovered)
             
-            print(f"Cleaning up {temp_clone_dir}...")
             try:
                 shutil.rmtree(temp_clone_dir)
-                print(f"Cleaned up {temp_clone_dir}.")
             except Exception as e_clean:
                 print(f"Error cleaning up temp directory {temp_clone_dir}: {e_clean}")
             
-            # Optional: brief pause
-            # time.sleep(0.1)
+            # Optional: brief pause to be nice to API during repo listing, though PyGithub handles pagination waits
+            # if repo_count % 50 == 0: time.sleep(1)
+
 
     except UnknownObjectException:
         print(f"Error: Organization '{organization_name}' not found or not accessible via API.")
-        # Output what we have so far
-    except RateLimitExceededException:
-        print("Error: GitHub API rate limit exceeded while listing repositories. Try again later.")
-        # Output what we have so far
-    except GithubException as e:
-        print(f"GitHub API error during repository processing: {e.status} {e.data}")
-        # Output what we have so far
+    except RateLimitExceededException as rle:
+        print(f"Error: GitHub API rate limit exceeded during repository processing. {rle.data}")
+    except GithubException as ge:
+        print(f"GitHub API error during repository processing: {ge.status} - {ge.data}")
     except Exception as e:
-        print(f"An unexpected error occurred during main processing: {e}")
-        # Output what we have so far
+        print(f"An unexpected error occurred during main processing loop: {e}")
+    finally:
+        with open(output_filename, "w") as f_out:
+            json.dump(all_licenses_info, f_out, indent=2)
+        print(f"Output file '{output_filename}' written with {len(all_licenses_info)} entries (discovered {repo_count} repos, attempted to process {processed_repo_count}).")
 
-    with open(output_filename, "w") as f_out:
-        json.dump(all_licenses_info, f_out, indent=2)
 
     print("-----------------------------------------------------")
-    print(f"Python + Licensee CLI: Public license report generated: {output_filename}")
-    if not all_licenses_info and repo_count == 0:
-        print("No public repositories found or processed.")
+    print(f"Python + Licensee CLI: Public license scan finished. Report: {output_filename}")
+    if repo_count == 0:
+        print("No public repositories were discovered for this organization.")
+    elif processed_repo_count == 0 and repo_count > 0:
+        print(f"Discovered {repo_count} repositories, but none were processed (e.g., all archived/empty or errors before processing).")
+
 
 if __name__ == "__main__":
     main()
