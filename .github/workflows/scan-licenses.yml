@@ -7,9 +7,9 @@ on:
         description: 'GitHub organization name (e.g., "my-org")'
         required: true
         type: string
-      github_token: # Made optional
-        description: 'Optional GitHub PAT for higher rate limits (if not provided, uses unauthenticated or GITHUB_TOKEN)'
-        required: false
+      github_token:
+        description: 'Optional GitHub PAT. If empty for a manual run, secrets.GITHUB_TOKEN will be used.'
+        required: false # Truly optional now
         type: string
       output_filename:
         description: 'Name of the output JSON file'
@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # For checkout
+      # `secrets.GITHUB_TOKEN` has permissions to read public repos.
 
     steps:
       - name: Checkout code (optional)
@@ -33,7 +34,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.1' # Or a recent version licensee supports
+          ruby-version: '3.1'
           bundler-cache: true
 
       - name: Install licensee
@@ -69,75 +70,76 @@ jobs:
             echo "ORGANIZATION_TO_SCAN=${{ secrets.ORG_NAME_FOR_SCAN }}" >> $GITHUB_ENV
             echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV # Use built-in token for scheduled runs
             echo "OUTPUT_FILENAME_TO_USE=organization_public_licenses_scheduled.json" >> $GITHUB_ENV
+            echo "Using secrets.GITHUB_TOKEN for scheduled run."
           else # workflow_dispatch
             if [ -z "${{ inputs.organization }}" ]; then
               echo "Error: organization input is not set for manual run."
               exit 1
             fi
             echo "ORGANIZATION_TO_SCAN=${{ inputs.organization }}" >> $GITHUB_ENV
-            echo "GH_TOKEN_FOR_SCAN=${{ inputs.github_token }}" >> $GITHUB_ENV # Can be empty
+            
+            # Determine which token to use for manual dispatch
+            if [ -n "${{ inputs.github_token }}" ]; then
+              echo "Using provided inputs.github_token for manual run."
+              echo "GH_TOKEN_FOR_SCAN=${{ inputs.github_token }}" >> $GITHUB_ENV
+            else
+              echo "inputs.github_token is empty. Using secrets.GITHUB_TOKEN as fallback for manual run."
+              echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+            fi
             echo "OUTPUT_FILENAME_TO_USE=${{ inputs.output_filename }}" >> $GITHUB_ENV
           fi
+          # Mask the token value if it's set
+          if [ -n "${GH_TOKEN_FOR_SCAN:-}" ]; then
+            echo "::add-mask::${GH_TOKEN_FOR_SCAN}"
+          fi
 
-      - name: Authenticate GitHub CLI and Git (if token provided)
+      - name: Authenticate GitHub CLI and Git
         env:
-          # This GH_TOKEN is from the prep_env step
+          # GH_TOKEN_FOR_SCAN is now reliably set by the 'prep_env' step
           GH_TOKEN: ${{ env.GH_TOKEN_FOR_SCAN }}
         run: |
-          # ORGANIZATION_TO_SCAN is already checked in prep_env, but good to ensure it's usable here if needed
-          if [ -z "$ORGANIZATION_TO_SCAN" ]; then
-            echo "Error: Organization name is not available." # Should not happen if prep_env worked
+          if [ -z "$ORGANIZATION_TO_SCAN" ]; then # Should be caught by prep_env
+            echo "Error: Organization name (ORGANIZATION_TO_SCAN) is not available."
             exit 1
           fi
 
           if [ -n "$GH_TOKEN" ]; then
-            echo "Authenticating GitHub CLI and Git with provided token."
+            echo "Authenticating GitHub CLI and Git with the determined token."
             echo "$GH_TOKEN" | gh auth login --with-token
             gh auth setup-git
           else
-            echo "No GitHub token provided for GH_TOKEN_FOR_SCAN. Proceeding with unauthenticated access (lower rate limits)."
-            # Ensure git doesn't try to prompt for credentials for public repos
+            # This case should be rare now, only if secrets.GITHUB_TOKEN was somehow unavailable/empty.
+            echo "Warning: No GitHub token available (GH_TOKEN_FOR_SCAN is empty). Proceeding with unauthenticated access (lowest rate limits)."
             git config --global credential.helper ''
           fi
 
       - name: Scan public repositories and generate report
-        # The env block that was here (and only contained comments) has been removed.
-        # Variables like $ORGANIZATION_TO_SCAN and $OUTPUT_FILENAME_TO_USE
-        # are available because they were exported to $GITHUB_ENV in the 'prep_env' step.
         run: |
-          set -e # Exit immediately if a command exits with a non-zero status.
-          set -o pipefail # Causes a pipeline to return the exit status of the last command in the pipe that failed.
+          set -e
+          set -o pipefail
 
           echo "Scanning public repositories in organization: $ORGANIZATION_TO_SCAN"
           echo "Output file will be: $OUTPUT_FILENAME_TO_USE"
 
           TEMP_LICENSE_FILE="license_lines.temp.jsonl"
           FINAL_OUTPUT_FILE="$OUTPUT_FILENAME_TO_USE"
-
-          # Ensure temp file is empty/created
           > "$TEMP_LICENSE_FILE"
 
           echo "Fetching public repository list for $ORGANIZATION_TO_SCAN..."
-          # Added --visibility public
-          # If GH_TOKEN was provided and auth succeeded, gh uses it. Otherwise, unauthenticated.
           repo_names_json=$(gh repo list "$ORGANIZATION_TO_SCAN" --visibility public --limit 2000 --json name --jq '.[].name')
 
           if [ -z "$repo_names_json" ]; then
             echo "No public repositories found in organization $ORGANIZATION_TO_SCAN or failed to list them."
-            echo "[]" > "$FINAL_OUTPUT_FILE" # Create empty JSON array
-            # If no repos, this is not an error, so exit 0
+            echo "[]" > "$FINAL_OUTPUT_FILE"
             echo "Workflow finished: No public repositories to scan."
             exit 0
           fi
 
           MAX_RETRIES=3
           RETRY_DELAY_SECONDS=10
-
-          # Read repo names into an array to handle names with spaces robustly if any (though gh output is usually clean)
           mapfile -t repo_array < <(echo "$repo_names_json")
 
           for repo_name in "${repo_array[@]}"; do
-            # Skip if repo_name is empty string (can happen if json parsing results in empty lines)
             if [ -z "$repo_name" ]; then
               continue
             fi
@@ -145,23 +147,18 @@ jobs:
             repo_full_name="$ORGANIZATION_TO_SCAN/$repo_name"
             echo "-----------------------------------------------------"
             echo "Processing repository: $repo_full_name"
-            # Use a temporary directory for each clone to avoid conflicts
-            CLONE_DIR=$(mktemp -d -t "repo_${repo_name//\//_}_XXXXXX") # Sanitize repo_name for temp dir
+            CLONE_DIR=$(mktemp -d -t "repo_${repo_name//\//_}_XXXXXX")
             echo "Cloning to temporary directory: $CLONE_DIR"
-
             current_attempt=1
-            license_id="ERROR_PROCESSING" # Default in case of unexpected loop exit
+            license_id="ERROR_PROCESSING"
 
             while [ $current_attempt -le $MAX_RETRIES ]; do
               echo "Attempt $current_attempt/$MAX_RETRIES to clone and analyze $repo_full_name..."
-
-              # GIT_TERMINAL_PROMPT=0 prevents git from asking for credentials interactively
               if GIT_TERMINAL_PROMPT=0 git clone --depth 1 --quiet "https://github.com/$repo_full_name.git" "$CLONE_DIR"; then
                 echo "Clone successful."
                 cd "$CLONE_DIR"
-
                 license_output=$(licensee detect --json . 2>/dev/null || echo "LICENSEE_CLI_ERROR")
-                cd .. # Back to original directory before cleaning up
+                cd ..
 
                 if [[ "$license_output" == "LICENSEE_CLI_ERROR" ]]; then
                     license_id="LICENSEE_CLI_ERROR"
@@ -171,7 +168,7 @@ jobs:
                     echo "No license found by licensee in $repo_full_name."
                 else
                     license_id_raw=$(echo "$license_output" | jq -r '.matched_license.spdx_id // .matched_license.name // "UNKNOWN_OR_NO_MATCH"')
-                    if [[ "$license_id_raw" == "null" ]] || [[ -z "$license_id_raw" ]]; then # Should be caught by jq fallback now
+                    if [[ "$license_id_raw" == "null" ]] || [[ -z "$license_id_raw" ]]; then
                         license_id="UNKNOWN_OR_NO_MATCH"
                         echo "Licensee ran, but license SPDX ID or name was null/empty in $repo_full_name."
                     else
@@ -179,7 +176,7 @@ jobs:
                         echo "License found for $repo_full_name: $license_id"
                     fi
                 fi
-                break # Success, exit retry loop
+                break
               else
                 echo "Clone failed for $repo_full_name (attempt $current_attempt)."
                 if [ $current_attempt -lt $MAX_RETRIES ]; then
@@ -191,22 +188,17 @@ jobs:
                 fi
               fi
               current_attempt=$((current_attempt + 1))
-            done # End retry loop
-
-            # Add entry to the temp file
+            done
             jq -n --arg repo_name "$repo_name" --arg license_id "$license_id" \
               '{ "repository_name": $repo_name, "license": $license_id }' >> "$TEMP_LICENSE_FILE"
-
-            # Clean up the cloned repository directory
             rm -rf "$CLONE_DIR"
             echo "Cleaned up $CLONE_DIR."
           done
 
-          # Combine all individual JSON objects from the .jsonl file into a single JSON array
-          if [ -s "$TEMP_LICENSE_FILE" ]; then # Check if file has content before running jq -s
+          if [ -s "$TEMP_LICENSE_FILE" ]; then
             jq -s '.' "$TEMP_LICENSE_FILE" > "$FINAL_OUTPUT_FILE"
           else
-            echo "[]" > "$FINAL_OUTPUT_FILE" # Output empty JSON array if no licenses were processed
+            echo "[]" > "$FINAL_OUTPUT_FILE"
           fi
           rm "$TEMP_LICENSE_FILE"
 
@@ -218,5 +210,5 @@ jobs:
       - name: Upload license report
         uses: actions/upload-artifact@v4
         with:
-          name: public-license-report # Name of the artifact bundle
-          path: ${{ env.OUTPUT_FILENAME_TO_USE }} # Path to the file to upload
+          name: public-license-report
+          path: ${{ env.OUTPUT_FILENAME_TO_USE }}
