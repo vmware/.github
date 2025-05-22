@@ -42,48 +42,117 @@ def run_command_robust(command_args, cwd=None, check_return_code=True, an_input=
         print(f"An unexpected error occurred while running command {' '.join(command_args)}: {e}")
         return False, "", str(e)
 
-def detect_license_with_licensee_cli(repo_dir):
+# In .github/scripts/scan_org_licenses_licensee.py
+# ... (imports and other functions remain the same) ...
+
+def detect_license_with_licensee_cli(repo_dir_path):
     """Runs licensee detect in the given directory and parses the output."""
     command = ["licensee", "detect", "--json", "."]
-    # Don't check return code here, licensee can exit non-zero for "no license"
-    success, stdout, stderr = run_command_robust(command, cwd=repo_dir, check_return_code=False)
+    # print(f"Detecting license in: {repo_dir_path}") # Debug
+    success, stdout_raw, stderr_raw = run_command_robust(command, cwd=repo_dir_path, check_return_code=False)
 
-    if not stdout and not success: # if licensee truly failed to run
-         print(f"Licensee CLI failed to execute. Stderr: {stderr}")
+    if not stdout_raw and not success:
+         print(f"Licensee CLI failed to execute in {repo_dir_path}. Stderr: {stderr_raw}")
          return "LICENSEE_EXECUTION_ERROR"
 
-    if not stdout.strip() or stdout.strip() == "null":
-        if "No license found" in stderr or "No license found" in stdout : # Check common messages
-            # print(f"Licensee reported no license found for directory: {repo_dir}") # Can be verbose
-            pass
-        else:
-            print(f"Licensee produced empty or null output for directory: {repo_dir}. Stderr: {stderr}")
-        return "NONE_FOUND_BY_LICENSEE"
+    json_output_str = stdout_raw.strip()
+    if not json_output_str or json_output_str == "null":
+        if "No license found" in stderr_raw.lower():
+             return "NONE_FOUND_BY_LICENSEE"
+        print(f"Licensee produced empty or null JSON output for {repo_dir_path}. Stderr: {stderr_raw}")
+        return "LICENSEE_EMPTY_OUTPUT"
 
     try:
-        license_data = json.loads(stdout)
+        license_data = json.loads(json_output_str)
         if not license_data:
-            return "NONE_FOUND_BY_LICENSEE" # Empty JSON from licensee often means no license
+            return "NONE_FOUND_BY_LICENSEE"
 
+        # Attempt 1: Prioritize "matched_license" if it's valid and has an SPDX ID or name
         matched_license_obj = license_data.get("matched_license")
+        if matched_license_obj and isinstance(matched_license_obj, dict):
+            spdx_id = matched_license_obj.get("spdx_id")
+            name = matched_license_obj.get("name")
+            if spdx_id and spdx_id != "NOASSERTION":
+                # print(f"Found via 'matched_license' (SPDX): {spdx_id} for {repo_dir_path}")
+                return spdx_id
+            if name:
+                # print(f"Found via 'matched_license' (Name): {name} for {repo_dir_path}")
+                return name
         
-        if not matched_license_obj:
-            # Check if it's because no license was found by licensee (e.g. licensee >= 9.15 "licenses": [])
-            if "licenses" in license_data and isinstance(license_data["licenses"], list) and not license_data["licenses"]:
-                return "NONE_FOUND_BY_LICENSEE"
-            return "NO_MATCHED_LICENSE_KEY" # Key missing, licensee output format changed?
-        
-        spdx_id = matched_license_obj.get("spdx_id")
-        name = matched_license_obj.get("name")
-        
-        return spdx_id or name or "UNKNOWN_LICENSEE_OUTPUT"
-        
+        # Attempt 2: If "matched_license" wasn't conclusive, check the top-level "licenses" array.
+        licenses_array = license_data.get("licenses")
+        if isinstance(licenses_array, list) and licenses_array:
+            # print(f"DEBUG: 'matched_license' inconclusive for {repo_dir_path}. Examining 'licenses' array (length {len(licenses_array)}).")
+            # print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
+
+            # Sort licenses by confidence (descending), then by whether it's featured (true first)
+            # Licensee might not always provide 'confidence' as a number, handle gracefully
+            def get_confidence(lic_entry):
+                conf = lic_entry.get("confidence")
+                try:
+                    return float(conf) if conf is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0 # Treat non-numeric confidence as low
+
+            # Prioritize featured, then by confidence
+            sorted_licenses = sorted(
+                licenses_array,
+                key=lambda lic: (lic.get("featured") is True, get_confidence(lic)),
+                reverse=True # True for featured comes first, higher confidence comes first
+            )
+            
+            if sorted_licenses:
+                best_license_entry = sorted_licenses[0] # Take the top one after sorting
+                # print(f"DEBUG: Best from 'licenses' array (after sort): {best_license_entry}")
+                spdx_id = best_license_entry.get("spdx_id")
+                name = best_license_entry.get("name")
+                if spdx_id and spdx_id != "NOASSERTION":
+                    # print(f"Found via 'licenses' array (SPDX - best): {spdx_id} for {repo_dir_path}")
+                    return spdx_id
+                if name:
+                    # print(f"Found via 'licenses' array (Name - best): {name} for {repo_dir_path}")
+                    return name
+            
+            # If we got here, the licenses array was present but couldn't extract a good ID
+            print(f"DEBUG: 'licenses' array was present for {repo_dir_path} but no usable SPDX/Name found in chosen entry (or array was empty after filtering).")
+            print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
+            return "UNKNOWN_LICENSEE_ARRAY_CONTENT"
+
+        # Attempt 3: Check "matched_files" as seen in the example (less common for top-level license)
+        # This is more for when licensee identifies specific files that match known licenses.
+        matched_files_array = license_data.get("matched_files")
+        if isinstance(matched_files_array, list) and matched_files_array:
+            # print(f"DEBUG: No clear license from 'matched_license' or 'licenses'. Checking 'matched_files' for {repo_dir_path}.")
+            # print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
+            # Typically, if there are matched files, the first one is the most prominent.
+            # This assumes a structure like the example: matched_files[0].license.spdx_id
+            first_matched_file = matched_files_array[0]
+            if isinstance(first_matched_file, dict):
+                license_in_file = first_matched_file.get("license")
+                if isinstance(license_in_file, dict):
+                    spdx_id = license_in_file.get("spdx_id")
+                    name = license_in_file.get("name")
+                    if spdx_id and spdx_id != "NOASSERTION":
+                        # print(f"Found via 'matched_files[0].license' (SPDX): {spdx_id} for {repo_dir_path}")
+                        return spdx_id
+                    if name:
+                        # print(f"Found via 'matched_files[0].license' (Name): {name} for {repo_dir_path}")
+                        return name
+
+        # If none of the above parsing strategies yielded a result
+        print(f"DEBUG: No conclusive license found after checking 'matched_license', 'licenses', and 'matched_files' for {repo_dir_path}.")
+        print(f"DEBUG: Full licensee JSON for {repo_dir_path}: {json_output_str}")
+        return "NONE_FOUND_BY_LICENSEE"
+
     except json.JSONDecodeError:
-        print(f"Error decoding JSON from licensee output: {stdout}")
+        print(f"Error decoding JSON from licensee output for {repo_dir_path}: {json_output_str}")
         return "LICENSEE_JSON_ERROR"
     except Exception as e:
-        print(f"Unexpected error parsing licensee output: {e}")
+        print(f"Unexpected error parsing licensee output for {repo_dir_path}: {e}. JSON was: {json_output_str}")
         return "LICENSEE_PARSE_ERROR"
+
+# The main() function and other parts of the script remain unchanged from the previous "complete script" version.
+# You only need to replace the detect_license_with_licensee_cli function.
 
 def main():
     organization_name = os.environ.get("ORGANIZATION_TO_SCAN")
