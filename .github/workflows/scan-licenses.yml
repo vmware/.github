@@ -9,7 +9,7 @@ on:
         type: string
       github_token:
         description: 'Optional GitHub PAT. If empty for a manual run, secrets.GITHUB_TOKEN will be used.'
-        required: false # Truly optional now
+        required: false
         type: string
       output_filename:
         description: 'Name of the output JSON file'
@@ -25,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # For checkout
-      # `secrets.GITHUB_TOKEN` has permissions to read public repos.
 
     steps:
       - name: Checkout code (optional)
@@ -68,37 +67,43 @@ jobs:
               exit 1
             fi
             echo "ORGANIZATION_TO_SCAN=${{ secrets.ORG_NAME_FOR_SCAN }}" >> $GITHUB_ENV
-            echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV # Use built-in token for scheduled runs
+            echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
             echo "OUTPUT_FILENAME_TO_USE=organization_public_licenses_scheduled.json" >> $GITHUB_ENV
-            echo "Using secrets.GITHUB_TOKEN for scheduled run."
+            echo "Scheduled run: Using secrets.ORG_NAME_FOR_SCAN and secrets.GITHUB_TOKEN."
           else # workflow_dispatch
-            if [ -z "${{ inputs.organization }}" ]; then
-              echo "Error: organization input is not set for manual run."
+            if [ -z "${{ github.event.inputs.organization }}" ]; then
+              echo "Error: 'organization' input is not set for manual run."
               exit 1
             fi
-            echo "ORGANIZATION_TO_SCAN=${{ inputs.organization }}" >> $GITHUB_ENV
+            echo "ORGANIZATION_TO_SCAN=${{ github.event.inputs.organization }}" >> $GITHUB_ENV
             
-            # Determine which token to use for manual dispatch
-            if [ -n "${{ inputs.github_token }}" ]; then
-              echo "Using provided inputs.github_token for manual run."
-              echo "GH_TOKEN_FOR_SCAN=${{ inputs.github_token }}" >> $GITHUB_ENV
+            if [ -n "${{ github.event.inputs.github_token }}" ]; then
+              echo "Manual run: Using provided github_token input."
+              echo "GH_TOKEN_FOR_SCAN=${{ github.event.inputs.github_token }}" >> $GITHUB_ENV
             else
-              echo "inputs.github_token is empty. Using secrets.GITHUB_TOKEN as fallback for manual run."
+              echo "Manual run: github_token input is empty. Using secrets.GITHUB_TOKEN as fallback."
               echo "GH_TOKEN_FOR_SCAN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
             fi
-            echo "OUTPUT_FILENAME_TO_USE=${{ inputs.output_filename }}" >> $GITHUB_ENV
+            echo "OUTPUT_FILENAME_TO_USE=${{ github.event.inputs.output_filename }}" >> $GITHUB_ENV
+            echo "Manual run: Using inputs for organization and output_filename."
           fi
-          # Mask the token value if it's set
-          if [ -n "${GH_TOKEN_FOR_SCAN:-}" ]; then
-            echo "::add-mask::${GH_TOKEN_FOR_SCAN}"
-          fi
+          # Mask the token value if it's set and passed to the script via GH_TOKEN_FOR_SCAN
+          # Note: $GITHUB_ENV variables are automatically masked if they look like secrets.
+          # This explicit masking is for the variable if it were used directly in `run` scripts.
+          # For GH_TOKEN_FOR_SCAN being put into GITHUB_ENV, it should be auto-masked by Actions.
+          # However, if we were to echo it directly:
+          # TOKEN_VALUE_TO_MASK=$(echo "$GH_TOKEN_FOR_SCAN" | sed 's/./*/g') # Example of how you might get it
+          # echo "::add-mask::${TOKEN_VALUE_TO_MASK}" # This isn't quite right as we don't have it here directly
+          # The best way is to rely on Actions auto-masking for values from secrets and GITHUB_ENV.
+          # If GH_TOKEN_FOR_SCAN is set, it will be used by the next step.
+          echo "Token for scan will be (masked if secret): $GH_TOKEN_FOR_SCAN"
+
 
       - name: Authenticate GitHub CLI and Git
         env:
-          # GH_TOKEN_FOR_SCAN is now reliably set by the 'prep_env' step
-          GH_TOKEN: ${{ env.GH_TOKEN_FOR_SCAN }}
+          GH_TOKEN: ${{ env.GH_TOKEN_FOR_SCAN }} # This correctly picks up from GITHUB_ENV
         run: |
-          if [ -z "$ORGANIZATION_TO_SCAN" ]; then # Should be caught by prep_env
+          if [ -z "$ORGANIZATION_TO_SCAN" ]; then
             echo "Error: Organization name (ORGANIZATION_TO_SCAN) is not available."
             exit 1
           fi
@@ -108,8 +113,7 @@ jobs:
             echo "$GH_TOKEN" | gh auth login --with-token
             gh auth setup-git
           else
-            # This case should be rare now, only if secrets.GITHUB_TOKEN was somehow unavailable/empty.
-            echo "Warning: No GitHub token available (GH_TOKEN_FOR_SCAN is empty). Proceeding with unauthenticated access (lowest rate limits)."
+            echo "Warning: No GitHub token available (GH_TOKEN is empty). Proceeding with unauthenticated access (lowest rate limits)."
             git config --global credential.helper ''
           fi
 
@@ -168,9 +172,10 @@ jobs:
                     echo "No license found by licensee in $repo_full_name."
                 else
                     license_id_raw=$(echo "$license_output" | jq -r '.matched_license.spdx_id // .matched_license.name // "UNKNOWN_OR_NO_MATCH"')
-                    if [[ "$license_id_raw" == "null" ]] || [[ -z "$license_id_raw" ]]; then
-                        license_id="UNKNOWN_OR_NO_MATCH"
-                        echo "Licensee ran, but license SPDX ID or name was null/empty in $repo_full_name."
+                    # JQ's // operator already handles null, so extra check for "null" string is less critical but fine
+                    if [[ "$license_id_raw" == "null" ]] || [[ -z "$license_id_raw" ]] || [[ "$license_id_raw" == "UNKNOWN_OR_NO_MATCH" && "$license_output" != *"UNKNOWN_OR_NO_MATCH"* ]]; then
+                        license_id="UNKNOWN_OR_NO_MATCH" # Ensure this if jq itself returned the fallback literal
+                        echo "Licensee ran, but license SPDX ID or name was effectively null/empty in $repo_full_name."
                     else
                         license_id="$license_id_raw"
                         echo "License found for $repo_full_name: $license_id"
