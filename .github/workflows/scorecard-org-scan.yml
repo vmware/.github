@@ -1,0 +1,182 @@
+# .github/workflows/scorecard-org-scan.yml
+name: Org-wide / Targeted Scorecard Scan
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Scan mode: org | repo | repos | file"
+        required: true
+        default: "org"
+        type: choice
+        options: [org, repo, repos, file]
+      org:
+        description: "GitHub org (required for org mode or to resolve bare repo names)"
+        required: false
+        type: string
+      repo:
+        description: "Single repo (owner/name OR bare name if --org provided)"
+        required: false
+        type: string
+      repos:
+        description: "Comma-separated repos (owner/name OR bare if --org provided)"
+        required: false
+        type: string
+      repos_file:
+        description: "Path to file with one repo per line (checked into this repo)"
+        required: false
+        type: string
+      include_archived:
+        description: "Include archived (org mode)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+      only_private:
+        description: "Only private (org mode)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+      include_forks:
+        description: "Include forks (org mode)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+      threshold:
+        description: "Warn threshold"
+        required: false
+        default: "7.0"
+        type: string
+      concurrency:
+        description: "Parallel workers"
+        required: false
+        default: "8"
+        type: string
+      title:
+        description: "Dashboard title"
+        required: false
+        default: "OpenSSF Scorecard Dashboard"
+        type: string
+      extra_args:
+        description: "Extra args for Scorecard CLI"
+        required: false
+        default: ""
+        type: string
+      overwrite:
+        description: "Force re-run even if JSON exists"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+      publish_pages:
+        description: "Publish dashboard to GitHub Pages (public by default)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false","true"]
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Scorecard CLI
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/ossf/scorecard/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Install Python deps
+        run: pip install requests
+
+      - name: Prepare args
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="out"
+          mkdir -p "$OUT_DIR"
+
+          ARGS=(--out "$OUT_DIR" --mode native --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}" --title "${{ inputs.title }}")
+
+          # overwrite toggle
+          if [[ "${{ inputs.overwrite }}" == "true" ]]; then
+            ARGS+=(--overwrite)
+          fi
+
+          case "${{ inputs.mode }}" in
+            org)
+              [[ -n "${{ inputs.org }}" ]] || { echo "org is required for org mode"; exit 1; }
+              ARGS+=(--org "${{ inputs.org }}")
+              [[ "${{ inputs.include_archived }}" == "true" ]] && ARGS+=(--include-archived)
+              [[ "${{ inputs.only_private }}"   == "true" ]] && ARGS+=(--only-private)
+              [[ "${{ inputs.include_forks }}"  == "true" ]] && ARGS+=(--include-forks)
+              ;;
+            repo)
+              [[ -n "${{ inputs.repo }}" ]] || { echo "repo is required for repo mode"; exit 1; }
+              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
+              ARGS+=(--repo "${{ inputs.repo }}")
+              ;;
+            repos)
+              [[ -n "${{ inputs.repos }}" ]] || { echo "repos is required for repos mode"; exit 1; }
+              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
+              ARGS+=(--repos "${{ inputs.repos }}")
+              ;;
+            file)
+              [[ -n "${{ inputs.repos_file }}" ]] || { echo "repos_file is required for file mode"; exit 1; }
+              [[ -f "${{ inputs.repos_file }}" ]] || { echo "repos_file not found at '${{ inputs.repos_file }}'"; exit 1; }
+              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
+              ARGS+=(--repos-file "${{ inputs.repos_file }}")
+              ;;
+            *)
+              echo "unknown mode: ${{ inputs.mode }}"; exit 1;;
+          esac
+
+          if [[ -n "${{ inputs.extra_args }}" ]]; then
+            ARGS+=(--extra-scorecard-args "${{ inputs.extra_args }}")
+          fi
+
+          printf '%s\0' "${ARGS[@]}" > args.z
+
+      - name: Run scan
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # classic PAT
+        run: |
+          mapfile -d '' ARGS < args.z
+          python3 scorecard_org_scan.py "${ARGS[@]}"
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorecard-report
+          path: out/
+
+      - name: Upload Pages artifact (optional)
+        if: ${{ inputs.publish_pages == 'true' }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out/
+
+  deploy-pages:
+    if: ${{ inputs.publish_pages == 'true' }}
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
