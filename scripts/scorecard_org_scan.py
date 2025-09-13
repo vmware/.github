@@ -7,6 +7,12 @@ Features:
 - Parallel runs of the Scorecard CLI (native or Docker image).
 - Produces per-repo JSON, a summary CSV, and a self-contained HTML dashboard.
 - Skips existing JSON by default (fast re-runs); use --overwrite to force fresh scans.
+
+Examples:
+  export GITHUB_AUTH_TOKEN=ghp_xxx[,ghp_yyy]
+  python3 scorecard_org_scan.py --org YOUR_ORG --out out
+  python3 scorecard_org_scan.py --repo owner/name --out out
+  python3 scorecard_org_scan.py --org YOUR_ORG --repos repo1,repo2 --overwrite
 """
 import argparse, os, sys, json, csv, subprocess
 import concurrent.futures as cf
@@ -21,6 +27,7 @@ def gh_headers(token: str) -> dict:
 
 def list_repos_from_org(org: str, token: str, include_archived: bool=False,
                         only_private: bool=False, include_forks: bool=False) -> list[str]:
+    """Enumerate repos from a GitHub.com org."""
     repos = []
     page = 1
     while True:
@@ -47,6 +54,7 @@ def list_repos_from_org(org: str, token: str, include_archived: bool=False,
     return repos
 
 def normalize_repo(s: str, org_default: str|None) -> str:
+    """Return 'owner/name' from inputs like 'name' or 'owner/name'."""
     s = (s or "").strip().strip("/")
     if not s:
         return ""
@@ -57,13 +65,20 @@ def normalize_repo(s: str, org_default: str|None) -> str:
     return f"{org_default}/{s}"
 
 def collect_target_repos(args, token: str) -> list[str]:
+    """Collect the list of targets from flags or org enumeration."""
     targets: list[str] = []
+
+    # Single
     if args.repo:
         targets.append(normalize_repo(args.repo, args.org))
+
+    # Comma list
     if args.repos:
         for item in args.repos.split(","):
             if item.strip():
                 targets.append(normalize_repo(item, args.org))
+
+    # File list
     if args.repos_file:
         p = Path(args.repos_file)
         if not p.exists():
@@ -71,6 +86,8 @@ def collect_target_repos(args, token: str) -> list[str]:
         for line in p.read_text().splitlines():
             if line.strip():
                 targets.append(normalize_repo(line, args.org))
+
+    # Full org
     if not targets:
         if not args.org:
             raise SystemExit("Provide --org for organization scan, or use --repo/--repos/--repos-file for explicit targets.")
@@ -81,6 +98,8 @@ def collect_target_repos(args, token: str) -> list[str]:
             only_private=args.only_private,
             include_forks=args.include_forks
         )
+
+    # De-duplicate
     seen, deduped = set(), []
     for t in targets:
         if t not in seen:
@@ -90,6 +109,7 @@ def collect_target_repos(args, token: str) -> list[str]:
 
 def run_scorecard(repo: str, outdir: Path, mode: str, extra_args: list[str],
                   overwrite: bool) -> tuple[str,str]:
+    """Run scorecard for a single repo; returns (repo, status)."""
     out_path = outdir / f"{repo.replace('/', '_')}.json"
     if out_path.exists() and not overwrite:
         return (repo, "skipped (exists)")
@@ -114,6 +134,7 @@ def run_scorecard(repo: str, outdir: Path, mode: str, extra_args: list[str],
         return (repo, f"error: {e}")
 
 def parse_score(json_obj: dict) -> tuple[float|None, str, list[dict]]:
+    """Returns (score, date/timestamp, checks_list)."""
     score = json_obj.get("score") or json_obj.get("aggregateScore")
     date  = json_obj.get("date") or json_obj.get("timestamp") or ""
     checks = json_obj.get("checks") or []
@@ -326,42 +347,56 @@ render();
 
 def main():
     ap = argparse.ArgumentParser(description="Run OpenSSF Scorecard across a GitHub org or explicit repo list, then build a dashboard.")
+    # Target selection
     ap.add_argument("--org", help="GitHub organization (GitHub.com). Required for org scans or to resolve bare repo names.")
     ap.add_argument("--repo", help="Scan a single repo (owner/name or bare name if --org is set).")
     ap.add_argument("--repos", help="Comma-separated repos (owner/name or bare if --org is set).")
-    ap.add_argument("--repos-file", help="Path to a file with one repo per line.")
+    ap.add_argument("--repos-file", help="Path to a file with one repo per line (owner/name or bare; requires --org to resolve bare).")
+    # Behavior / outputs
     ap.add_argument("--out", default="out", help="Output folder (JSON, CSV, HTML)")
-    ap.add_argument("--mode", choices=["native","docker"], default="native")
-    ap.add_argument("--concurrency", type=int, default=8)
-    ap.add_argument("--include-archived", action="store_true")
-    ap.add_argument("--only-private", action="store_true")
-    ap.add_argument("--include-forks", action="store_true")
-    ap.add_argument("--threshold", type=float, default=7.0)
-    ap.add_argument("--title", default="OpenSSF Scorecard Dashboard")
-    ap.add_argument("--extra-scorecard-args", default="")
-    ap.add_argument("--overwrite", action="store_true", help="Re-run and replace JSON even if it already exists")
+    ap.add_argument("--mode", choices=["native","docker"], default="native", help="Run scorecard natively or via docker image")
+    ap.add_argument("--concurrency", type=int, default=8, help="Parallel workers")
+    ap.add_argument("--include-archived", action="store_true", help="Include archived repositories (org scans)")
+    ap.add_argument("--only-private", action="store_true", help="Scan only private repositories (org scans)")
+    ap.add_argument("--include-forks", action="store_true", help="Include forks (org scans; default excluded)")
+    ap.add_argument("--threshold", type=float, default=7.0, help="Score threshold for dashboard badges and counts")
+    ap.add_argument("--title", default="OpenSSF Scorecard Dashboard", help="Dashboard title")
+    ap.add_argument("--extra-scorecard-args", default="", help="Extra args passed to the scorecard CLI, space-separated")
+    ap.add_argument("--overwrite", action="store_true", help="Re-run and replace per-repo JSON even if it already exists")
     args = ap.parse_args()
 
     token = os.getenv("GITHUB_AUTH_TOKEN")
     if not token:
-        print("ERROR: set GITHUB_AUTH_TOKEN (classic PAT).", file=sys.stderr)
+        print("ERROR: set GITHUB_AUTH_TOKEN (classic PAT). For multiple tokens, comma-separate them.", file=sys.stderr)
         sys.exit(2)
 
-    outdir = Path(args.out); outdir.mkdir(parents=True, exist_ok=True)
+    outdir = Path(args.out)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    targets = collect_target_repos(args, token.split(",")[0])
+    # Collect targets
+    try:
+        targets = collect_target_repos(args, token.split(",")[0])
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
     print(f"Scanning {len(targets)} repositories...")
     extra_args = [a for a in args.extra_scorecard_args.split(" ") if a.strip()]
 
+    # Run scans
     with cf.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futs = [ex.submit(run_scorecard, r, outdir, args.mode, extra_args, args.overwrite) for r in targets]
         for fut in cf.as_completed(futs):
             repo, status = fut.result()
             print(f"{repo}: {status}")
 
+    # Build CSV + dashboard
     csv_path = outdir / "summary.csv"
     stats = summarize(outdir, csv_path, args.threshold)
     dash_path = outdir / "dashboard.html"
     make_dashboard(outdir, dash_path, stats, args.org, args.title, args.threshold)
 
-    print(f"\nDone. Artifacts:\n  CSV: {csv_path}\n  HTML dashboard: {dash_path}\n  JSON files: {
+    print(f"\nDone. Artifacts:\n  CSV: {csv_path}\n  HTML dashboard: {dash_path}\n  JSON files: {outdir}/*.json")
+
+if __name__ == "__main__":
+    main()
