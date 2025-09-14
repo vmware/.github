@@ -159,7 +159,7 @@ jobs:
           GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # classic PAT
         run: |
           mapfile -d '' ARGS < args.z
-          python3 scorecard_org_scan.py "${ARGS[@]}"
+          python3 scripts/scorecard_org_scan.py "${ARGS[@]}"
 
       - name: Upload report artifacts
         uses: actions/upload-artifact@v4
