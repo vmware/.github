@@ -3,96 +3,62 @@ name: Org-wide / Targeted Scorecard Scan
 
 on:
   schedule:
-    - cron: "0 7 * * 1"
+    - cron: "0 7 * * 1"   # Mondays 07:00 UTC
   workflow_dispatch:
     inputs:
       mode:
-        description: "Scan mode: org | repo | repos | file"
-        required: true
-        default: "org"
+        description: "org | repo | repos | file"
         type: choice
         options: [org, repo, repos, file]
+        default: org
       org:
         description: "GitHub org (required for org mode or to resolve bare repo names)"
-        required: false
         type: string
-      repo:
-        description: "Single repo (owner/name OR bare name if --org provided)"
         required: false
+      target:
+        description: "For mode=repo: owner/name (or bare if org set). For mode=repos: comma-separated list."
         type: string
-      repos:
-        description: "Comma-separated repos (owner/name OR bare if --org provided)"
         required: false
+      file:
+        description: "For mode=file: path to repos file (checked into this repo)."
         type: string
-      repos_file:
-        description: "Path to file with one repo per line (checked into this repo)"
         required: false
-        type: string
-      include_archived:
-        description: "Include archived (org mode)"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false","true"]
-      only_private:
-        description: "Only private (org mode)"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false","true"]
-      include_forks:
-        description: "Include forks (org mode)"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false","true"]
-      threshold:
-        description: "Warn threshold"
-        required: false
-        default: "7.0"
-        type: string
       concurrency:
         description: "Parallel workers"
-        required: false
+        type: string
         default: "8"
+      threshold:
+        description: "Warn threshold"
         type: string
-      title:
-        description: "Dashboard title"
-        required: false
-        default: "OpenSSF Scorecard Dashboard"
+        default: "7.0"
+      script_flags:
+        description: "Extra flags for the Python script (e.g., --overwrite --include-archived --only-private --include-forks)"
         type: string
-      extra_args:
-        description: "Extra args for Scorecard CLI"
-        required: false
         default: ""
+      extra_args:
+        description: "Extra args for Scorecard CLI (e.g., --enable=Binary-Artifacts)"
         type: string
-      overwrite:
-        description: "Force re-run even if JSON exists"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false","true"]
+        default: ""
       publish_pages:
-        description: "Publish dashboard to GitHub Pages (public by default)"
-        required: false
-        default: "false"
+        description: "Publish dashboard (out/) to GitHub Pages"
         type: choice
         options: ["false","true"]
+        default: "false"
 
 permissions:
   contents: read
   actions: read
-  pages: write
-  id-token: write
+  pages: write     # only needed if publish_pages == true
+  id-token: write  # only needed if publish_pages == true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout .github repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -105,49 +71,48 @@ jobs:
       - name: Install Python deps
         run: pip install requests
 
-      - name: Prepare args
+      - name: Build args
         id: prep
         shell: bash
         run: |
           set -euo pipefail
-          OUT_DIR="out"
-          mkdir -p "$OUT_DIR"
+          OUT_DIR="out"; mkdir -p "$OUT_DIR"
 
-          ARGS=(--out "$OUT_DIR" --mode native --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}" --title "${{ inputs.title }}")
+          # Base args
+          ARGS=(--out "$OUT_DIR" --mode native --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}")
 
-          # overwrite toggle
-          if [[ "${{ inputs.overwrite }}" == "true" ]]; then
-            ARGS+=(--overwrite)
-          fi
+          # Optional: org (helps resolve bare repo names and needed for org mode)
+          [[ -n "${{ inputs.org }}" ]] && ARGS+=(--org "${{ inputs.org }}")
 
           case "${{ inputs.mode }}" in
             org)
-              [[ -n "${{ inputs.org }}" ]] || { echo "org is required for org mode"; exit 1; }
-              ARGS+=(--org "${{ inputs.org }}")
-              [[ "${{ inputs.include_archived }}" == "true" ]] && ARGS+=(--include-archived)
-              [[ "${{ inputs.only_private }}"   == "true" ]] && ARGS+=(--only-private)
-              [[ "${{ inputs.include_forks }}"  == "true" ]] && ARGS+=(--include-forks)
+              # All-org scan; additional toggles can go in script_flags
               ;;
             repo)
-              [[ -n "${{ inputs.repo }}" ]] || { echo "repo is required for repo mode"; exit 1; }
-              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
-              ARGS+=(--repo "${{ inputs.repo }}")
+              [[ -n "${{ inputs.target }}" ]] || { echo "target is required for mode=repo"; exit 1; }
+              ARGS+=(--repo "${{ inputs.target }}")
               ;;
             repos)
-              [[ -n "${{ inputs.repos }}" ]] || { echo "repos is required for repos mode"; exit 1; }
-              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
-              ARGS+=(--repos "${{ inputs.repos }}")
+              [[ -n "${{ inputs.target }}" ]] || { echo "target is required for mode=repos"; exit 1; }
+              ARGS+=(--repos "${{ inputs.target }}")
               ;;
             file)
-              [[ -n "${{ inputs.repos_file }}" ]] || { echo "repos_file is required for file mode"; exit 1; }
-              [[ -f "${{ inputs.repos_file }}" ]] || { echo "repos_file not found at '${{ inputs.repos_file }}'"; exit 1; }
-              [[ -n "${{ inputs.org }}"  ]] && ARGS+=(--org "${{ inputs.org }}")
-              ARGS+=(--repos-file "${{ inputs.repos_file }}")
+              [[ -n "${{ inputs.file }}" ]] || { echo "file is required for mode=file"; exit 1; }
+              [[ -f "${{ inputs.file }}" ]] || { echo "repos file not found at '${{ inputs.file }}'"; exit 1; }
+              ARGS+=(--repos-file "${{ inputs.file }}")
               ;;
             *)
               echo "unknown mode: ${{ inputs.mode }}"; exit 1;;
           esac
 
+          # Script flags (e.g., --overwrite --include-archived --only-private --include-forks)
+          if [[ -n "${{ inputs.script_flags }}" ]]; then
+            # shellsplit
+            read -r -a SF_ARR <<< "${{ inputs.script_flags }}"
+            ARGS+=("${SF_ARR[@]}")
+          fi
+
+          # Extra args passed through to Scorecard CLI itself
           if [[ -n "${{ inputs.extra_args }}" ]]; then
             ARGS+=(--extra-scorecard-args "${{ inputs.extra_args }}")
           fi
@@ -156,7 +121,7 @@ jobs:
 
       - name: Run scan
         env:
-          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # classic PAT
+          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # fine-grained PAT (read-only)
         run: |
           mapfile -d '' ARGS < args.z
           python3 scripts/scorecard_org_scan.py "${ARGS[@]}"
@@ -178,5 +143,4 @@ jobs:
     needs: scan
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
