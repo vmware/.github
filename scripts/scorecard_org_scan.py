@@ -217,28 +217,32 @@ def summarize(outdir: Path, csv_path: Path, threshold: float) -> Dict[str, Any]:
     }
 
 
-def make_dashboard(
-    outdir: Path, dash_path: Path, stats: Dict[str, Any], org: Optional[str], title: str, threshold: float
-):
+def make_dashboard(outdir: Path, dash_path: Path, stats: dict,
+                   org: str|None, title: str, threshold: float):
+    import json
+    from datetime import datetime
+
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = stats["total"]
     avg = f"{stats['avg']:.2f}" if stats["avg"] is not None else "n/a"
     med = f"{stats['median']:.2f}" if stats["median"] is not None else "n/a"
     below = stats["below"]
-    rows_js = json.dumps(stats["details"])
-    bins = [0] * 11
+    rows_js = json.dumps(stats["details"])   # inserted verbatim into JS
+    # histogram bins 0..10
+    bins = [0]*11
     for s in stats["scores"]:
         b = max(0, min(10, int(round(s))))
         bins[b] += 1
     bins_js = json.dumps(bins)
     org_txt = org if org else "(ad-hoc repo list)"
 
-    tmpl = Template(r"""<!DOCTYPE html>
+    # NOTE: No f-strings, no Template(). We only replace __TOKENS__ below.
+    html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>$TITLE – OpenSSF Scorecard Dashboard</title>
+<title>__TITLE__ – OpenSSF Scorecard Dashboard</title>
 <style>
 body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
 h1 { margin: 0 0 6px 0; }
@@ -288,14 +292,14 @@ legend { font-size:13px; color:#666; }
 </style>
 </head>
 <body>
-<h1>$TITLE</h1>
-<small>Target: <strong>$ORG_TXT</strong> · Threshold: <strong>$THRESHOLD</strong> · Generated: $NOW</small>
+<h1>__TITLE__</h1>
+<small>Target: <strong>__ORG_TXT__</strong> · Threshold: <strong>__THRESHOLD__</strong> · Generated: __NOW__</small>
 
 <div class="summary">
-  <div class="card"><div class="metric">$TOTAL</div><div class="label">Repositories</div></div>
-  <div class="card"><div class="metric">$AVG</div><div class="label">Average Score</div></div>
-  <div class="card"><div class="metric">$MED</div><div class="label">Median Score</div></div>
-  <div class="card"><div class="metric">$BELOW</div><div class="label">&lt; $THRESHOLD Score</div></div>
+  <div class="card"><div class="metric">__TOTAL__</div><div class="label">Repositories</div></div>
+  <div class="card"><div class="metric">__AVG__</div><div class="label">Average Score</div></div>
+  <div class="card"><div class="metric">__MED__</div><div class="label">Median Score</div></div>
+  <div class="card"><div class="metric">__BELOW__</div><div class="label">&lt; __THRESHOLD__ Score</div></div>
 </div>
 
 <canvas id="hist"></canvas>
@@ -305,7 +309,6 @@ legend { font-size:13px; color:#666; }
   <div class="tab" data-view="heatmap">Heatmap</div>
 </div>
 
-<!-- TABLE VIEW -->
 <div id="table" class="view active">
   <div id="controls">
     <input id="q" type="search" placeholder="Filter by repository name…"/>
@@ -317,7 +320,7 @@ legend { font-size:13px; color:#666; }
       <tr>
         <th><button data-k="repo">Repository</button></th>
         <th><button data-k="score">Score</button></th>
-        <th><button data-k="checks_failing">Checks &lt; $THRESHOLD</button></th>
+        <th><button data-k="checks_failing">Checks &lt; __THRESHOLD__</button></th>
         <th><button data-k="date">Date</button></th>
         <th>JSON</th>
         <th>Details</th>
@@ -328,7 +331,6 @@ legend { font-size:13px; color:#666; }
   </table>
 </div>
 
-<!-- HEATMAP VIEW -->
 <div id="heatmap" class="view">
   <div class="heat-controls">
     <input id="heatFilter" type="search" placeholder="Filter repos…">
@@ -347,7 +349,6 @@ legend { font-size:13px; color:#666; }
   </legend>
 </div>
 
-<!-- DETAILS MODAL -->
 <div id="modal">
   <div class="card">
     <span class="close" onclick="closeDetails()">✕</span>
@@ -367,8 +368,8 @@ legend { font-size:13px; color:#666; }
 <div class="footer">OpenSSF Scorecard report. Per-repo JSON artifacts saved alongside this file.</div>
 
 <script>
-const data = $ROWS_JS;
-const threshold = $THRESHOLD;
+const data = __ROWS_JS__;
+const threshold = __THRESHOLD__;
 let sortKey = 'score';
 let sortAsc = false;
 
@@ -386,9 +387,8 @@ function riskClass(s) {
   return 'badge rbad';
 }
 
-// histogram
 (function() {
-  const bins = $BINS_JS;
+  const bins = __BINS_JS__;
   const canvas = document.getElementById('hist');
   const ctx = canvas.getContext('2d');
   function draw() {
@@ -422,7 +422,6 @@ function riskClass(s) {
   resize();
 })();
 
-// table
 function renderTable() {
   const q = document.getElementById('q').value.toLowerCase();
   const onlyLow = document.getElementById('onlyLow').checked;
@@ -463,7 +462,6 @@ document.querySelectorAll('th button').forEach(btn => {
 document.getElementById('q').addEventListener('input', renderTable);
 document.getElementById('onlyLow').addEventListener('change', renderTable);
 
-// details modal + official viewer probe
 async function openDetails(jsonFile, repo) {
   try {
     const res = await fetch(jsonFile, {cache: 'no-store'});
@@ -493,13 +491,6 @@ async function openDetails(jsonFile, repo) {
       return {nm, sc, rs, dt, doc};
     });
 
-    function riskClass(s) {
-      if (s === null || s === undefined) return 'badge';
-      if (s >= 7.0) return 'badge rgood';
-      if (s >= 5.0) return 'badge rwarn';
-      return 'badge rbad';
-    }
-
     function renderChecks(filter = '') {
       const q = filter.toLowerCase();
       const html = rows
@@ -524,12 +515,11 @@ async function openDetails(jsonFile, repo) {
     renderChecks();
     document.getElementById('modal').style.display = 'block';
   } catch (e) {
-    alert('Failed to load check details:\n' + e);
+    alert('Failed to load check details:\\n' + e);
   }
 }
 function closeDetails() { document.getElementById('modal').style.display = 'none'; }
 
-// tabs
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
@@ -540,7 +530,6 @@ document.querySelectorAll('.tab').forEach(t => {
   });
 });
 
-// heatmap (lazy)
 let heatLoaded = false, heatMatrix = null, heatChecks = [], heatRepos = [];
 async function initHeatmap() {
   if (heatLoaded) return;
@@ -601,19 +590,18 @@ function renderHeatmap() {
 document.getElementById('heatFilter').addEventListener('input', () => renderHeatmap());
 document.getElementById('checkNameFilter').addEventListener('input', () => renderHeatmap());
 
-// CSV export
 document.getElementById('exportCsv').addEventListener('click', () => {
   if (!heatMatrix) return;
   const checkQ = document.getElementById('checkNameFilter').value.toLowerCase();
   const checks = heatChecks.filter(c => c.toLowerCase().includes(checkQ));
-  let csv = 'repo,' + checks.map(c => '"' + c.replace(/"/g,'""') + '"').join(',') + '\n';
+  let csv = 'repo,' + checks.map(c => '"' + c.replace(/"/g,'""') + '"').join(',') + '\\n';
   heatRepos.forEach((repo, i) => {
     const row = [ '"' + repo.replace(/"/g,'""') + '"' ];
     checks.forEach(c => {
       const sc = heatMatrix[i][c];
       row.push(sc==null? '': sc.toFixed(2));
     });
-    csv += row.join(',') + '\n';
+    csv += row.join(',') + '\\n';
   });
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a');
@@ -622,25 +610,24 @@ document.getElementById('exportCsv').addEventListener('click', () => {
   a.click();
 });
 
-// initial render
 renderTable();
 </script>
 </body>
 </html>
-""")
-
-    html = tmpl.substitute(
-        TITLE=title,
-        ORG_TXT=org_txt,
-        THRESHOLD=str(threshold),
-        NOW=now,
-        TOTAL=str(total),
-        AVG=avg,
-        MED=med,
-        BELOW=str(below),
-        ROWS_JS=rows_js,
-        BINS_JS=bins_js,
-    )
+"""
+    # Do explicit replacements
+    html = (html
+            .replace("__TITLE__", title)
+            .replace("__ORG_TXT__", org_txt)
+            .replace("__THRESHOLD__", str(threshold))
+            .replace("__NOW__", now)
+            .replace("__TOTAL__", str(total))
+            .replace("__AVG__", avg)
+            .replace("__MED__", med)
+            .replace("__BELOW__", str(below))
+            .replace("__ROWS_JS__", rows_js)
+            .replace("__BINS_JS__", bins_js)
+            )
     dash_path.write_text(html, encoding="utf-8")
 
 
