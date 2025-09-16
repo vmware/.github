@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-OpenSSF Scorecard org/targeted scanner with CSV + HTML dashboard.
+OpenSSF Scorecard org/targeted scanner with CSV + single-file HTML dashboard.
 
-- Scan an entire GitHub.com organization OR a specific repo/list/file.
-- Parallel runs of the Scorecard CLI (native or Docker via --mode docker).
-- Produces per-repo JSON, a summary CSV, and a self-contained HTML dashboard.
-- Skips existing JSON by default (fast re-runs); use --overwrite to force fresh scans.
+What’s new:
+- The dashboard now *embeds* all per-repo JSON results. It works offline (file://).
+- Optional --no-bundle switches back to the old behavior (external JSON files + fetch()).
+
+Features:
+- Scan an entire GitHub.com org OR specific repo/list/file.
+- Parallel Scorecard runs (native or Docker via --mode docker).
+- Outputs: per-repo JSON (still written), summary CSV, and a self-contained HTML dashboard.
+- Skips existing JSON by default; use --overwrite to force fresh scans.
 - Dashboard:
-    * Per-repo Details modal (all checks: name/score/reason/details/docs)
+    * Table view with score, failing-checks count, JSON link, “Details” modal
     * Deep-link to official viewer (public repos only)
-    * Heatmap tab: repos (rows) × checks (columns), color-coded, CSV export
+    * Heatmap tab: repos × checks, color-coded, CSV export
 """
 import argparse
 import os
@@ -21,7 +26,6 @@ import concurrent.futures as cf
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
-from string import Template
 
 import requests
 
@@ -201,10 +205,12 @@ def summarize(outdir: Path, csv_path: Path, threshold: float) -> Dict[str, Any]:
             }
         )
         total += 1
+
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["repo", "score", "date"])
         w.writeheader()
         w.writerows(rows)
+
     avg = (sum(scores) / len(scores)) if scores else None
     med = (sorted(scores)[len(scores) // 2] if scores else None)
     return {
@@ -217,26 +223,45 @@ def summarize(outdir: Path, csv_path: Path, threshold: float) -> Dict[str, Any]:
     }
 
 
-def make_dashboard(outdir: Path, dash_path: Path, stats: dict,
-                   org: str|None, title: str, threshold: float):
-    import json
-    from datetime import datetime
-
+def make_dashboard(
+    outdir: Path,
+    dash_path: Path,
+    stats: Dict[str, Any],
+    org: Optional[str],
+    title: str,
+    threshold: float,
+    bundle: bool,
+):
+    """Write dashboard.html. If bundle=True, embed all JSON results into the HTML."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = stats["total"]
     avg = f"{stats['avg']:.2f}" if stats["avg"] is not None else "n/a"
     med = f"{stats['median']:.2f}" if stats["median"] is not None else "n/a"
     below = stats["below"]
-    rows_js = json.dumps(stats["details"])   # inserted verbatim into JS
+    rows_js = json.dumps(stats["details"])  # for table rows
     # histogram bins 0..10
-    bins = [0]*11
+    bins = [0] * 11
     for s in stats["scores"]:
         b = max(0, min(10, int(round(s))))
         bins[b] += 1
     bins_js = json.dumps(bins)
     org_txt = org if org else "(ad-hoc repo list)"
 
-    # NOTE: No f-strings, no Template(). We only replace __TOKENS__ below.
+    # Bundle JSONs if requested
+    bundled_map: Dict[str, Any] = {}
+    if bundle:
+        for d in stats["details"]:
+            jf = d.get("json_file")
+            if not jf:
+                continue
+            p = outdir / jf
+            try:
+                bundled_map[jf] = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                bundled_map[jf] = {}
+    bundled_js = json.dumps(bundled_map) if bundle else "{}"
+
+    # Raw HTML string with __TOKENS__ replaced below (no f-strings, no $ templates)
     html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -309,6 +334,7 @@ legend { font-size:13px; color:#666; }
   <div class="tab" data-view="heatmap">Heatmap</div>
 </div>
 
+<!-- TABLE VIEW -->
 <div id="table" class="view active">
   <div id="controls">
     <input id="q" type="search" placeholder="Filter by repository name…"/>
@@ -331,6 +357,7 @@ legend { font-size:13px; color:#666; }
   </table>
 </div>
 
+<!-- HEATMAP VIEW -->
 <div id="heatmap" class="view">
   <div class="heat-controls">
     <input id="heatFilter" type="search" placeholder="Filter repos…">
@@ -349,6 +376,7 @@ legend { font-size:13px; color:#666; }
   </legend>
 </div>
 
+<!-- DETAILS MODAL -->
 <div id="modal">
   <div class="card">
     <span class="close" onclick="closeDetails()">✕</span>
@@ -368,6 +396,8 @@ legend { font-size:13px; color:#666; }
 <div class="footer">OpenSSF Scorecard report. Per-repo JSON artifacts saved alongside this file.</div>
 
 <script>
+// Bundled data: map of filename -> JSON object (if bundling enabled)
+const BUNDLED = __BUNDLED_JS__;
 const data = __ROWS_JS__;
 const threshold = __THRESHOLD__;
 let sortKey = 'score';
@@ -387,15 +417,18 @@ function riskClass(s) {
   return 'badge rbad';
 }
 
+// histogram
 (function() {
   const bins = __BINS_JS__;
   const canvas = document.getElementById('hist');
   const ctx = canvas.getContext('2d');
   function draw() {
-    const W = canvas.width, H = canvas.height;
+    const W = canvas.clientWidth * (window.devicePixelRatio||1);
+    const H = 220 * (window.devicePixelRatio||1);
+    canvas.width = W; canvas.height = H;
     ctx.clearRect(0,0,W,H);
     const maxV = Math.max(1, ...bins);
-    const pad = 24;
+    const pad = 24 * (window.devicePixelRatio||1);
     const bw = (W - pad*2) / bins.length;
     ctx.strokeStyle = '#999';
     ctx.beginPath(); ctx.moveTo(pad, H-pad); ctx.lineTo(W-pad, H-pad); ctx.stroke();
@@ -412,16 +445,11 @@ function riskClass(s) {
       ctx.fillText(String(i), x+2, H-6);
     }
   }
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(canvas.clientWidth * ratio);
-    canvas.height = Math.floor(220 * ratio);
-    draw();
-  }
-  new ResizeObserver(resize).observe(canvas);
-  resize();
+  new ResizeObserver(draw).observe(canvas);
+  draw();
 })();
 
+// table
 function renderTable() {
   const q = document.getElementById('q').value.toLowerCase();
   const onlyLow = document.getElementById('onlyLow').checked;
@@ -446,7 +474,7 @@ function renderTable() {
       <td><span class="${badge}">${scoreTxt}</span></td>
       <td>${r.checks_failing ?? ''}</td>
       <td>${r.date ?? ''}</td>
-      <td><a class="rowlink" href="./${r.json_file}" target="_blank" rel="noopener">JSON</a></td>
+      <td><a class="rowlink" href="#" onclick="openJson('${r.json_file}');return false;">JSON</a></td>
       <td><button class="details-btn" onclick="openDetails('${r.json_file}','${r.repo.replace(/'/g, "\\'")}')">View</button></td>
       <td><a class="viewer-btn" href="${viewerUrl}" target="_blank" rel="noopener" title="Open official viewer (public repos only)">Viewer</a></td>
     </tr>`;
@@ -462,64 +490,72 @@ document.querySelectorAll('th button').forEach(btn => {
 document.getElementById('q').addEventListener('input', renderTable);
 document.getElementById('onlyLow').addEventListener('change', renderTable);
 
-async function openDetails(jsonFile, repo) {
-  try {
-    const res = await fetch(jsonFile, {cache: 'no-store'});
-    const data = await res.json();
-    const checks = Array.isArray(data.checks) ? data.checks : [];
-    const tbody = document.querySelector('#checksTbl tbody');
-    document.getElementById('mTitle').textContent = `Scorecard checks – ${repo}`;
-    document.getElementById('mMeta').textContent = `Run date: ${data.date || data.timestamp || ''} · Overall score: ${fmtScore(data.score ?? data.aggregateScore)}`;
-
-    const viewerLink = document.getElementById('viewerLink');
-    viewerLink.style.display = 'none';
-    try {
-      const apiUrl = 'https://api.scorecard.dev/projects/github.com/' + repo;
-      const probe = await fetch(apiUrl, { method: 'HEAD', mode: 'cors' });
-      if (probe.ok) {
-        viewerLink.href = 'https://scorecard.dev/viewer?uri=github.com/' + repo;
-        viewerLink.style.display = 'inline-block';
-      }
-    } catch (e) { /* ignore */ }
-
-    const rows = checks.map(c => {
-      const nm = c.name || (c.documentation && c.documentation.short_name) || '(unknown)';
-      const sc = (typeof c.score === 'number') ? c.score : null;
-      const rs = c.reason || '';
-      const dt = Array.isArray(c.details) ? c.details.join('<br/>') : (c.details || '');
-      const doc = (c.documentation && c.documentation.url) ? `<a class="rowlink" href="${c.documentation.url}" target="_blank" rel="noopener">docs</a>` : '';
-      return {nm, sc, rs, dt, doc};
-    });
-
-    function renderChecks(filter = '') {
-      const q = filter.toLowerCase();
-      const html = rows
-        .filter(r => r.nm.toLowerCase().includes(q))
-        .map(r => {
-          const cls = riskClass(r.sc);
-          const scTxt = (r.sc === null) ? 'n/a' : Number(r.sc).toFixed(2);
-          return `<tr>
-            <td>${r.nm}</td>
-            <td><span class="${cls}">${scTxt}</span></td>
-            <td>${r.rs || ''}</td>
-            <td>${r.dt || ''}</td>
-            <td>${r.doc}</td>
-          </tr>`;
-        }).join('');
-      tbody.innerHTML = html || `<tr><td colspan="5" style="color:#777">No checks match your filter.</td></tr>`;
-    }
-
-    const filterEl = document.getElementById('checkFilter');
-    filterEl.value = '';
-    filterEl.oninput = () => renderChecks(filterEl.value);
-    renderChecks();
-    document.getElementById('modal').style.display = 'block';
-  } catch (e) {
-    alert('Failed to load check details:\\n' + e);
-  }
+function openJson(fname){
+  const obj = BUNDLED[fname];
+  if (!obj) { alert('JSON not bundled for '+fname); return; }
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = fname; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 2500);
 }
-function closeDetails() { document.getElementById('modal').style.display = 'none'; }
 
+function docURL(c){ return (c.documentation && c.documentation.url) ? c.documentation.url : ''; }
+
+function openDetails(fname, repo){
+  const data = BUNDLED[fname];
+  if (!data){ alert('Failed to load check details:\nNot bundled: '+fname); return; }
+  const checks = Array.isArray(data.checks) ? data.checks : [];
+  const tbody = document.querySelector('#checksTbl tbody');
+  document.getElementById('mTitle').textContent = `Scorecard checks – ${repo}`;
+  document.getElementById('mMeta').textContent =
+    `Run date: ${data.date || data.timestamp || ''} · Overall score: ${fmtScore(data.score ?? data.aggregateScore)}`;
+
+  // Probe official viewer (public only)
+  const viewerLink = document.getElementById('viewerLink');
+  viewerLink.style.display = 'none';
+  try {
+    fetch('https://api.scorecard.dev/projects/github.com/' + repo, { method: 'HEAD', mode: 'cors' })
+      .then(p => { if (p.ok) { viewerLink.href = 'https://scorecard.dev/viewer?uri=github.com/' + repo; viewerLink.style.display = 'inline-block'; }})
+      .catch(()=>{});
+  } catch (_) {}
+
+  const rows = checks.map(c => {
+    const nm = c.name || (c.documentation && c.documentation.short_name) || '(unknown)';
+    const sc = (typeof c.score === 'number') ? c.score : null;
+    const rs = c.reason || '';
+    const dt = Array.isArray(c.details) ? c.details.join('<br/>') : (c.details || '');
+    const doc = docURL(c) ? `<a class="rowlink" href="${docURL(c)}" target="_blank" rel="noopener">docs</a>` : '';
+    return {nm, sc, rs, dt, doc};
+  });
+
+  function renderChecks(filter = ''){
+    const q = filter.toLowerCase();
+    const html = rows
+      .filter(r => r.nm.toLowerCase().includes(q))
+      .map(r => {
+        const cls = riskClass(r.sc);
+        const scTxt = (r.sc === null) ? 'n/a' : Number(r.sc).toFixed(2);
+        return `<tr>
+          <td>${r.nm}</td>
+          <td><span class="${cls}">${scTxt}</span></td>
+          <td>${r.rs || ''}</td>
+          <td>${r.dt || ''}</td>
+          <td>${r.doc}</td>
+        </tr>`;
+      }).join('');
+    tbody.innerHTML = html || `<tr><td colspan="5" style="color:#777">No checks match your filter.</td></tr>`;
+  }
+
+  const filterEl = document.getElementById('checkFilter');
+  filterEl.value = '';
+  filterEl.oninput = () => renderChecks(filterEl.value);
+  renderChecks();
+  document.getElementById('modal').style.display = 'block';
+}
+function closeDetails(){ document.getElementById('modal').style.display = 'none'; }
+
+// tabs
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
@@ -530,14 +566,15 @@ document.querySelectorAll('.tab').forEach(t => {
   });
 });
 
+// heatmap (now reads from BUNDLED, no fetch)
 let heatLoaded = false, heatMatrix = null, heatChecks = [], heatRepos = [];
-async function initHeatmap() {
+function initHeatmap(){
   if (heatLoaded) return;
   heatLoaded = true;
   const statusEl = document.getElementById('heatStatus');
   statusEl.textContent = 'Building heatmap…';
   try {
-    const jsons = await Promise.all(data.map(r => fetch(r.json_file, {cache:'no-store'}).then(x => x.json()).catch(_=>({repo:{name:r.repo}, checks:[]}))));
+    const jsons = data.map(r => BUNDLED[r.json_file] || {repo:{name:r.repo}, checks:[]});
     const set = new Set();
     jsons.forEach(j => (j.checks||[]).forEach(c => set.add(c.name || (c.documentation && c.documentation.short_name) || '(unknown)')));
     heatChecks = Array.from(set).sort();
@@ -559,14 +596,8 @@ async function initHeatmap() {
   }
 }
 
-function colorForScore(s) {
-  if (s === null || s === undefined) return '#f3f4f6';
-  if (s >= 7) return '#e6f4ea';
-  if (s >= 5) return '#fff4e5';
-  return '#fde8e8';
-}
-
-function renderHeatmap() {
+function colorForScore(s){ if (s==null) return '#f3f4f6'; if (s>=7) return '#e6f4ea'; if (s>=5) return '#fff4e5'; return '#fde8e8'; }
+function renderHeatmap(){
   const repoQ = document.getElementById('heatFilter').value.toLowerCase();
   const checkQ = document.getElementById('checkNameFilter').value.toLowerCase();
   const checks = heatChecks.filter(c => c.toLowerCase().includes(checkQ));
@@ -577,7 +608,7 @@ function renderHeatmap() {
     html += `<tr><td><a class="rowlink" href="https://github.com/${repo}" target="_blank" rel="noopener">${repo}</a></td>`;
     checks.forEach(c => {
       const sc = heatMatrix[i][c];
-      const txt = (sc === null || sc === undefined) ? 'n/a' : Number(sc).toFixed(1);
+      const txt = (sc==null) ? 'n/a' : Number(sc).toFixed(1);
       const bg = colorForScore(sc);
       html += `<td style="background:${bg}"><div class="cell ${(sc==null)?'na':''}">${txt}</div></td>`;
     });
@@ -586,48 +617,28 @@ function renderHeatmap() {
   html += '</tbody>';
   tbl.innerHTML = html;
 }
-
 document.getElementById('heatFilter').addEventListener('input', () => renderHeatmap());
 document.getElementById('checkNameFilter').addEventListener('input', () => renderHeatmap());
 
-document.getElementById('exportCsv').addEventListener('click', () => {
-  if (!heatMatrix) return;
-  const checkQ = document.getElementById('checkNameFilter').value.toLowerCase();
-  const checks = heatChecks.filter(c => c.toLowerCase().includes(checkQ));
-  let csv = 'repo,' + checks.map(c => '"' + c.replace(/"/g,'""') + '"').join(',') + '\\n';
-  heatRepos.forEach((repo, i) => {
-    const row = [ '"' + repo.replace(/"/g,'""') + '"' ];
-    checks.forEach(c => {
-      const sc = heatMatrix[i][c];
-      row.push(sc==null? '': sc.toFixed(2));
-    });
-    csv += row.join(',') + '\\n';
-  });
-  const blob = new Blob([csv], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'scorecard_heatmap.csv';
-  a.click();
-});
-
+// initial render
 renderTable();
 </script>
 </body>
 </html>
 """
-    # Do explicit replacements
-    html = (html
-            .replace("__TITLE__", title)
-            .replace("__ORG_TXT__", org_txt)
-            .replace("__THRESHOLD__", str(threshold))
-            .replace("__NOW__", now)
-            .replace("__TOTAL__", str(total))
-            .replace("__AVG__", avg)
-            .replace("__MED__", med)
-            .replace("__BELOW__", str(below))
-            .replace("__ROWS_JS__", rows_js)
-            .replace("__BINS_JS__", bins_js)
-            )
+    html = (
+        html.replace("__TITLE__", title)
+        .replace("__ORG_TXT__", org_txt)
+        .replace("__THRESHOLD__", str(threshold))
+        .replace("__NOW__", now)
+        .replace("__TOTAL__", str(total))
+        .replace("__AVG__", avg)
+        .replace("__MED__", med)
+        .replace("__BELOW__", str(below))
+        .replace("__ROWS_JS__", rows_js)
+        .replace("__BINS_JS__", bins_js)
+        .replace("__BUNDLED_JS__", bundled_js)
+    )
     dash_path.write_text(html, encoding="utf-8")
 
 
@@ -651,6 +662,13 @@ def main():
     ap.add_argument("--title", default="OpenSSF Scorecard Dashboard", help="Dashboard title")
     ap.add_argument("--extra-scorecard-args", default="", help="Extra args passed to the scorecard CLI, space-separated")
     ap.add_argument("--overwrite", action="store_true", help="Re-run and replace per-repo JSON even if it already exists")
+
+    # Bundling options (default ON for single-file dashboard)
+    ap.add_argument("--bundle", dest="bundle", action="store_true", default=True,
+                    help="Embed all per-repo JSONs into the HTML (single-file dashboard).")
+    ap.add_argument("--no-bundle", dest="bundle", action="store_false",
+                    help="Do not embed JSONs; dashboard will fetch external files (needs HTTP server).")
+
     args = ap.parse_args()
 
     token = os.getenv("GITHUB_AUTH_TOKEN")
@@ -679,13 +697,14 @@ def main():
     csv_path = outdir / "summary.csv"
     stats = summarize(outdir, csv_path, args.threshold)
     dash_path = outdir / "dashboard.html"
-    make_dashboard(outdir, dash_path, stats, args.org, args.title, args.threshold)
+    make_dashboard(outdir, dash_path, stats, args.org, args.title, args.threshold, args.bundle)
 
     print(
         f"\nDone. Artifacts:"
         f"\n  CSV: {csv_path}"
         f"\n  HTML dashboard: {dash_path}"
         f"\n  JSON files: {outdir}/*.json"
+        f"\n  (Bundled = {args.bundle})"
     )
 
 
