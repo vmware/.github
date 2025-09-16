@@ -1,4 +1,3 @@
-# .github/workflows/scorecard-org-scan.yml
 name: Org-wide / Targeted Scorecard Scan
 
 on:
@@ -16,11 +15,11 @@ on:
         type: string
         required: false
       target:
-        description: "For mode=repo: owner/name (or bare if org set). For mode=repos: comma-separated list."
+        description: "For repo: owner/name (or bare if org set). For repos: comma-separated list."
         type: string
         required: false
       file:
-        description: "For mode=file: path to repos file (checked into this repo)."
+        description: "For file mode: path to repos file (checked into this repo)."
         type: string
         required: false
       concurrency:
@@ -32,9 +31,9 @@ on:
         type: string
         default: "7.0"
       script_flags:
-        description: "Extra flags for the Python script (e.g., --overwrite --include-archived --only-private --include-forks)"
+        description: "Script flags (e.g., --mode docker --overwrite --include-forks --only-private)"
         type: string
-        default: ""
+        default: "--mode docker"
       extra_args:
         description: "Extra args for Scorecard CLI (e.g., --enable=Binary-Artifacts)"
         type: string
@@ -63,10 +62,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Scorecard CLI
+      # CLI not needed in docker mode, but harmless if installed
+      - name: Install Scorecard CLI (optional)
         run: |
           curl -sSfL https://raw.githubusercontent.com/ossf/scorecard/main/install.sh \
-            | sh -s -- -b /usr/local/bin
+            | sh -s -- -b /usr/local/bin || true
 
       - name: Install Python deps
         run: pip install requests
@@ -78,16 +78,13 @@ jobs:
           set -euo pipefail
           OUT_DIR="out"; mkdir -p "$OUT_DIR"
 
-          # Base args
-          ARGS=(--out "$OUT_DIR" --mode native --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}")
+          ARGS=(--out "$OUT_DIR" --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}")
 
           # Optional: org (helps resolve bare repo names and needed for org mode)
           [[ -n "${{ inputs.org }}" ]] && ARGS+=(--org "${{ inputs.org }}")
 
           case "${{ inputs.mode }}" in
-            org)
-              # All-org scan; additional toggles can go in script_flags
-              ;;
+            org) : ;;
             repo)
               [[ -n "${{ inputs.target }}" ]] || { echo "target is required for mode=repo"; exit 1; }
               ARGS+=(--repo "${{ inputs.target }}")
@@ -101,13 +98,11 @@ jobs:
               [[ -f "${{ inputs.file }}" ]] || { echo "repos file not found at '${{ inputs.file }}'"; exit 1; }
               ARGS+=(--repos-file "${{ inputs.file }}")
               ;;
-            *)
-              echo "unknown mode: ${{ inputs.mode }}"; exit 1;;
+            *) echo "unknown mode"; exit 1;;
           esac
 
-          # Script flags (e.g., --overwrite --include-archived --only-private --include-forks)
+          # Script flags (e.g., --mode docker --overwrite --include-archived --only-private --include-forks)
           if [[ -n "${{ inputs.script_flags }}" ]]; then
-            # shellsplit
             read -r -a SF_ARR <<< "${{ inputs.script_flags }}"
             ARGS+=("${SF_ARR[@]}")
           fi
@@ -121,7 +116,7 @@ jobs:
 
       - name: Run scan
         env:
-          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # fine-grained PAT (read-only)
+          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # fine-grained PAT (read-only to target repos)
         run: |
           mapfile -d '' ARGS < args.z
           python3 scripts/scorecard_org_scan.py "${ARGS[@]}"
