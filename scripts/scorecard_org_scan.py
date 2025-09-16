@@ -232,22 +232,24 @@ def make_dashboard(
     threshold: float,
     bundle: bool,
 ):
-    """Write dashboard.html. If bundle=True, embed all JSON results into the HTML."""
+    """Write dashboard.html. If bundle=True, embed all JSON results into the HTML (single-file)."""
+    from datetime import datetime
+    import json
+
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = stats["total"]
     avg = f"{stats['avg']:.2f}" if stats["avg"] is not None else "n/a"
     med = f"{stats['median']:.2f}" if stats["median"] is not None else "n/a"
     below = stats["below"]
-    rows_js = json.dumps(stats["details"])  # for table rows
-    # histogram bins 0..10
-    bins = [0] * 11
+    rows_js = json.dumps(stats["details"])
+    bins = [0]*11
     for s in stats["scores"]:
         b = max(0, min(10, int(round(s))))
         bins[b] += 1
     bins_js = json.dumps(bins)
     org_txt = org if org else "(ad-hoc repo list)"
 
-    # Bundle JSONs if requested
+    # Bundle per-repo JSONs into the page
     bundled_map: Dict[str, Any] = {}
     if bundle:
         for d in stats["details"]:
@@ -261,7 +263,7 @@ def make_dashboard(
                 bundled_map[jf] = {}
     bundled_js = json.dumps(bundled_map) if bundle else "{}"
 
-    # Raw HTML string with __TOKENS__ replaced below (no f-strings, no $ templates)
+    # No f-strings or Template — we replace __TOKENS__ explicitly
     html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -295,7 +297,6 @@ th button { background: none; border: none; font-weight: 700; cursor: pointer; }
 canvas { max-width: 680px; width: 100%; height: 220px; border: 1px solid #eee; border-radius: 6px; }
 
 .details-btn { padding:6px 10px; border:1px solid #ddd; background:#fafafa; border-radius:6px; cursor:pointer; }
-.viewer-btn  { padding:6px 10px; border:1px solid #ddd; background:#eef6ff; color:#064; border-radius:6px; cursor:pointer; }
 
 #modal { position: fixed; inset: 0; display:none; background: rgba(0,0,0,.35); }
 #modal .card { background:#fff; max-width: 980px; margin: 5vh auto; padding:16px; border-radius:10px; box-shadow: 0 10px 30px rgba(0,0,0,.15); }
@@ -350,7 +351,6 @@ legend { font-size:13px; color:#666; }
         <th><button data-k="date">Date</button></th>
         <th>JSON</th>
         <th>Details</th>
-        <th>Official</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -384,7 +384,6 @@ legend { font-size:13px; color:#666; }
     <div id="mMeta" style="color:#555;margin-bottom:8px;"></div>
     <div style="margin: 8px 0;">
       <input id="checkFilter" type="search" placeholder="Filter by check name…">
-      <a id="viewerLink" class="viewer-btn" href="#" target="_blank" rel="noopener" style="display:none;">Open Official Viewer ↗</a>
     </div>
     <table class="checks" id="checksTbl">
       <thead><tr><th>Check</th><th>Score</th><th>Reason</th><th>Details</th><th>Docs</th></tr></thead>
@@ -396,7 +395,7 @@ legend { font-size:13px; color:#666; }
 <div class="footer">OpenSSF Scorecard report. Per-repo JSON artifacts saved alongside this file.</div>
 
 <script>
-// Bundled data: map of filename -> JSON object (if bundling enabled)
+// Bundled data: map of filename -> JSON object (single-file mode)
 const BUNDLED = __BUNDLED_JS__;
 const data = __ROWS_JS__;
 const threshold = __THRESHOLD__;
@@ -468,7 +467,6 @@ function renderTable() {
   tbody.innerHTML = rows.map(r => {
     const badge = badgeClass(r.score);
     const scoreTxt = fmtScore(r.score);
-    const viewerUrl = 'https://scorecard.dev/viewer?uri=github.com/' + encodeURIComponent(r.repo);
     return `<tr>
       <td><a class="rowlink" href="https://github.com/${r.repo}" target="_blank" rel="noopener">${r.repo}</a></td>
       <td><span class="${badge}">${scoreTxt}</span></td>
@@ -476,7 +474,6 @@ function renderTable() {
       <td>${r.date ?? ''}</td>
       <td><a class="rowlink" href="#" onclick="openJson('${r.json_file}');return false;">JSON</a></td>
       <td><button class="details-btn" onclick="openDetails('${r.json_file}','${r.repo.replace(/'/g, "\\'")}')">View</button></td>
-      <td><a class="viewer-btn" href="${viewerUrl}" target="_blank" rel="noopener" title="Open official viewer (public repos only)">Viewer</a></td>
     </tr>`;
   }).join('');
 }
@@ -500,32 +497,21 @@ function openJson(fname){
   setTimeout(()=>URL.revokeObjectURL(url), 2500);
 }
 
-function docURL(c){ return (c.documentation && c.documentation.url) ? c.documentation.url : ''; }
-
 function openDetails(fname, repo){
   const data = BUNDLED[fname];
-  if (!data){ alert('Failed to load check details:\nNot bundled: '+fname); return; }
+  if (!data){ alert('Failed to load check details:\\nNot bundled: '+fname); return; }
   const checks = Array.isArray(data.checks) ? data.checks : [];
   const tbody = document.querySelector('#checksTbl tbody');
   document.getElementById('mTitle').textContent = `Scorecard checks – ${repo}`;
   document.getElementById('mMeta').textContent =
     `Run date: ${data.date || data.timestamp || ''} · Overall score: ${fmtScore(data.score ?? data.aggregateScore)}`;
 
-  // Probe official viewer (public only)
-  const viewerLink = document.getElementById('viewerLink');
-  viewerLink.style.display = 'none';
-  try {
-    fetch('https://api.scorecard.dev/projects/github.com/' + repo, { method: 'HEAD', mode: 'cors' })
-      .then(p => { if (p.ok) { viewerLink.href = 'https://scorecard.dev/viewer?uri=github.com/' + repo; viewerLink.style.display = 'inline-block'; }})
-      .catch(()=>{});
-  } catch (_) {}
-
   const rows = checks.map(c => {
     const nm = c.name || (c.documentation && c.documentation.short_name) || '(unknown)';
     const sc = (typeof c.score === 'number') ? c.score : null;
     const rs = c.reason || '';
     const dt = Array.isArray(c.details) ? c.details.join('<br/>') : (c.details || '');
-    const doc = docURL(c) ? `<a class="rowlink" href="${docURL(c)}" target="_blank" rel="noopener">docs</a>` : '';
+    const doc = (c.documentation && c.documentation.url) ? `<a class="rowlink" href="${c.documentation.url}" target="_blank" rel="noopener">docs</a>` : '';
     return {nm, sc, rs, dt, doc};
   });
 
@@ -566,7 +552,7 @@ document.querySelectorAll('.tab').forEach(t => {
   });
 });
 
-// heatmap (now reads from BUNDLED, no fetch)
+// heatmap
 let heatLoaded = false, heatMatrix = null, heatChecks = [], heatRepos = [];
 function initHeatmap(){
   if (heatLoaded) return;
@@ -628,16 +614,16 @@ renderTable();
 """
     html = (
         html.replace("__TITLE__", title)
-        .replace("__ORG_TXT__", org_txt)
-        .replace("__THRESHOLD__", str(threshold))
-        .replace("__NOW__", now)
-        .replace("__TOTAL__", str(total))
-        .replace("__AVG__", avg)
-        .replace("__MED__", med)
-        .replace("__BELOW__", str(below))
-        .replace("__ROWS_JS__", rows_js)
-        .replace("__BINS_JS__", bins_js)
-        .replace("__BUNDLED_JS__", bundled_js)
+            .replace("__ORG_TXT__", org_txt)
+            .replace("__THRESHOLD__", str(threshold))
+            .replace("__NOW__", now)
+            .replace("__TOTAL__", str(total))
+            .replace("__AVG__", avg)
+            .replace("__MED__", med)
+            .replace("__BELOW__", str(below))
+            .replace("__ROWS_JS__", rows_js)
+            .replace("__BINS_JS__", bins_js)
+            .replace("__BUNDLED_JS__", bundled_js)
     )
     dash_path.write_text(html, encoding="utf-8")
 
