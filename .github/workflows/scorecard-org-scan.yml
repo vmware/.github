@@ -1,4 +1,4 @@
-name: Org-wide / Targeted Scorecard Scan
+name: Org-wide / Targeted Scorecard Scan (native, pinned)
 
 on:
   schedule:
@@ -19,7 +19,7 @@ on:
         type: string
         required: false
       file:
-        description: "For file mode: path to repos file (checked into this repo)."
+        description: "For file mode: path to repos file (in this repo)"
         type: string
         required: false
       concurrency:
@@ -31,9 +31,9 @@ on:
         type: string
         default: "7.0"
       script_flags:
-        description: "Script flags (e.g., --mode native --overwrite --include-forks --only-private)"
+        description: "Extra script flags (space-separated)"
         type: string
-        default: "--mode native"          # << pin to native mode by default
+        default: "--mode native"     # force native mode by default
       extra_args:
         description: "Extra args for Scorecard CLI (e.g., --enable=Binary-Artifacts)"
         type: string
@@ -53,6 +53,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout .github repo
         uses: actions/checkout@v4
@@ -62,14 +63,34 @@ jobs:
         with:
           python-version: "3.11"
 
-      # === CHANGE #1: Install Scorecard CLI (native, pinned) ===
+      # Install Scorecard CLI (native, pinned)
       - name: Install Scorecard CLI (native, pinned)
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="v5.2.1"   # Pin to a specific release tag
-          curl -sSfL https://raw.githubusercontent.com/ossf/scorecard/main/install.sh \
-            | sh -s -- -b /usr/local/bin "$VERSION"
+
+          VERSION="v5.2.1"               # <-- pin the Scorecard release here
+          VER_NUM="${VERSION#v}"         # "5.2.1"
+
+          OS="linux"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)  ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+            arm64)   ARCH="arm64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+
+          ASSET="scorecard_${VER_NUM}_${OS}_${ARCH}.tar.gz"
+          URL="https://github.com/ossf/scorecard/releases/download/${VERSION}/${ASSET}"
+
+          echo "Downloading $URL"
+          curl -fL --retry 5 --retry-delay 3 -o "/tmp/${ASSET}" "$URL"
+
+          tar -xzf "/tmp/${ASSET}" -C /tmp
+          chmod +x /tmp/scorecard
+          sudo mv /tmp/scorecard /usr/local/bin/scorecard
+
           scorecard --version
 
       - name: Install Python deps
@@ -104,25 +125,26 @@ jobs:
             *) echo "unknown mode"; exit 1;;
           esac
 
+          # user-supplied script flags (defaults include --mode native)
           if [[ -n "${{ inputs.script_flags }}" ]]; then
             read -r -a SF_ARR <<< "${{ inputs.script_flags }}"
             ARGS+=("${SF_ARR[@]}")
           fi
 
+          # Extra args passed to the Scorecard CLI itself
           if [[ -n "${{ inputs.extra_args }}" ]]; then
             ARGS+=(--extra-scorecard-args "${{ inputs.extra_args }}")
           fi
 
           printf '%s\0' "${ARGS[@]}" > args.z
 
-      # === CHANGE #2: Ensure native mode is used when running ===
-      - name: Run scan
+      - name: Run scan (native)
         env:
           GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}
         run: |
+          set -euo pipefail
           mapfile -d '' ARGS < args.z
-          # Force native mode to use the pinned CLI just installed.
-          # If --mode was already provided in script_flags, this will be ignored by your script.
+          # Ensure native mode is used even if omitted from inputs
           python3 scripts/scorecard_org_scan.py --mode native "${ARGS[@]}"
 
       - name: Upload report artifacts
