@@ -91,7 +91,7 @@ jobs:
           chmod +x /tmp/scorecard
           sudo mv /tmp/scorecard /usr/local/bin/scorecard
 
-          scorecard --version
+          scorecard version
 
       - name: Install Python deps
         run: pip install requests
