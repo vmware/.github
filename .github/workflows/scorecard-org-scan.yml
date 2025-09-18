@@ -31,9 +31,9 @@ on:
         type: string
         default: "7.0"
       script_flags:
-        description: "Script flags (e.g., --mode docker --overwrite --include-forks --only-private)"
+        description: "Script flags (e.g., --mode native --overwrite --include-forks --only-private)"
         type: string
-        default: "--mode docker"
+        default: "--mode native"          # << pin to native mode by default
       extra_args:
         description: "Extra args for Scorecard CLI (e.g., --enable=Binary-Artifacts)"
         type: string
@@ -47,8 +47,8 @@ on:
 permissions:
   contents: read
   actions: read
-  pages: write     # only needed if publish_pages == true
-  id-token: write  # only needed if publish_pages == true
+  pages: write
+  id-token: write
 
 jobs:
   scan:
@@ -62,11 +62,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      # CLI not needed in docker mode, but harmless if installed
-      - name: Install Scorecard CLI (optional)
+      # === CHANGE #1: Install Scorecard CLI (native, pinned) ===
+      - name: Install Scorecard CLI (native, pinned)
+        shell: bash
         run: |
+          set -euo pipefail
+          VERSION="v5.2.1"   # Pin to a specific release tag
           curl -sSfL https://raw.githubusercontent.com/ossf/scorecard/main/install.sh \
-            | sh -s -- -b /usr/local/bin || true
+            | sh -s -- -b /usr/local/bin "$VERSION"
+          scorecard --version
 
       - name: Install Python deps
         run: pip install requests
@@ -78,9 +82,8 @@ jobs:
           set -euo pipefail
           OUT_DIR="out"; mkdir -p "$OUT_DIR"
 
-          ARGS=(--out "$OUT_DIR" --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}")
+          ARGS=(--out "$OUT_DIR" --concurrency "${{ inputs.concurrency }}" --threshold "${{ inputs.threshold }}" )
 
-          # Optional: org (helps resolve bare repo names and needed for org mode)
           [[ -n "${{ inputs.org }}" ]] && ARGS+=(--org "${{ inputs.org }}")
 
           case "${{ inputs.mode }}" in
@@ -101,25 +104,26 @@ jobs:
             *) echo "unknown mode"; exit 1;;
           esac
 
-          # Script flags (e.g., --mode docker --overwrite --include-archived --only-private --include-forks)
           if [[ -n "${{ inputs.script_flags }}" ]]; then
             read -r -a SF_ARR <<< "${{ inputs.script_flags }}"
             ARGS+=("${SF_ARR[@]}")
           fi
 
-          # Extra args passed through to Scorecard CLI itself
           if [[ -n "${{ inputs.extra_args }}" ]]; then
             ARGS+=(--extra-scorecard-args "${{ inputs.extra_args }}")
           fi
 
           printf '%s\0' "${ARGS[@]}" > args.z
 
+      # === CHANGE #2: Ensure native mode is used when running ===
       - name: Run scan
         env:
-          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}   # fine-grained PAT (read-only to target repos)
+          GITHUB_AUTH_TOKEN: ${{ secrets.SCORECARD_PAT }}
         run: |
           mapfile -d '' ARGS < args.z
-          python3 scripts/scorecard_org_scan.py "${ARGS[@]}"
+          # Force native mode to use the pinned CLI just installed.
+          # If --mode was already provided in script_flags, this will be ignored by your script.
+          python3 scripts/scorecard_org_scan.py --mode native "${ARGS[@]}"
 
       - name: Upload report artifacts
         uses: actions/upload-artifact@v4
