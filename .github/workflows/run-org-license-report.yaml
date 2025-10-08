@@ -52,7 +52,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .github/tools/.cache
-          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}
+          #key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}
+          # in the workflow step "Cache detector index", change the cache key
+          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}-${{ github.run_id }}
+
+          
 
       - name: Run org-wide license scan
         env:
