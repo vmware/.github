@@ -75,9 +75,8 @@ class RepoResult:
     error: Optional[str]
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time=gmtime())
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-from time import gmtime
 
 async def _rate_limit_sleep(resp: aiohttp.ClientResponse) -> None:
     try:
