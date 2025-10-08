@@ -85,7 +85,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Heuristics ----------
 ANCHORS = [
-    r"apache license[, ]+version 2\.0",
+    r"\bapache license\b", # allow split header lines
     r"gnu (lesser )?general public license",
     r"mozilla public license",
     r"permission is hereby granted, free of charge",
