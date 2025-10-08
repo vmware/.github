@@ -193,26 +193,50 @@ def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
 # ---------- Policy loading & normalization ----------
 def _flatten_permissive_entries(raw_value: Any) -> List[str]:
     """
-    Accepts:
-      - list[str]
-      - list[dict] (take any 'name' and/or 'spdx_id' fields)
-      - dict with 'permissive_names': <list[...]>
-    Returns a flat list of strings.
+    Normalize a permissive policy blob into a flat list of strings.
+    Accepted shapes:
+      1) list[str]
+      2) list[dict]           -> pull 'name' and/or 'spdx_id' (or 'spdx'/'id')
+      3) dict with 'permissive_names': <list[...]>
+      4) dict-as-map: { "<name_or_id>": <bool|dict|any>, ... }
+         - if value is truthy, include the KEY as an entry
+         - if value is a dict, also pull 'name'/'spdx_id' inside it
     """
+    # Case 3: dict with explicit key
     if isinstance(raw_value, dict) and "permissive_names" in raw_value:
         raw_value = raw_value["permissive_names"]
 
     out: List[str] = []
+
+    # Case 1/2: top-level list
     if isinstance(raw_value, list):
         for item in raw_value:
             if isinstance(item, str):
                 out.append(item)
             elif isinstance(item, dict):
-                # Collect both if present
-                if "name" in item and isinstance(item["name"], str):
-                    out.append(item["name"])
-                if "spdx_id" in item and isinstance(item["spdx_id"], str):
-                    out.append(item["spdx_id"])
+                name = item.get("name")
+                spdx = item.get("spdx_id") or item.get("spdx") or item.get("id")
+                if isinstance(name, str):
+                    out.append(name)
+                if isinstance(spdx, str):
+                    out.append(spdx)
+        return out
+
+    # Case 4: dict-as-map
+    if isinstance(raw_value, dict):
+        for k, v in raw_value.items():
+            if v:  # truthy means "permissive"
+                if isinstance(k, str):
+                    out.append(k)
+                if isinstance(v, dict):
+                    name = v.get("name")
+                    spdx = v.get("spdx_id") or v.get("spdx") or v.get("id")
+                    if isinstance(name, str):
+                        out.append(name)
+                    if isinstance(spdx, str):
+                        out.append(spdx)
+        return out
+
     return out
 
 def _load_permissive_entries(path: Path) -> List[str]:
@@ -220,7 +244,16 @@ def _load_permissive_entries(path: Path) -> List[str]:
         raw = _read_json_any(path)
     except Exception:
         return []
-    return _flatten_permissive_entries(raw)
+    entries = _flatten_permissive_entries(raw)
+    # De-dup while preserving order
+    seen = set()
+    uniq = []
+    for e in entries:
+        if isinstance(e, str) and e not in seen:
+            seen.add(e)
+            uniq.append(e)
+    return uniq
+
 
 _LICENSE_REF_RE = re.compile(r"^\s*licenseref[\-_: ]*", flags=re.I)
 
