@@ -1,6 +1,7 @@
 name: Org License Report (public repos)
 
 on:
+  # Manual run: provide your org login (e.g., "vmware")
   workflow_dispatch:
     inputs:
       org:
@@ -15,15 +16,17 @@ on:
         required: false
         default: "20"
       api_base_url:
-        description: "GitHub API base (leave default unless GitHub Enterprise)"
+        description: "GitHub API base (use for GH Enterprise)"
         required: false
         default: "https://api.github.com"
+
+  # Optional scheduled run (Mondays 07:00 UTC)
   schedule:
-    - cron: "0 7 * * 1"  # optional weekly run (Mondays 07:00 UTC); adjust as you like
+    - cron: "0 7 * * 1"
 
 permissions:
-  contents: read    # to fetch repo files and metadata
-  actions: read     # not strictly needed, but harmless for summaries
+  contents: read
+  actions: read
 
 jobs:
   run:
@@ -39,11 +42,13 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
+        # NOTE: no cchardet/aiodns; they break on Py 3.11. Use charset-normalizer.
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp rapidfuzz
+          pip install aiohttp rapidfuzz charset-normalizer
 
       - name: Cache detector index
+        # Caches normalized catalog so we don't reprocess licenses_all.json/.gz every run
         uses: actions/cache@v4
         with:
           path: .github/tools/.cache
@@ -51,9 +56,10 @@ jobs:
 
       - name: Run org-wide license scan
         env:
-          # REQUIRED: create a Fine-grained PAT and store in org/repo Secret named ORG_LICENSE_REPORT_TOKEN
-          # See "Token & permissions" section below.
-          GITHUB_TOKEN: ${{ secrets.ORG_LICENSE_REPORT_TOKEN }}
+          # REQUIRED: Organization secret containing Fine-grained PAT
+          #   Repo permissions: Metadata (Read), Contents (Read)
+          #   Resource owner: your org; Repository access: All (or specific set)
+          GITHUB_TOKEN: ${{ secrets.ORG_REPORT_TOKEN }}
           API_BASE_URL: ${{ inputs.api_base_url }}
           LICENSES_JSON: data/licenses_all.json
           PERMISSIVE_JSON: data/permissive_names.json
@@ -66,7 +72,7 @@ jobs:
             --output-json "license_report.json" \
             --output-csv "license_report.csv"
 
-      - name: Show summary
+      - name: Summarize results
         run: |
           echo "### Org License Report Summary" >> $GITHUB_STEP_SUMMARY
           jq -r '.summary | to_entries[] | "- **\(.key)**: \(.value)"' license_report.json >> $GITHUB_STEP_SUMMARY
