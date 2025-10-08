@@ -17,6 +17,10 @@ Environment:
   - GITHUB_TOKEN  (Fine-grained PAT; see YAML comments for required perms)
   - API_BASE_URL  (default: https://api.github.com; change for GH Enterprise)
   - LICENSES_JSON / PERMISSIVE_JSON / CACHE_DIR (used by license_detector)
+Hardening:
+  - Rate-limit aware (sleeps until reset when near limit).
+  - Concurrency control, timeouts, retries (best-effort).
+  - Robust decoding of raw bytes (charset-normalizer → utf-8 → utf-8-sig → cp1252 → latin-1).
 
 CLI:
   python detect_org_repo_licenses.py \
@@ -28,26 +32,31 @@ CLI:
 """
 
 from __future__ import annotations
-import os, sys, csv, json, asyncio, time
+import os, sys, csv, json, asyncio, time, base64
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import aiohttp
 from aiohttp import ClientResponseError, ClientConnectorError, ClientTimeout
 from pathlib import Path
 
-# Local import (this script lives in .github/scripts alongside license_detector.py)
+# Optional robust decoder
+try:
+    from charset_normalizer import from_bytes as cn_from_bytes
+    HAVE_CN = True
+except Exception:
+    HAVE_CN = False
+
+# Local import (sibling script)
 sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts"))
 import license_detector as ld  # type: ignore
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.github.com").rstrip("/")
 TOKEN = os.getenv("GITHUB_TOKEN", "")
 
-# Defaults can be overridden via CLI flags
 DEFAULT_TIMEOUT_S = 20
 DEFAULT_MAX_CONCURRENCY = 16
 
-# Candidate root license filenames to try if the API doesn't identify a license
 LICENSE_FILENAMES = [
     "LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE",
     "LICENSE.txt", "LICENSE.md", "COPYING.txt", "COPYRIGHT.txt", "NOTICE.txt"
@@ -55,7 +64,6 @@ LICENSE_FILENAMES = [
 
 @dataclass
 class RepoResult:
-    """One row per repository in the output report."""
     repo: str
     default_branch: Optional[str]
     license_name: Optional[str]
@@ -69,18 +77,14 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 async def _rate_limit_sleep(resp: aiohttp.ClientResponse) -> None:
-    """
-    If we're at/near rate limits, pause until reset.
-    This keeps the job stable for ~200 repos with a fine-grained PAT.
-    """
+    """Pause until REST rate-limit reset if we're at/near the limit."""
     try:
         remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
         reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
     except ValueError:
         return
     if remaining <= 1 and reset > 0:
-        sleep_for = max(0, reset - int(time.time()) + 2)  # +2s buffer
-        await asyncio.sleep(sleep_for)
+        await asyncio.sleep(max(0, reset - int(time.time()) + 2))
 
 def _auth_headers() -> Dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
@@ -88,16 +92,40 @@ def _auth_headers() -> Dict[str, str]:
         h["Authorization"] = f"Bearer {TOKEN}"
     return h
 
+def decode_bytes_safe(data: bytes) -> str:
+    """
+    Best-effort text decoding for license files.
+    Order:
+      1) charset-normalizer (if available)
+      2) utf-8
+      3) utf-8-sig (BOM)
+      4) cp1252 (Windows smart quotes 0x93/0x94)
+      5) latin-1
+      6) utf-8 with replacement (never fail)
+    """
+    if not data:
+        return ""
+    if HAVE_CN:
+        try:
+            res = cn_from_bytes(data).best()
+            if res:
+                return str(res)
+        except Exception:
+            pass
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return data.decode(enc)
+        except Exception:
+            continue
+    return data.decode("utf-8", errors="replace")
+
 async def list_public_repos(session: aiohttp.ClientSession, org: str) -> List[Dict[str, Any]]:
-    """
-    List ALL public repos for the org (handles pagination).
-    """
+    """Enumerate ALL public repos in the org (paginated)."""
     out: List[Dict[str, Any]] = []
     page = 1
     per_page = 100
     url = f"{API_BASE_URL}/orgs/{org}/repos"
     params = {"type": "public", "per_page": per_page, "page": page, "sort": "full_name", "direction": "asc"}
-
     while True:
         async with session.get(url, headers=_auth_headers(), params=params) as resp:
             if resp.status == 404:
@@ -112,15 +140,10 @@ async def list_public_repos(session: aiohttp.ClientSession, org: str) -> List[Di
                 break
             page += 1
             params["page"] = page
-
-    # Double-check visibility (defensive)
     return [r for r in out if not r.get("private") and r.get("visibility") == "public"]
 
 async def get_repo_license_api(session: aiohttp.ClientSession, owner: str, repo: str) -> Optional[Dict[str, Any]]:
-    """
-    Use GitHub's "Get the license for a repository" API.
-    Returns None if 404 or no license. When successful, contains license.spdx_id.
-    """
+    """GitHub 'Get the license for a repository' API (None on 404/no license)."""
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/license"
     try:
         async with session.get(url, headers=_auth_headers()) as resp:
@@ -137,8 +160,9 @@ async def get_repo_license_api(session: aiohttp.ClientSession, owner: str, repo:
 
 async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, repo: str, default_branch: str) -> Optional[str]:
     """
-    Try to fetch the contents of a root license file by common names.
-    We rely on the 'contents' API and then download_url for raw text.
+    Try common root license filenames via the 'contents' API.
+    Download raw BYTES and decode robustly. If no download_url, fall back to
+    base64 'content' field.
     """
     for name in LICENSE_FILENAMES:
         url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{name}"
@@ -149,55 +173,67 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
                     continue
                 resp.raise_for_status()
                 meta = await resp.json()
+
+                # Fast path: direct raw download
                 dl = meta.get("download_url")
-                if not dl:
-                    continue
-                async with session.get(dl, headers=_auth_headers()) as r2:
-                    if r2.status != 200:
+                if dl:
+                    async with session.get(dl, headers=_auth_headers()) as r2:
+                        if r2.status != 200:
+                            continue
+                        raw = await r2.read()
+                        await _rate_limit_sleep(r2)
+                        return decode_bytes_safe(raw)
+
+                # Fallback: use base64-encoded content
+                content = meta.get("content")
+                enc = meta.get("encoding")
+                if content and enc == "base64":
+                    try:
+                        raw = base64.b64decode(content, validate=False)
+                        return decode_bytes_safe(raw)
+                    except Exception:
                         continue
-                    txt = await r2.text()
-                    await _rate_limit_sleep(r2)
-                    return txt
+
         except ClientResponseError:
             continue
         except (ClientConnectorError, asyncio.TimeoutError):
+            continue
+        except Exception:
+            # Don't let odd content kill the run; try next candidate
             continue
     return None
 
 async def detect_one_repo(session: aiohttp.ClientSession, owner: str, repo: Dict[str, Any], timeout_s: int) -> RepoResult:
     """
-    Handle one repository:
-      1) Try GitHub License API (fast path).
-      2) If unknown/NOASSERTION, fetch a root license file and run detector.
-      3) Normalize to canonical catalog name before policy check.
+    Per-repo flow:
+      1) Try License API.
+      2) If NOASSERTION/unknown/timeout, fetch likely root license file and detect.
+      3) Normalize to canonical catalog name (via SPDX where possible).
+      4) Evaluate permissiveness (names and/or IDs; LicenseRef-aware; expressions ok).
     """
     name = repo["name"]
     default_branch = repo.get("default_branch")
     full = f"{owner}/{name}"
 
-    # Build catalog maps (cheap; OK per call)
-    name_to_id, id_to_name = ld.catalog_maps()
-
-    # --- Fast path: GitHub License API ---
+    # Fast path: License API
     try:
         data = await asyncio.wait_for(get_repo_license_api(session, owner, name), timeout=timeout_s)
         if data:
             spdx_id = (data.get("license") or {}).get("spdx_id")
             if spdx_id and spdx_id != "NOASSERTION":
-                # Prefer canonical catalog name via SPDX ID; fall back to API-provided name
+                # Prefer canonical catalog name via SPDX; else fall back to API name
+                _, id_to_name = ld.catalog_maps()
                 canonical_name = id_to_name.get(spdx_id) or (data.get("license") or {}).get("name") or spdx_id
                 perm = ld.is_permissive(canonical_name, spdx_id)
                 cla = (None if perm is None else (not perm))
                 return RepoResult(full, default_branch, canonical_name, spdx_id, "api", perm, cla, None)
     except asyncio.TimeoutError:
-        # Continue to fallback
         pass
     except Exception as e:
-        # Continue to fallback with context in final report (non-fatal)
+        # Continue to fallback; record later as needed
         api_err = f"license_api_error: {type(e).__name__}: {e}"
-        # (we'll still try a text-based detection below)
 
-    # --- Fallback: fetch a likely license file and run the robust detector ---
+    # Fallback: fetch and detect
     try:
         text = await asyncio.wait_for(fetch_root_license_text(session, owner, name, default_branch or ""), timeout=timeout_s)
         if text:
@@ -216,9 +252,7 @@ async def detect_one_repo(session: aiohttp.ClientSession, owner: str, repo: Dict
         return RepoResult(full, default_branch, None, None, None, None, True, f"fallback_error: {type(e).__name__}: {e}")
 
 async def bounded_gather(tasks, limit: int):
-    """
-    Concurrency guard—ensures we don't overload the API or the runner.
-    """
+    """Concurrency guard so we don't overload the API/runner."""
     semaphore = asyncio.Semaphore(limit)
     async def _run(coro):
         async with semaphore:
@@ -226,9 +260,7 @@ async def bounded_gather(tasks, limit: int):
     return await asyncio.gather(*[_run(t) for t in tasks])
 
 def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -> None:
-    """
-    Emit both JSON (detailed with summary) and CSV (tabular) reports.
-    """
+    """Emit JSON (with summary) and CSV (tabular) reports."""
     rows = []
     errors, skipped = 0, 0
     permissive, nonpermissive, unknown = 0, 0, 0
@@ -266,10 +298,8 @@ def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -
         "skipped_or_no_license": skipped
     }
 
-    # JSON with summary + per-repo data
     json_path.write_text(json.dumps({"summary": summary, "results": rows}, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # CSV for spreadsheets
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["repo","default_branch","license_name","spdx_id","match","permissive","requires_CLA","error"])
@@ -279,7 +309,7 @@ def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -
 def _parse_args(argv: List[str]) -> Dict[str, Any]:
     import argparse
     p = argparse.ArgumentParser(description="Scan public repos of an org and report licenses + permissiveness.")
-    p.add_argument("--org", required=True, help="Organization login (e.g., my-org)")
+    p.add_argument("--org", required=True, help="Organization login (e.g., vmware)")
     p.add_argument("--max-concurrency", default=str(DEFAULT_MAX_CONCURRENCY), help="Max concurrent repo tasks (default 16)")
     p.add_argument("--timeout-s", default=str(DEFAULT_TIMEOUT_S), help="Per-request timeout seconds (default 20)")
     p.add_argument("--output-json", required=True, help="Path to write JSON report")
@@ -294,11 +324,8 @@ def _parse_args(argv: List[str]) -> Dict[str, Any]:
     }
 
 async def _main_async(org: str, max_conc: int, timeout_s: int, json_path: Path, csv_path: Path) -> None:
-    """
-    Main async entry: HTTP session management, repo enumeration, task fan-out.
-    """
     timeout = ClientTimeout(total=None, sock_connect=timeout_s, sock_read=timeout_s)
-    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)  # reuse sockets, cache DNS
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         repos = await list_public_repos(session, org)
         if not repos:
@@ -308,9 +335,6 @@ async def _main_async(org: str, max_conc: int, timeout_s: int, json_path: Path, 
     _write_reports(results, json_path, csv_path)
 
 def main() -> None:
-    """
-    Synchronous entry for CLI & GitHub Actions.
-    """
     if not TOKEN:
         print("ERROR: GITHUB_TOKEN is not set. Add a Fine-grained PAT as ORG_REPORT_TOKEN org secret.", file=sys.stderr)
         sys.exit(2)
