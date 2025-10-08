@@ -1,7 +1,6 @@
 name: Org License Report (public repos)
 
 on:
-  # Manual run: provide your org login (e.g., "vmware")
   workflow_dispatch:
     inputs:
       org:
@@ -20,7 +19,7 @@ on:
         required: false
         default: "https://api.github.com"
 
-  # Optional scheduled run (Mondays 07:00 UTC)
+  # Optional scheduled run
   schedule:
     - cron: "0 7 * * 1"
 
@@ -42,27 +41,21 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        # NOTE: no cchardet/aiodns; they break on Py 3.11. Use charset-normalizer.
         run: |
           python -m pip install --upgrade pip
           pip install aiohttp rapidfuzz charset-normalizer
 
       - name: Cache detector index
-        # Caches normalized catalog so we don't reprocess licenses_all.json/.gz every run
         uses: actions/cache@v4
         with:
           path: .github/tools/.cache
-          #key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}
-          # in the workflow step "Cache detector index", change the cache key
-          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}-${{ github.run_id }}
-
-          
+          # Include catalog, policy, and detector code in the cache key to avoid stale logic
+          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'data/permissive_names.json', 'scripts/license_detector.py') }}
 
       - name: Run org-wide license scan
         env:
-          # REQUIRED: Organization secret containing Fine-grained PAT
-          #   Repo permissions: Metadata (Read), Contents (Read)
-          #   Resource owner: your org; Repository access: All (or specific set)
+          # Fine-grained PAT as an **Organization secret**
+          # Repo permissions: Metadata (Read), Contents (Read)
           GITHUB_TOKEN: ${{ secrets.ORG_LICENSE_REPORT_TOKEN }}
           API_BASE_URL: ${{ inputs.api_base_url }}
           LICENSES_JSON: data/licenses_all.json
