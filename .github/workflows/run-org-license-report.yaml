@@ -1,0 +1,83 @@
+name: Org License Report (public repos)
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "GitHub organization (login) to scan"
+        required: true
+      max_concurrency:
+        description: "Max concurrent repo tasks (default 16)"
+        required: false
+        default: "16"
+      request_timeout_s:
+        description: "Per-request timeout seconds (default 20)"
+        required: false
+        default: "20"
+      api_base_url:
+        description: "GitHub API base (leave default unless GitHub Enterprise)"
+        required: false
+        default: "https://api.github.com"
+  schedule:
+    - cron: "0 7 * * 1"  # optional weekly run (Mondays 07:00 UTC); adjust as you like
+
+permissions:
+  contents: read    # to fetch repo files and metadata
+  actions: read     # not strictly needed, but harmless for summaries
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout central .github repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp aiodns cchardet rapidfuzz
+
+      - name: Cache detector index
+        uses: actions/cache@v4
+        with:
+          path: .github/tools/.cache
+          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'scripts/license_detector.py') }}
+
+      - name: Run org-wide license scan
+        env:
+          # REQUIRED: create a Fine-grained PAT and store in org/repo Secret named ORG_REPORT_TOKEN
+          # See "Token & permissions" section below.
+          GITHUB_TOKEN: ${{ secrets.ORG_REPORT_TOKEN }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          LICENSES_JSON: data/licenses_all.json
+          PERMISSIVE_JSON: data/permissive_names.json
+          CACHE_DIR: .github/tools/.cache
+        run: |
+          python scripts/detect_org_repo_licenses.py \
+            --org "${{ inputs.org }}" \
+            --max-concurrency "${{ inputs.max_concurrency }}" \
+            --timeout-s "${{ inputs.request_timeout_s }}" \
+            --output-json "license_report.json" \
+            --output-csv "license_report.csv"
+
+      - name: Show summary
+        run: |
+          echo "### Org License Report Summary" >> $GITHUB_STEP_SUMMARY
+          jq -r '.summary | to_entries[] | "- **\(.key)**: \(.value)"' license_report.json >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### First 20 rows" >> $GITHUB_STEP_SUMMARY
+          head -n 21 license_report.csv | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report-${{ inputs.org }}
+          path: |
+            license_report.json
+            license_report.csv
