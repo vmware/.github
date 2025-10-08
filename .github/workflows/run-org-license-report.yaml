@@ -50,7 +50,9 @@ jobs:
         with:
           path: .github/tools/.cache
           # Include catalog, policy, and detector code in the cache key to avoid stale logic
-          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'data/permissive_names.json', 'scripts/license_detector.py') }}
+          # key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'data/permissive_names.json', 'scripts/license_detector.py') }}
+          key: licenses-cache-${{ hashFiles('data/licenses_all.json', 'data/licenses_all.json.gz', 'data/permissive_names.json', 'scripts/license_detector.py') }}-${{ github.run_id }}
+
 
       - name: Run org-wide license scan
         env:
