@@ -56,6 +56,32 @@ Design notes:
     at .github/tools/.cache/licenses_all.cache.json, invalidated when the
     source JSON/.gz changes (SHA256 check).
 """
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+license_detector.py (expression-aware, LicenseRef-aware)
+-------------------------------------------------------
+Purpose:
+  - Detect a repo's root license from raw text that may include prefaces.
+  - Match against a single large catalog (licenses_all.json/.gz).
+  - Decide "permissive" via a separate policy file (permissive_names.json).
+
+Key features:
+  - Robust preamble stripping and similarity matching (hash, n-gram Jaccard, RapidFuzz).
+  - Catalog cache for speed (.github/tools/.cache/licenses_all.cache.json).
+  - Permissive policy supports BOTH canonical names AND SPDX IDs (mixed).
+  - SPDX expression evaluation: OR / AND / WITH (parentheses supported).
+  - LicenseRef normalization: treats “LicenseRef-…”, “LicenseRef_…”, “LicenseRef …”
+    uniformly and also compares variants *without* the prefix for policy.
+
+Inputs (drop in `data/`):
+  - licenses_all.json (or .json.gz): entries with {name, spdx_id, text_varies, base_text}
+  - permissive_names.json: either {"permissive_names":[...]} OR a plain array
+
+Public API:
+  - detect_from_text(text) -> { matched, name, id, match, notes }
+  - is_permissive(license_name, spdx_id) -> True/False/None
+"""
 
 from __future__ import annotations
 import json, os, re, hashlib, gzip
@@ -93,13 +119,12 @@ JACCARD_ACCEPT = 0.80
 FUZZY_ACCEPT   = 95.0
 FUZZY_STRONG   = 97.0
 
-# Tiny safety net if we can't map an id/name via catalog
-FALLBACK_PERMISSIVE_SPDX = {
+FALLBACK_PERMISSIVE_SPDX = {  # tiny safety net
     "MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "ISC",
     "Zlib", "Unlicense", "BSL-1.0", "Python-2.0", "CC0-1.0"
 }
 
-# ---------- Small text helpers ----------
+# ---------- Text helpers ----------
 def _normalize(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n").lower()
     s = re.sub(r"[ \t]+", " ", s)
@@ -153,10 +178,7 @@ def _hash_file_bytes(path: Path) -> str:
 # ---------- Catalog cache ----------
 def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     """
-    catalog[name] = {
-      'name', 'spdx_id', 'text_varies',
-      'base_norm', 'base_hash', 'len', 'anchor_flags'
-    }
+    catalog[name] = { 'name','spdx_id','text_varies','base_norm','base_hash','len','anchor_flags' }
     """
     src_hash = _hash_file_bytes(licenses_path)
     cache_file = CACHE_DIR / "licenses_all.cache.json"
@@ -193,41 +215,44 @@ def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     )
     return items
 
-# ---------- Permissive policy index ----------
+# ---------- Policy loading & normalization ----------
 def _load_permissive_raw(path: Path) -> List[str]:
-    """
-    Load the permissive list as-is. It can be either:
-      { "permissive_names": [ ... ] }  OR  [ ... ]
-    Entries can be canonical names OR SPDX IDs (mixed is OK).
-    """
     raw = _read_json_any(path)
     return raw.get("permissive_names", raw) if isinstance(raw, dict) else raw
 
+_LICENSE_REF_RE = re.compile(r"^\s*licenseref[\-_: ]*", flags=re.I)
+
+def _strip_licenseref_prefix(s: str) -> str:
+    return _LICENSE_REF_RE.sub("", s or "")
+
 def _canon_key(s: str) -> str:
-    """
-    Robust key normalization for policy comparisons:
-      - casefold
-      - normalize quotes/dashes
-      - strip all non-alnum (keep 0-9a-z)
-    """
     s = (s or "").casefold()
     s = s.replace("’", "'").replace("“", '"').replace("”", '"').replace("–", "-").replace("—", "-")
-    s = re.sub(r"[^a-z0-9]+", "", s)  # remove spaces, quotes, punctuation
+    s = re.sub(r"[^a-z0-9]+", "", s)
     return s
+
+def _canon_variants(s: str) -> List[str]:
+    """
+    Canonical keys for original and LicenseRef-stripped forms.
+    'LicenseRef-Broadcom-Source-Available' ->
+      ['licenserefbroadcomsourceavailable','broadcomsourceavailable']
+    """
+    if not s:
+        return []
+    c1 = _canon_key(s)
+    s2 = _strip_licenseref_prefix(s)
+    c2 = _canon_key(s2) if s2 != s else c1
+    return list(dict.fromkeys([c1, c2]))
 
 def _build_perm_index() -> Tuple[set, set, set]:
     """
-    Build three sets for permissive checks:
-      - allow_name_raw:   lowercased names exactly as provided in policy
-      - allow_id_raw:     SPDX IDs exactly as provided in policy
-      - allow_canon:      canonicalized keys for both names & ids (robust match)
-
-    Additionally, if a policy entry matches a catalog NAME, also add that
-    entry's SPDX ID to allow_id_raw (and vice versa). This lets a policy
-    listing either "Apache-2.0" OR "Apache License 2.0" work equivalently.
+    Build permissive sets:
+      - allow_name_raw: exact catalog names (raw strings)
+      - allow_id_raw:   exact SPDX IDs (raw strings)
+      - allow_canon:    canonical keys for both names and IDs (with/without LicenseRef)
+    Cross-link policy entries via the catalog so either form (name or ID) enables both.
     """
     catalog = _load_catalog_with_cache(LICENSES_JSON)
-    # Build maps for cross-walking names <-> ids
     name_to_id: Dict[str, str] = {}
     id_to_name: Dict[str, str] = {}
     for name, rec in catalog.items():
@@ -236,32 +261,89 @@ def _build_perm_index() -> Tuple[set, set, set]:
             name_to_id[name] = spdx
             id_to_name[spdx] = name
 
-    # Raw policy entries (could be names or spdx ids)
-    entries = _load_permissive_raw(PERMISSIVE_JSON)
-    entries = [e for e in entries if isinstance(e, str)]
+    entries = [e for e in _load_permissive_raw(PERMISSIVE_JSON) if isinstance(e, str)]
 
     allow_name_raw: set = set()
     allow_id_raw: set = set()
     allow_canon: set = set()
 
-    # First pass: store raw
     for e in entries:
-        allow_canon.add(_canon_key(e))
-        if e in id_to_name:   # exact SPDX ID string appears in catalog
+        for v in _canon_variants(e):
+            allow_canon.add(v)
+
+        if e in id_to_name:
             allow_id_raw.add(e)
-            allow_canon.add(_canon_key(id_to_name[e]))  # add its name canon too
-        elif e in name_to_id: # exact NAME string appears in catalog
+            for v in _canon_variants(id_to_name[e]):
+                allow_canon.add(v)
+        elif e in name_to_id:
             allow_name_raw.add(e)
-            allow_canon.add(_canon_key(name_to_id[e]))  # add its id canon too
-        else:
-            # Unknown string (maybe punctuation variant). We'll still use canonical key.
-            pass
+            for v in _canon_variants(name_to_id[e]):
+                allow_canon.add(v)
+        # else unknown to catalog, but canonical key still helps
 
     return allow_name_raw, allow_id_raw, allow_canon
 
-# ---------- Public policy helpers ----------
+# ---------- SPDX expression parsing ----------
+def _split_top(expr: str, op: str) -> List[str]:
+    s = expr
+    i, n, level = 0, len(s), 0
+    parts, buf = [], []
+    op_sp = f" {op} "
+    while i < n:
+        ch = s[i]
+        if ch == '(':
+            level += 1
+            buf.append(ch); i += 1; continue
+        if ch == ')':
+            level = max(0, level - 1)
+            buf.append(ch); i += 1; continue
+        if level == 0 and s[i:i+len(op_sp)].upper() == op_sp:
+            parts.append("".join(buf)); buf = []; i += len(op_sp); continue
+        buf.append(ch); i += 1
+    parts.append("".join(buf))
+    return parts
+
+def _strip_parens(s: str) -> str:
+    t = s.strip()
+    if t.startswith('(') and t.endswith(')'):
+        level = 0
+        for ch in t:
+            if ch == '(': level += 1
+            elif ch == ')':
+                level -= 1
+                if level < 0: return s.strip()
+        if level == 0:
+            return t[1:-1].strip()
+    return t
+
+def _remove_with(term: str) -> str:
+    parts = re.split(r"\bWITH\b", term, flags=re.I)
+    return parts[0].strip()
+
+def _parse_spdx_expr(expr: str) -> List[List[str]]:
+    """
+    Parse SPDX expression into DNF: list of AND-clauses (lists of units).
+    Units are base license tokens (WITH exceptions removed).
+    """
+    if not expr or not isinstance(expr, str):
+        return []
+    ors = _split_top(expr, "OR")
+    clauses: List[List[str]] = []
+    for part in ors:
+        part = _strip_parens(part)
+        ands = _split_top(part, "AND")
+        units: List[str] = []
+        for a in ands:
+            base = _remove_with(_strip_parens(a))
+            if base:
+                units.append(base)
+        if units:
+            clauses.append(units)
+    return clauses
+
+# ---------- Public helpers for callers ----------
 def catalog_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
-    """(Kept for callers) name_lower -> spdx_id, and spdx_id -> name."""
+    """name_lower -> spdx_id, and spdx_id -> name (from catalog)."""
     cat = _load_catalog_with_cache(LICENSES_JSON)
     name_to_id_lower: Dict[str, str] = {}
     id_to_name: Dict[str, str] = {}
@@ -272,48 +354,103 @@ def catalog_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
             id_to_name[spdx] = name
     return name_to_id_lower, id_to_name
 
+def _is_unit_permissive(unit: str, allow_name_raw: set, allow_id_raw: set, allow_canon: set,
+                        id_to_name: Dict[str, str], name_to_id_lower: Dict[str, str]) -> Optional[bool]:
+    """Decide permissiveness for a single license token (no AND/OR/WITH)."""
+    if not unit:
+        return None
+
+    # 1) Exact raw ID hit
+    if unit in allow_id_raw:
+        return True
+    # 2) Exact raw NAME hit (if it's a catalog name)
+    if unit in id_to_name.values() and unit in allow_name_raw:
+        return True
+    # 3) Canonical variants for the unit
+    for v in _canon_variants(unit):
+        if v in allow_canon:
+            return True
+    # 4) Map ID → Name, test variants
+    if unit in id_to_name:
+        for v in _canon_variants(id_to_name[unit]):
+            if v in allow_canon:
+                return True
+    # 5) Map Name → ID (case-insensitive), test variants
+    lower = unit.lower()
+    if lower in name_to_id_lower:
+        for v in _canon_variants(name_to_id_lower[lower]):
+            if v in allow_canon:
+                return True
+    # 6) Safety net for well-known permissives by SPDX ID
+    if unit in FALLBACK_PERMISSIVE_SPDX:
+        return True
+
+    return False
+
+def _is_expr_permissive(expr: str, allow_name_raw: set, allow_id_raw: set, allow_canon: set) -> Optional[bool]:
+    """Evaluate SPDX expression under CLA policy: OR=any, AND=all, WITH=ignore exception."""
+    name_to_id_lower, id_to_name = catalog_maps()
+    clauses = _parse_spdx_expr(expr)
+    if not clauses:
+        return None
+
+    for clause in clauses:            # OR over clauses
+        all_units_true = True
+        for unit in clause:           # AND within a clause
+            unit_ok = _is_unit_permissive(unit, allow_name_raw, allow_id_raw, allow_canon,
+                                          id_to_name, name_to_id_lower)
+            if unit_ok is False or unit_ok is None:
+                all_units_true = False
+                break
+        if all_units_true:
+            return True
+    return False
+
 def is_permissive(license_name: Optional[str], spdx_id: Optional[str] = None) -> Optional[bool]:
     """
-    Decide permissiveness using permissive_names.json that may contain either
-    canonical names OR SPDX IDs. Robust to minor punctuation/spacing differences.
-
-    Returns True/False, or None if we cannot decide (no inputs provided).
+    Decide permissiveness. Accepts name and/or SPDX ID (or SPDX *expression*).
+    - If an expression is detected in either field, evaluate it.
+    - Else, evaluate the single unit via name/id matching (with normalization).
+    Returns True/False, or None if insufficient info.
     """
     if not license_name and not spdx_id:
         return None
 
     allow_name_raw, allow_id_raw, allow_canon = _build_perm_index()
 
-    # 1) Exact raw ID match (fast, precise)
-    if spdx_id and spdx_id in allow_id_raw:
-        return True
+    # Expression detection
+    expr_candidate = None
+    for cand in (spdx_id, license_name):
+        if isinstance(cand, str) and re.search(r"\b(OR|AND|WITH)\b|\(|\)", cand, flags=re.I):
+            expr_candidate = cand
+            break
+    if expr_candidate:
+        return _is_expr_permissive(expr_candidate, allow_name_raw, allow_id_raw, allow_canon)
 
-    # 2) Exact raw NAME match (policy uses exact canonical names)
-    if license_name and license_name in allow_name_raw:
-        return True
-
-    # 3) Canonicalized comparisons (robust)
-    if spdx_id and _canon_key(spdx_id) in allow_canon:
-        return True
-    if license_name and _canon_key(license_name) in allow_canon:
-        return True
-
-    # 4) Last resort: tiny built-in SPDX allow set (only if we have an id)
+    # Single-unit path
+    name_to_id_lower, id_to_name = catalog_maps()
     if spdx_id:
-        return (spdx_id in FALLBACK_PERMISSIVE_SPDX)
+        unit_ok = _is_unit_permissive(spdx_id, allow_name_raw, allow_id_raw, allow_canon,
+                                      id_to_name, name_to_id_lower)
+        if unit_ok is not None:
+            return unit_ok
+    if license_name:
+        unit_ok = _is_unit_permissive(license_name, allow_name_raw, allow_id_raw, allow_canon,
+                                      id_to_name, name_to_id_lower)
+        if unit_ok is not None:
+            return unit_ok
 
-    return False  # we had inputs, but none matched the policy
+    return None
 
-# ---------- Public detection API ----------
+# ---------- Detection ----------
 def detect_from_text(text: str) -> Dict[str, Any]:
     """
-    Detect license from a root license file's content (string).
+    Detect license from a root license file's content.
     Returns: { matched, name, id, match, notes }
     """
     full_norm = _normalize(text or "")
     body = _strip_preamble(full_norm)
 
-    # Optional hint (for human debugging)
     notes = None
     m = SPDX_LINE_RE.search(text or "")
     if m:
@@ -321,7 +458,7 @@ def detect_from_text(text: str) -> Dict[str, Any]:
 
     catalog = _load_catalog_with_cache(LICENSES_JSON)
 
-    # (1) Exact hash match of the normalized "body"
+    # (1) Exact hash match of normalized body
     body_hash = _sha256(body)
     for name, rec in catalog.items():
         if rec["base_hash"] and body_hash == rec["base_hash"]:
@@ -341,11 +478,12 @@ def detect_from_text(text: str) -> Dict[str, Any]:
             if ratio < 0.5 or ratio > 2.0:
                 continue
         narrowed[name] = txt
+
     if not narrowed:
         shortest = sorted([(n, r["len"]) for n, r in catalog.items() if r["len"] > 0], key=lambda x: x[1])[:200]
         narrowed = {n: catalog[n]["base_norm"] for n, _ in shortest}
 
-    # (3) Similarity scoring on narrowed set
+    # (3) Similarity on narrowed set
     body_5 = _tokenize_ngrams(body, 5)
     best_j_id, best_j = None, 0.0
     for key, text_norm in narrowed.items():
@@ -375,3 +513,4 @@ def detect_from_text(text: str) -> Dict[str, Any]:
         return {"matched": True, "name": picked_name, "id": rec["spdx_id"], "match": picked_sig, "notes": notes}
 
     return {"matched": False, "name": None, "id": None, "match": None, "notes": notes}
+
