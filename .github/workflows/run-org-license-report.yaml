@@ -51,9 +51,9 @@ jobs:
 
       - name: Run org-wide license scan
         env:
-          # REQUIRED: create a Fine-grained PAT and store in org/repo Secret named ORG_REPORT_TOKEN
+          # REQUIRED: create a Fine-grained PAT and store in org/repo Secret named ORG_LICENSE_REPORT_TOKEN
           # See "Token & permissions" section below.
-          GITHUB_TOKEN: ${{ secrets.ORG_REPORT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ORG_LICENSE_REPORT_TOKEN }}
           API_BASE_URL: ${{ inputs.api_base_url }}
           LICENSES_JSON: data/licenses_all.json
           PERMISSIVE_JSON: data/permissive_names.json
