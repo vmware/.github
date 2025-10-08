@@ -47,7 +47,7 @@ try:
 except Exception:
     HAVE_CN = False
 
-# Local import (sibling script)
+# Local import
 sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts"))
 import license_detector as ld  # type: ignore
 
@@ -71,13 +71,15 @@ class RepoResult:
     match: Optional[str]
     permissive: Optional[bool]
     requires_CLA: Optional[bool]
+    policy_reason: Optional[str]
     error: Optional[str]
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time=gmtime())
+
+from time import gmtime
 
 async def _rate_limit_sleep(resp: aiohttp.ClientResponse) -> None:
-    """Pause until REST rate-limit reset if we're at/near the limit."""
     try:
         remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
         reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
@@ -93,16 +95,6 @@ def _auth_headers() -> Dict[str, str]:
     return h
 
 def decode_bytes_safe(data: bytes) -> str:
-    """
-    Best-effort text decoding for license files.
-    Order:
-      1) charset-normalizer (if available)
-      2) utf-8
-      3) utf-8-sig (BOM)
-      4) cp1252 (Windows smart quotes 0x93/0x94)
-      5) latin-1
-      6) utf-8 with replacement (never fail)
-    """
     if not data:
         return ""
     if HAVE_CN:
@@ -120,7 +112,6 @@ def decode_bytes_safe(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 async def list_public_repos(session: aiohttp.ClientSession, org: str) -> List[Dict[str, Any]]:
-    """Enumerate ALL public repos in the org (paginated)."""
     out: List[Dict[str, Any]] = []
     page = 1
     per_page = 100
@@ -143,7 +134,6 @@ async def list_public_repos(session: aiohttp.ClientSession, org: str) -> List[Di
     return [r for r in out if not r.get("private") and r.get("visibility") == "public"]
 
 async def get_repo_license_api(session: aiohttp.ClientSession, owner: str, repo: str) -> Optional[Dict[str, Any]]:
-    """GitHub 'Get the license for a repository' API (None on 404/no license)."""
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/license"
     try:
         async with session.get(url, headers=_auth_headers()) as resp:
@@ -159,11 +149,6 @@ async def get_repo_license_api(session: aiohttp.ClientSession, owner: str, repo:
         raise
 
 async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, repo: str, default_branch: str) -> Optional[str]:
-    """
-    Try common root license filenames via the 'contents' API.
-    Download raw BYTES and decode robustly. If no download_url, fall back to
-    base64 'content' field.
-    """
     for name in LICENSE_FILENAMES:
         url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{name}"
         params = {"ref": default_branch} if default_branch else None
@@ -174,7 +159,6 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
                 resp.raise_for_status()
                 meta = await resp.json()
 
-                # Fast path: direct raw download
                 dl = meta.get("download_url")
                 if dl:
                     async with session.get(dl, headers=_auth_headers()) as r2:
@@ -184,7 +168,6 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
                         await _rate_limit_sleep(r2)
                         return decode_bytes_safe(raw)
 
-                # Fallback: use base64-encoded content
                 content = meta.get("content")
                 enc = meta.get("encoding")
                 if content and enc == "base64":
@@ -199,60 +182,49 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
         except (ClientConnectorError, asyncio.TimeoutError):
             continue
         except Exception:
-            # Don't let odd content kill the run; try next candidate
             continue
     return None
 
 async def detect_one_repo(session: aiohttp.ClientSession, owner: str, repo: Dict[str, Any], timeout_s: int) -> RepoResult:
-    """
-    Per-repo flow:
-      1) Try License API.
-      2) If NOASSERTION/unknown/timeout, fetch likely root license file and detect.
-      3) Normalize to canonical catalog name (via SPDX where possible).
-      4) Evaluate permissiveness (names and/or IDs; LicenseRef-aware; expressions ok).
-    """
     name = repo["name"]
     default_branch = repo.get("default_branch")
     full = f"{owner}/{name}"
 
-    # Fast path: License API
+    # Fast path: GitHub License API
     try:
         data = await asyncio.wait_for(get_repo_license_api(session, owner, name), timeout=timeout_s)
         if data:
             spdx_id = (data.get("license") or {}).get("spdx_id")
             if spdx_id and spdx_id != "NOASSERTION":
-                # Prefer canonical catalog name via SPDX; else fall back to API name
                 _, id_to_name = ld.catalog_maps()
                 canonical_name = id_to_name.get(spdx_id) or (data.get("license") or {}).get("name") or spdx_id
-                perm = ld.is_permissive(canonical_name, spdx_id)
+                perm, why = ld.is_permissive_with_reason(canonical_name, spdx_id)
                 cla = (None if perm is None else (not perm))
-                return RepoResult(full, default_branch, canonical_name, spdx_id, "api", perm, cla, None)
+                return RepoResult(full, default_branch, canonical_name, spdx_id, "api", perm, cla, why, None)
     except asyncio.TimeoutError:
         pass
     except Exception as e:
-        # Continue to fallback; record later as needed
         api_err = f"license_api_error: {type(e).__name__}: {e}"
 
-    # Fallback: fetch and detect
+    # Fallback: fetch and detect from text
     try:
         text = await asyncio.wait_for(fetch_root_license_text(session, owner, name, default_branch or ""), timeout=timeout_s)
         if text:
             det = ld.detect_from_text(text)
             if det.get("matched"):
-                perm = ld.is_permissive(det.get("name"), det.get("id"))
+                perm, why = ld.is_permissive_with_reason(det.get("name"), det.get("id"))
                 cla = (None if perm is None else (not perm))
-                return RepoResult(full, default_branch, det.get("name"), det.get("id"), det.get("match"), perm, cla, None)
+                return RepoResult(full, default_branch, det.get("name"), det.get("id"), det.get("match"), perm, cla, why, None)
             else:
-                return RepoResult(full, default_branch, None, None, None, None, True, "no_high_confidence_match")
+                return RepoResult(full, default_branch, None, None, None, None, True, "no_high_confidence_match", None)
         else:
-            return RepoResult(full, default_branch, None, None, None, None, True, "no_root_license_file")
+            return RepoResult(full, default_branch, None, None, None, None, True, "no_root_license_file", None)
     except asyncio.TimeoutError:
-        return RepoResult(full, default_branch, None, None, None, None, True, "timeout_fallback_fetch")
+        return RepoResult(full, default_branch, None, None, None, None, True, "timeout_fallback_fetch", None)
     except Exception as e:
-        return RepoResult(full, default_branch, None, None, None, None, True, f"fallback_error: {type(e).__name__}: {e}")
+        return RepoResult(full, default_branch, None, None, None, None, True, f"fallback_error: {type(e).__name__}: {e}", None)
 
 async def bounded_gather(tasks, limit: int):
-    """Concurrency guard so we don't overload the API/runner."""
     semaphore = asyncio.Semaphore(limit)
     async def _run(coro):
         async with semaphore:
@@ -260,7 +232,6 @@ async def bounded_gather(tasks, limit: int):
     return await asyncio.gather(*[_run(t) for t in tasks])
 
 def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -> None:
-    """Emit JSON (with summary) and CSV (tabular) reports."""
     rows = []
     errors, skipped = 0, 0
     permissive, nonpermissive, unknown = 0, 0, 0
@@ -285,6 +256,7 @@ def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -
             "match": r.match,
             "permissive": r.permissive,
             "requires_CLA": r.requires_CLA,
+            "policy_reason": r.policy_reason,
             "error": r.error
         })
 
@@ -302,9 +274,9 @@ def _write_reports(results: List[RepoResult], json_path: Path, csv_path: Path) -
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["repo","default_branch","license_name","spdx_id","match","permissive","requires_CLA","error"])
+        w.writerow(["repo","default_branch","license_name","spdx_id","match","permissive","requires_CLA","policy_reason","error"])
         for r in results:
-            w.writerow([r.repo, r.default_branch, r.license_name, r.license_id, r.match, r.permissive, r.requires_CLA, r.error])
+            w.writerow([r.repo, r.default_branch, r.license_name, r.license_id, r.match, r.permissive, r.requires_CLA, r.policy_reason, r.error])
 
 def _parse_args(argv: List[str]) -> Dict[str, Any]:
     import argparse
@@ -336,7 +308,7 @@ async def _main_async(org: str, max_conc: int, timeout_s: int, json_path: Path, 
 
 def main() -> None:
     if not TOKEN:
-        print("ERROR: GITHUB_TOKEN is not set. Add a Fine-grained PAT as ORG_REPORT_TOKEN org secret.", file=sys.stderr)
+        print("ERROR: GITHUB_TOKEN is not set. Add a Fine-grained PAT as ORG_LICENSE_REPORT_TOKEN org secret.", file=sys.stderr)
         sys.exit(2)
     args = _parse_args(sys.argv[1:])
     asyncio.run(_main_async(args["org"], args["max_conc"], args["timeout_s"], args["json_path"], args["csv_path"]))
