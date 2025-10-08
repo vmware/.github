@@ -44,6 +44,7 @@ Outputs (APIs):
       - Returns True/False when we can resolve to a canonical catalog name
         and check it against permissive_names.json. Returns None if inputs
         are insufficient and we cannot decide.
+  - Permissive policy checking now supports BOTH canonical *names* and *SPDX IDs* from permissive_names.json (or a mix of both), with robust normalization.
 
 Design notes:
   - First try an exact hash of the normalized license *body* (after preamble strip).
@@ -61,7 +62,7 @@ import json, os, re, hashlib, gzip
 from pathlib import Path
 from typing import Dict, Tuple, List, Any, Optional
 
-# Optional fuzzy matching library (highly recommended but not required)
+# Optional fuzzy matching (recommended)
 try:
     from rapidfuzz.fuzz import token_set_ratio
     from rapidfuzz.utils import default_process
@@ -69,14 +70,13 @@ try:
 except Exception:
     HAVE_RAPID = False
 
-# ---------- Config via environment (paths resolved relative to repo root) ----------
+# ---------- Config (paths) ----------
 LICENSES_JSON = Path(os.getenv("LICENSES_JSON", "data/licenses_all.json")).resolve()
 PERMISSIVE_JSON = Path(os.getenv("PERMISSIVE_JSON", "data/permissive_names.json")).resolve()
 CACHE_DIR = Path(os.getenv("CACHE_DIR", ".github/tools/.cache")).resolve()
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------- Heuristics and thresholds ----------
-# Anchor phrases: help locate the actual license body and accelerate narrowing
+# ---------- Heuristics ----------
 ANCHORS = [
     r"apache license[, ]+version 2\.0",
     r"gnu (lesser )?general public license",
@@ -87,23 +87,20 @@ ANCHORS = [
     r"this is free and unencumbered software released into the public domain",
     r"the software is provided [\"'“”]?as is[\"'“”]?"
 ]
-# SPDX hint line (optional): not required but surfaced in notes when present
 SPDX_LINE_RE = re.compile(r"^spdx-license-identifier:\s*(?P<expr>.+)$", re.I | re.M)
 
-# Matching thresholds—tune only if you see false positives/negatives
-JACCARD_ACCEPT = 0.80     # good for long templates (Apache, GPL)
-FUZZY_ACCEPT   = 95.0     # robust; requires rapidfuzz
-FUZZY_STRONG   = 97.0     # very strong fuzzy match
+JACCARD_ACCEPT = 0.80
+FUZZY_ACCEPT   = 95.0
+FUZZY_STRONG   = 97.0
 
-# Conservative fallback set (only used if catalog mapping fails entirely)
+# Tiny safety net if we can't map an id/name via catalog
 FALLBACK_PERMISSIVE_SPDX = {
     "MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "ISC",
     "Zlib", "Unlicense", "BSL-1.0", "Python-2.0", "CC0-1.0"
 }
 
-# ---------- Basic text utils ----------
+# ---------- Small text helpers ----------
 def _normalize(s: str) -> str:
-    """Lowercase + normalize whitespace/newlines; keep semantics intact."""
     s = s.replace("\r\n", "\n").replace("\r", "\n").lower()
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
@@ -122,16 +119,9 @@ def _jaccard(a: List[str], b: List[str]) -> float:
     return len(A & B) / len(A | B)
 
 def _contains_any_anchor(text: str) -> List[str]:
-    """Return the list of anchor regexes that appear in the given normalized text."""
     return [a for a in ANCHORS if re.search(a, text, re.I)]
 
 def _strip_preamble(full_norm: str) -> str:
-    """
-    Remove likely prefaces (copyright, notices) and isolate the license body.
-    Strategy:
-      1) If we spot an anchor, start from that line.
-      2) Else, drop top 'admin' lines (copyright/notice/about) and keep the rest.
-    """
     lines = full_norm.splitlines()
     for i, ln in enumerate(lines):
         if any(re.search(a, ln, re.I) for a in ANCHORS):
@@ -145,16 +135,14 @@ def _strip_preamble(full_norm: str) -> str:
         pruned.append(ln)
     return "\n".join(pruned).strip() or full_norm
 
-# ---------- JSON helpers ----------
+# ---------- JSON IO ----------
 def _read_json_any(path: Path) -> Any:
-    """Read .json or .json.gz and parse."""
     if str(path).endswith(".gz"):
         with gzip.open(path, "rb") as f:
             return json.loads(f.read().decode("utf-8"))
     return json.loads(path.read_text(encoding="utf-8"))
 
 def _hash_file_bytes(path: Path) -> str:
-    """Hash source file to invalidate cache when the catalog changes."""
     if str(path).endswith(".gz"):
         with gzip.open(path, "rb") as f:
             data = f.read()
@@ -162,38 +150,33 @@ def _hash_file_bytes(path: Path) -> str:
         data = path.read_bytes()
     return hashlib.sha256(data).hexdigest()
 
-# ---------- Catalog cache (normalized texts, hashes, lengths, anchors) ----------
+# ---------- Catalog cache ----------
 def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     """
-    Return:
-      catalog[name] = {
-        'name', 'spdx_id', 'text_varies',
-        'base_norm', 'base_hash', 'len', 'anchor_flags'
-      }
-    Cache auto-invalidates when source JSON/.gz changes.
+    catalog[name] = {
+      'name', 'spdx_id', 'text_varies',
+      'base_norm', 'base_hash', 'len', 'anchor_flags'
+    }
     """
     src_hash = _hash_file_bytes(licenses_path)
     cache_file = CACHE_DIR / "licenses_all.cache.json"
 
-    # Try cache
     if cache_file.exists():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             if cached.get("source_sha256") == src_hash:
                 return cached["items"]
         except Exception:
-            pass  # fall through to rebuild
+            pass
 
-    # Build from source
     raw = _read_json_any(licenses_path)
-    if isinstance(raw, list):  # allow list form
+    if isinstance(raw, list):
         raw = {item["name"]: item for item in raw}
 
     items: Dict[str, Dict] = {}
     for name, rec in raw.items():
         base_text = rec.get("base_text") or ""
         base_norm = _normalize(base_text)
-        anchor_flags = _contains_any_anchor(base_norm)
         items[name] = {
             "name": rec.get("name", name),
             "spdx_id": rec.get("spdx_id"),
@@ -201,7 +184,7 @@ def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
             "base_norm": base_norm,
             "base_hash": _sha256(base_norm) if base_norm else None,
             "len": len(base_norm),
-            "anchor_flags": anchor_flags
+            "anchor_flags": _contains_any_anchor(base_norm),
         }
 
     cache_file.write_text(
@@ -210,88 +193,127 @@ def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     )
     return items
 
-def _load_permissive_names(path: Path) -> set:
-    """Return a lowercase set of canonical names considered permissive."""
+# ---------- Permissive policy index ----------
+def _load_permissive_raw(path: Path) -> List[str]:
+    """
+    Load the permissive list as-is. It can be either:
+      { "permissive_names": [ ... ] }  OR  [ ... ]
+    Entries can be canonical names OR SPDX IDs (mixed is OK).
+    """
     raw = _read_json_any(path)
-    names = raw.get("permissive_names", raw) if isinstance(raw, dict) else raw
-    return set(n.lower() for n in names if isinstance(n, str))
+    return raw.get("permissive_names", raw) if isinstance(raw, dict) else raw
 
-# ---------- Catalog-aware policy helpers ----------
-def catalog_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
+def _canon_key(s: str) -> str:
     """
-    Build mapping tables from the catalog for normalization:
-      - name_to_id: { canonical_name_lower -> spdx_id }
-      - id_to_name: { spdx_id -> canonical_name }
+    Robust key normalization for policy comparisons:
+      - casefold
+      - normalize quotes/dashes
+      - strip all non-alnum (keep 0-9a-z)
     """
-    cat = _load_catalog_with_cache(LICENSES_JSON)
+    s = (s or "").casefold()
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"').replace("–", "-").replace("—", "-")
+    s = re.sub(r"[^a-z0-9]+", "", s)  # remove spaces, quotes, punctuation
+    return s
+
+def _build_perm_index() -> Tuple[set, set, set]:
+    """
+    Build three sets for permissive checks:
+      - allow_name_raw:   lowercased names exactly as provided in policy
+      - allow_id_raw:     SPDX IDs exactly as provided in policy
+      - allow_canon:      canonicalized keys for both names & ids (robust match)
+
+    Additionally, if a policy entry matches a catalog NAME, also add that
+    entry's SPDX ID to allow_id_raw (and vice versa). This lets a policy
+    listing either "Apache-2.0" OR "Apache License 2.0" work equivalently.
+    """
+    catalog = _load_catalog_with_cache(LICENSES_JSON)
+    # Build maps for cross-walking names <-> ids
     name_to_id: Dict[str, str] = {}
+    id_to_name: Dict[str, str] = {}
+    for name, rec in catalog.items():
+        spdx = (rec.get("spdx_id") or "").strip()
+        if spdx:
+            name_to_id[name] = spdx
+            id_to_name[spdx] = name
+
+    # Raw policy entries (could be names or spdx ids)
+    entries = _load_permissive_raw(PERMISSIVE_JSON)
+    entries = [e for e in entries if isinstance(e, str)]
+
+    allow_name_raw: set = set()
+    allow_id_raw: set = set()
+    allow_canon: set = set()
+
+    # First pass: store raw
+    for e in entries:
+        allow_canon.add(_canon_key(e))
+        if e in id_to_name:   # exact SPDX ID string appears in catalog
+            allow_id_raw.add(e)
+            allow_canon.add(_canon_key(id_to_name[e]))  # add its name canon too
+        elif e in name_to_id: # exact NAME string appears in catalog
+            allow_name_raw.add(e)
+            allow_canon.add(_canon_key(name_to_id[e]))  # add its id canon too
+        else:
+            # Unknown string (maybe punctuation variant). We'll still use canonical key.
+            pass
+
+    return allow_name_raw, allow_id_raw, allow_canon
+
+# ---------- Public policy helpers ----------
+def catalog_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """(Kept for callers) name_lower -> spdx_id, and spdx_id -> name."""
+    cat = _load_catalog_with_cache(LICENSES_JSON)
+    name_to_id_lower: Dict[str, str] = {}
     id_to_name: Dict[str, str] = {}
     for name, rec in cat.items():
         spdx = (rec.get("spdx_id") or "").strip()
-        cname = rec.get("name", name)
         if spdx:
-            name_to_id[cname.lower()] = spdx
-            id_to_name[spdx] = cname
-    return name_to_id, id_to_name
+            name_to_id_lower[name.lower()] = spdx
+            id_to_name[spdx] = name
+    return name_to_id_lower, id_to_name
 
 def is_permissive(license_name: Optional[str], spdx_id: Optional[str] = None) -> Optional[bool]:
     """
-    Policy check: True if the license is in permissive_names.json, False otherwise.
-    We normalize to the catalog's *canonical name* whenever possible.
+    Decide permissiveness using permissive_names.json that may contain either
+    canonical names OR SPDX IDs. Robust to minor punctuation/spacing differences.
 
-    Normalization rules:
-      1) If we have an SPDX ID, map it to the catalog canonical name (id_to_name).
-      2) Else if we have a display name, check if that exact name exists in the catalog.
-      3) Compare the selected name (lowercased) to the permissive names set.
-      4) If mapping fails entirely but we have an SPDX ID, check a tiny fallback list.
-
-    Returns:
-      True/False, or None if we cannot form a decision (no usable inputs).
+    Returns True/False, or None if we cannot decide (no inputs provided).
     """
-    perm_names = _load_permissive_names(PERMISSIVE_JSON)
-    name_to_id, id_to_name = catalog_maps()
+    if not license_name and not spdx_id:
+        return None
 
-    candidate_name = None
+    allow_name_raw, allow_id_raw, allow_canon = _build_perm_index()
 
-    if spdx_id:
-        candidate_name = id_to_name.get(spdx_id)  # canonical name from catalog
+    # 1) Exact raw ID match (fast, precise)
+    if spdx_id and spdx_id in allow_id_raw:
+        return True
 
-    if not candidate_name and license_name:
-        # Use provided name only if it's an exact canonical name in the catalog.
-        # (avoids fuzzy surprises for policy decisions)
-        if license_name.lower() in name_to_id:
-            candidate_name = license_name
-        else:
-            candidate_name = license_name  # still attempt direct policy match below
+    # 2) Exact raw NAME match (policy uses exact canonical names)
+    if license_name and license_name in allow_name_raw:
+        return True
 
-    if candidate_name:
-        return (candidate_name.lower() in perm_names)
+    # 3) Canonicalized comparisons (robust)
+    if spdx_id and _canon_key(spdx_id) in allow_canon:
+        return True
+    if license_name and _canon_key(license_name) in allow_canon:
+        return True
 
-    # Last resort: rely on tiny fallback set by SPDX ID (should be rare)
+    # 4) Last resort: tiny built-in SPDX allow set (only if we have an id)
     if spdx_id:
         return (spdx_id in FALLBACK_PERMISSIVE_SPDX)
 
-    return None
+    return False  # we had inputs, but none matched the policy
 
 # ---------- Public detection API ----------
 def detect_from_text(text: str) -> Dict[str, Any]:
     """
-    Detect license from the *contents of a root license file* (string).
-    Robust to project-specific prefaces/preambles.
-
-    Returns:
-      {
-        "matched": bool,
-        "name": <canonical catalog name or None>,
-        "id": <spdx_id or None>,
-        "match": "hash" | "jaccard:<score>" | "fuzzy:<score>" | None,
-        "notes": optional string (e.g., "spdx_hint=MIT")
-      }
+    Detect license from a root license file's content (string).
+    Returns: { matched, name, id, match, notes }
     """
     full_norm = _normalize(text or "")
     body = _strip_preamble(full_norm)
 
-    # Optional: surface SPDX hint line if present (for human debugging)
+    # Optional hint (for human debugging)
     notes = None
     m = SPDX_LINE_RE.search(text or "")
     if m:
@@ -299,20 +321,19 @@ def detect_from_text(text: str) -> Dict[str, Any]:
 
     catalog = _load_catalog_with_cache(LICENSES_JSON)
 
-    # (1) Exact hash match of the normalized body
+    # (1) Exact hash match of the normalized "body"
     body_hash = _sha256(body)
     for name, rec in catalog.items():
         if rec["base_hash"] and body_hash == rec["base_hash"]:
             return {"matched": True, "name": name, "id": rec["spdx_id"], "match": "hash", "notes": notes}
 
-    # (2) Narrow candidates by anchors + length ratio (0.5× … 2.0×)
+    # (2) Narrow candidates by anchors + length ratio
     body_anchors = set(_contains_any_anchor(body))
     body_len = len(body)
     narrowed: Dict[str, str] = {}
     for name, rec in catalog.items():
         txt = rec["base_norm"]
-        if not txt:
-            continue
+        if not txt: continue
         if body_anchors and not (set(rec["anchor_flags"]) & body_anchors):
             continue
         if rec["len"] > 0:
@@ -320,17 +341,11 @@ def detect_from_text(text: str) -> Dict[str, Any]:
             if ratio < 0.5 or ratio > 2.0:
                 continue
         narrowed[name] = txt
-
-    # Fallback narrowing: select 200 shortest templates (MIT/ISC/BSD, etc.)
     if not narrowed:
-        shortest = sorted(
-            [(n, r["len"]) for n, r in catalog.items() if r["len"] > 0],
-            key=lambda x: x[1]
-        )[:200]
+        shortest = sorted([(n, r["len"]) for n, r in catalog.items() if r["len"] > 0], key=lambda x: x[1])[:200]
         narrowed = {n: catalog[n]["base_norm"] for n, _ in shortest}
 
-    # (3) Compute similarities on narrowed set
-    # 3a: Jaccard of 5-word n-grams (structure/ordering sensitivity)
+    # (3) Similarity scoring on narrowed set
     body_5 = _tokenize_ngrams(body, 5)
     best_j_id, best_j = None, 0.0
     for key, text_norm in narrowed.items():
@@ -338,7 +353,6 @@ def detect_from_text(text: str) -> Dict[str, Any]:
         if score > best_j:
             best_j_id, best_j = key, score
 
-    # 3b: Fuzzy token_set_ratio (robust to wrapping/punct changes), if available
     best_f_id, best_f = None, 0.0
     if HAVE_RAPID:
         bp = default_process(body)
@@ -347,7 +361,6 @@ def detect_from_text(text: str) -> Dict[str, Any]:
             if sc > best_f:
                 best_f_id, best_f = key, sc
 
-    # (4) Accept rules:
     picked_name, picked_sig = None, ""
     if HAVE_RAPID and best_f >= FUZZY_STRONG:
         picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
@@ -361,5 +374,4 @@ def detect_from_text(text: str) -> Dict[str, Any]:
         rec = _load_catalog_with_cache(LICENSES_JSON)[picked_name]
         return {"matched": True, "name": picked_name, "id": rec["spdx_id"], "match": picked_sig, "notes": notes}
 
-    # No high-confidence match
     return {"matched": False, "name": None, "id": None, "match": None, "notes": notes}
