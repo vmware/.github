@@ -202,9 +202,13 @@ def _flatten_permissive_entries(raw_value: Any) -> List[str]:
          - if value is truthy, include the KEY as an entry
          - if value is a dict, also pull 'name'/'spdx_id' inside it
     """
-    # Case 3: dict with explicit key
-    if isinstance(raw_value, dict) and "permissive_names" in raw_value:
-        raw_value = raw_value["permissive_names"]
+    # Case 3: dict with explicit list keys
+    if isinstance(raw_value, dict):
+        # Accept either "permissive_names" or "permissive"
+        if "permissive_names" in raw_value:
+            raw_value = raw_value["permissive_names"]
+        elif "permissive" in raw_value:
+            raw_value = raw_value["permissive"]
 
     out: List[str] = []
 
