@@ -10,7 +10,14 @@ Purpose:
     that contains *all* licenses you care about (SPDX + LicenseRef).
   - Provide a *catalog-aware* policy helper to decide if a license is
     "permissive" using a separate policy list (permissive_names.json).
-
+Key features:
+  - Robust preamble stripping and similarity matching (hash, n-gram Jaccard, RapidFuzz).
+  - Catalog cache for speed (.github/tools/.cache/licenses_all.cache.json).
+  - Permissive policy supports BOTH canonical names AND SPDX IDs (mixed).
+  - SPDX expression evaluation: OR / AND / WITH (parentheses supported).
+  - LicenseRef normalization: treats “LicenseRef-…”, “LicenseRef_…”, “LicenseRef …”
+    uniformly and also compares variants *without* the prefix for policy.
+    
 Inputs (files):
   - data/licenses_all.json   (or data/licenses_all.json.gz)
       Structure (per license):
@@ -55,32 +62,6 @@ Design notes:
   - We keep a tiny on-disk cache of the catalog (normalized text, hashes, etc.)
     at .github/tools/.cache/licenses_all.cache.json, invalidated when the
     source JSON/.gz changes (SHA256 check).
-"""
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-license_detector.py (expression-aware, LicenseRef-aware)
--------------------------------------------------------
-Purpose:
-  - Detect a repo's root license from raw text that may include prefaces.
-  - Match against a single large catalog (licenses_all.json/.gz).
-  - Decide "permissive" via a separate policy file (permissive_names.json).
-
-Key features:
-  - Robust preamble stripping and similarity matching (hash, n-gram Jaccard, RapidFuzz).
-  - Catalog cache for speed (.github/tools/.cache/licenses_all.cache.json).
-  - Permissive policy supports BOTH canonical names AND SPDX IDs (mixed).
-  - SPDX expression evaluation: OR / AND / WITH (parentheses supported).
-  - LicenseRef normalization: treats “LicenseRef-…”, “LicenseRef_…”, “LicenseRef …”
-    uniformly and also compares variants *without* the prefix for policy.
-
-Inputs (drop in `data/`):
-  - licenses_all.json (or .json.gz): entries with {name, spdx_id, text_varies, base_text}
-  - permissive_names.json: either {"permissive_names":[...]} OR a plain array
-
-Public API:
-  - detect_from_text(text) -> { matched, name, id, match, notes }
-  - is_permissive(license_name, spdx_id) -> True/False/None
 """
 
 from __future__ import annotations
