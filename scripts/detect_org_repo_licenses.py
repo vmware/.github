@@ -148,6 +148,76 @@ async def get_repo_license_api(session: aiohttp.ClientSession, owner: str, repo:
         raise
 
 async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, repo: str, default_branch: str) -> Optional[str]:
+    """
+    Find and fetch a root-level license file, case-insensitively.
+    Strategy:
+      1) List the repo root with the 'contents' API and pick the best candidate
+         by regex (case-insensitive).
+      2) If that fails, fall back to a small set of common names (historical path).
+      3) Decode bytes robustly.
+    Also follows 'download_url' or base64 'content' if needed.
+    """
+    import re
+
+    # 1) List repo root and pick a candidate by regex (case-insensitive)
+    root_url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents"
+    params = {"ref": default_branch} if default_branch else None
+
+    # Prefer LICENSE/LICENCE first, then COPYING, COPYRIGHT, NOTICE
+    # Examples matched: LICENSE, License, license, LICENSE.md, LICENSE-APACHE, COPYING.txt, NOTICE, etc.
+    primary_re = re.compile(r"^(license|licence)(?:$|[._-].*|\.txt$|\.md$|\.rst$|\.html?$)", re.I)
+    secondary_re = re.compile(r"^(copying|copyright|notice)(?:$|[._-].*|\.txt$|\.md$|\.rst$)$", re.I)
+
+    try:
+        async with session.get(root_url, headers=_auth_headers(), params=params) as resp:
+            if resp.status == 200:
+                listing = await resp.json()
+                await _rate_limit_sleep(resp)
+
+                # Only files at root; dirs like LICENSES/ are out of scope for this specific function
+                files = [item for item in listing if item.get("type") == "file" and "name" in item]
+
+                # Rank candidates (primary > secondary). Keep the first hit in each bucket order.
+                primary = [f for f in files if primary_re.search(f["name"])]
+                secondary = [f for f in files if secondary_re.search(f["name"]) and f not in primary]
+
+                for cand in (primary + secondary):
+                    dl = cand.get("download_url")
+                    if dl:
+                        try:
+                            async with session.get(dl, headers=_auth_headers()) as r2:
+                                if r2.status != 200:
+                                    continue
+                                raw = await r2.read()
+                                await _rate_limit_sleep(r2)
+                                return decode_bytes_safe(raw)
+                        except Exception:
+                            continue
+
+                    # Fallback: fetch file content via contents API node itself
+                    # (re-fetch the node to get 'content' if not present in listing entry)
+                    node_url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{cand['name']}"
+                    async with session.get(node_url, headers=_auth_headers(), params=params) as r3:
+                        if r3.status != 200:
+                            continue
+                        meta = await r3.json()
+                        content = meta.get("content")
+                        enc = meta.get("encoding")
+                        if content and enc == "base64":
+                            try:
+                                import base64
+                                raw = base64.b64decode(content, validate=False)
+                                return decode_bytes_safe(raw)
+                            except Exception:
+                                continue
+                # If we listed successfully but found no candidate, fall through to legacy names
+            # On 404 or other errors, we'll try the legacy path below
+    except Exception:
+        # Ignore and try legacy candidates
+        pass
+
+    # 2) Legacy fallback: try a small set of common names (historical behavior)
+    #    (kept for safety; now largely redundant once listing works)
     for name in LICENSE_FILENAMES:
         url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{name}"
         params = {"ref": default_branch} if default_branch else None
@@ -171,6 +241,7 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
                 enc = meta.get("encoding")
                 if content and enc == "base64":
                     try:
+                        import base64
                         raw = base64.b64decode(content, validate=False)
                         return decode_bytes_safe(raw)
                     except Exception:
@@ -182,7 +253,9 @@ async def fetch_root_license_text(session: aiohttp.ClientSession, owner: str, re
             continue
         except Exception:
             continue
+
     return None
+
 
 async def detect_one_repo(session: aiohttp.ClientSession, owner: str, repo: Dict[str, Any], timeout_s: int) -> RepoResult:
     name = repo["name"]
