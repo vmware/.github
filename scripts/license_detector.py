@@ -128,10 +128,24 @@ def _contains_any_anchor(text: str) -> List[str]:
     return [a for a in ANCHORS if re.search(a, text, re.I)]
 
 def _strip_preamble(full_norm: str) -> str:
+    """
+    Remove project notices/disclaimers that precede the actual license body.
+    Now Apache-aware: if we see the two-line header, cut there.
+    Otherwise: use anchors and mild heuristics.
+    """
     lines = full_norm.splitlines()
+
+    # Apache: look for the canonical two-line header and cut there
+    ap_start = _find_apache_header_start(lines)
+    if ap_start is not None:
+        return "\n".join(lines[ap_start:]).strip()
+
+    # Generic: if we see any anchor line, cut at the first such line
     for i, ln in enumerate(lines):
         if any(re.search(a, ln, re.I) for a in ANCHORS):
             return "\n".join(lines[i:]).strip()
+
+    # Heuristic fallback: drop leading meta lines (copyright / notice / about)
     pruned, dropping = [], True
     for ln in lines:
         if dropping and re.match(r"^(copyright|all rights reserved|about|project|disclaimer|notice)\b",
@@ -140,6 +154,44 @@ def _strip_preamble(full_norm: str) -> str:
         dropping = False
         pruned.append(ln)
     return "\n".join(pruned).strip() or full_norm
+
+
+# --- Apache 2.0 special-cases (common & stable) ---
+
+_APACHE_HEADER_TWO_LINES = re.compile(
+    r"(?im)^\s*apache license\s*$\s*^\s*version\s*2\.0,\s*january\s*2004\s*$"
+)
+
+def _find_apache_header_start(lines: List[str]) -> Optional[int]:
+    """
+    Return the line index where a canonical two-line Apache header starts:
+      Apache License
+      Version 2.0, January 2004
+    """
+    for i in range(len(lines) - 1):
+        if re.match(r"^\s*apache license\s*$", lines[i], re.I) and \
+           re.search(r"version\s*2\.0,\s*january\s*2004", lines[i + 1], re.I):
+            return i
+    return None
+
+def _apache_quick_markers(text_norm: str) -> bool:
+    """
+    Very high-confidence Apache-2.0 markers (robust to prefaces):
+      - standard URL is present
+      - canonical 'TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION' line
+    """
+    return (
+        "http://www.apache.org/licenses/" in text_norm
+        and "terms and conditions for use, reproduction, and distribution" in text_norm
+    )
+
+def _catalog_find_by_spdx(spdx: str, catalog: Dict[str, Dict]) -> Optional[str]:
+    """Find catalog name by exact SPDX id."""
+    for name, rec in catalog.items():
+        if (rec.get("spdx_id") or "") == spdx:
+            return name
+    return None
+
 
 # ---------- JSON IO ----------
 def _read_json_any(path: Path) -> Any:
@@ -488,6 +540,14 @@ def detect_from_text(text: str) -> Dict[str, Any]:
         notes = f"spdx_hint={m.group('expr').strip()}"
 
     catalog = _load_catalog_with_cache(LICENSES_JSON)
+
+      # Quick Apache-2.0 recognition (very high confidence)
+    if _apache_quick_markers(full_norm):
+        catalog = _load_catalog_with_cache(LICENSES_JSON)
+        apache_name = _catalog_find_by_spdx("Apache-2.0", catalog)
+        if apache_name:
+            rec = catalog[apache_name]
+            return {"matched": True, "name": apache_name, "id": rec["spdx_id"], "match": "apache_markers", "notes": notes}
 
     # (1) Exact hash match
     body_hash = _sha256(body)
