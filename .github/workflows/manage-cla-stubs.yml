@@ -55,9 +55,10 @@ jobs:
       ALLOWLIST_PATH: ${{ inputs.allowlist_path }}
       SIGN_PHRASE: ${{ inputs.sign_phrase }}
       SECRET_NAME: ${{ inputs.secret_name }}
-      ORG_PAT: ${{ secrets.ORG_PAT }}          # PAT with the required scopes
+      ORG_PAT: ${{ secrets.ORG_PAT }}
       INCLUDE_REPOS: ${{ inputs.include_repos || env.INCLUDE_REPOS }}
       EXCLUDE_REPOS: ${{ inputs.exclude_repos || env.EXCLUDE_REPOS }}
+
     steps:
       - name: Plan
         run: |
@@ -85,6 +86,7 @@ jobs:
       - name: Write manager script (refactored)
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p .github-admin/run
           cat > .github-admin/run/check_and_install_stub.py <<'PY'
 #!/usr/bin/env python3
@@ -114,7 +116,7 @@ from typing import Dict, List, Optional, Tuple
 TARGET_STUB_VERSION = "7"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 
-# Default excludes you asked for (special GitHub repos):
+# Default excludes (special GitHub repos, admin/security):
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
 
 # Module import path candidates
@@ -128,7 +130,7 @@ for p in CANDIDATE_MODULE_DIRS:
         sys.path.insert(0, p)
 
 try:
-    import requires_cla  # your decision module
+    import requires_cla  # decision module
 except Exception as e:
     print(f"ERROR: Could not import requires_cla.py: {e}", file=sys.stderr)
     sys.exit(2)
@@ -292,7 +294,6 @@ def main() -> None:
     includes = globs_to_list(args.include_repos)
     excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
 
-    # List public repos
     repos = list_public_repos(args.org, token)
 
     for r in repos:
@@ -311,7 +312,7 @@ def main() -> None:
             try:
                 decision = requires_cla.requires_CLA(full, token=token)
             except Exception:
-                decision = None  # fail-safe path
+                decision = None  # fail-safe
 
             requires = True if decision is None else bool(decision)
 
