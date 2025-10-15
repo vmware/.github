@@ -39,9 +39,9 @@ permissions:
   contents: read
   actions: read
 
-#concurrency:
-#  group: "${{ github.workflow }}-${{ github.run_id }}"
-#  cancel-in-progress: false
+concurrency:
+  group: "${{ github.workflow }}-${{ github.run_id }}"
+  cancel-in-progress: false
 
 jobs:
   manage:
@@ -183,8 +183,9 @@ jobs:
                 body = {"message": message, "sha": sha, "branch": ref}
                 return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="DELETE", body=json.dumps(body).encode())
 
-            STUB_TEMPLATE = """# Auto-managed; DO NOT EDIT MANUALLY
-            # Stub Version: {stub_version}
+            # IMPORTANT: avoid any literal '{{' in this workflow. Use placeholders and replace at runtime.
+            STUB_TEMPLATE_SAFE = """# Auto-managed; DO NOT EDIT MANUALLY
+            # Stub Version: @@STUB_VERSION@@
             name: CLA — Trigger Stub
 
             on:
@@ -201,7 +202,7 @@ jobs:
               actions: read
 
             concurrency:
-              group: $${{{{ github.workflow }}}}-$${{{{ github.event.pull_request.number || github.run_id }}}}
+              group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.run_id __GHA_CLOSE__
               cancel-in-progress: true
 
             jobs:
@@ -217,7 +218,7 @@ jobs:
                     id: member
                     uses: actions/github-script@v7
                     with:
-                      github-token: $${{{{ secrets.{secret_name} }}}}
+                      github-token: __GHA_OPEN__ secrets.@@SECRET_NAME@@ __GHA_CLOSE__
                       script: |
                         let isMember = false;
                         try {
@@ -229,119 +230,120 @@ jobs:
                         core.setOutput('is_member', isMember ? 'true' : 'false');
 
                   - name: Skip if org member
-                    if: $${{{{ steps.member.outputs.is_member == 'true' }}}}
+                    if: __GHA_OPEN__ steps.member.outputs.is_member == 'true' __GHA_CLOSE__
                     run: echo "Org member — skipping CLA."
 
                   - name: Call reusable CLA checker
-                    if: $${{{{ steps.member.outputs.is_member != 'true' }}}}
-                    uses: $${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+                    if: __GHA_OPEN__ steps.member.outputs.is_member != 'true' __GHA_CLOSE__
+                    uses: __GHA_OPEN__ github.repository_owner __GHA_CLOSE__/.github/.github/workflows/reusable-cla-check.yml@@REUSABLE_REF@@
                     secrets:
-                      CONTRIBUTOR_ASSISTANT_PAT: $${{{{ secrets.{secret_name} }}}}
+                      CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.@@SECRET_NAME@@ __GHA_CLOSE__
                     with:
-                      allowlist_branch: "{allowlist_branch}"
-                      allowlist_path: "{allowlist_path}"
-                      sign_comment_exact: "{sign_phrase}"
+                      allowlist_branch: "@@ALLOWLIST_BRANCH@@"
+                      allowlist_path: "@@ALLOWLIST_PATH@@"
+                      sign_comment_exact: "@@SIGN_PHRASE@@"
             """
 
             def ensure_stub(owner: str, repo: str, token: str, default_branch: str,
                             reusable_ref: str, allowlist_branch: str, allowlist_path: str,
                             sign_phrase: str, secret_name: str) -> str:
-                desired = STUB_TEMPLATE.format(
-                    stub_version=TARGET_STUB_VERSION,
-                    reusable_ref=reusable_ref,
-                    allowlist_branch=allowlist_branch,
-                    allowlist_path=allowlist_path,
-                    sign_phrase=sign_phrase.replace('"','\\"'),
-                    secret_name=secret_name
-                )
-                existing, sha = get_file(owner, repo, STUB_PATH, default_branch, token)
-                if existing:
-                    m = re.search(r"Stub Version:\\s*(\\d+)", existing)
-                    cur_ver = m.group(1) if m else "0"
-                    needs_update = (cur_ver != TARGET_STUB_VERSION) or (existing.strip() != desired.strip())
-                    if needs_update:
-                        put_file(owner, repo, STUB_PATH, default_branch, token, desired, sha, f"chore(cla): ensure trigger stub v{TARGET_STUB_VERSION}")
-                        return "stub_created_or_updated"
-                    return "stub_ok"
-                else:
-                    put_file(owner, repo, STUB_PATH, default_branch, token, desired, None, f"chore(cla): add trigger stub v{TARGET_STUB_VERSION}")
-                    return "stub_created_or_updated"
+              # Build the real ${{ }} tokens WITHOUT embedding '{{' in this workflow file
+              GHA_OPEN = '$' + '{' + '{'
+              GHA_CLOSE = '}' + '}'
+              template = (STUB_TEMPLATE_SAFE
+                          .replace('__GHA_OPEN__', GHA_OPEN)
+                          .replace('__GHA_CLOSE__', GHA_CLOSE)
+                          .replace('@@STUB_VERSION@@', TARGET_STUB_VERSION)
+                          .replace('@@REUSABLE_REF@@', '@' + reusable_ref)
+                          .replace('@@ALLOWLIST_BRANCH@@', allowlist_branch)
+                          .replace('@@ALLOWLIST_PATH@@', allowlist_path)
+                          .replace('@@SIGN_PHRASE@@', sign_phrase.replace('"', '\\"'))
+                          .replace('@@SECRET_NAME@@', secret_name))
+
+              desired = template
+
+              existing, sha = get_file(owner, repo, STUB_PATH, default_branch, token)
+              if existing:
+                m = re.search(r"Stub Version:\\s*(\\d+)", existing)
+                cur_ver = m.group(1) if m else "0"
+                needs_update = (cur_ver != TARGET_STUB_VERSION) or (existing.strip() != desired.strip())
+                if needs_update:
+                  put_file(owner, repo, STUB_PATH, default_branch, token, desired, sha, "chore(cla): ensure trigger stub")
+                  return "stub_created_or_updated"
+                return "stub_ok"
+              else:
+                put_file(owner, repo, STUB_PATH, default_branch, token, desired, None, "chore(cla): add trigger stub")
+                return "stub_created_or_updated"
 
             def globs_to_list(val: str | None) -> List[str]:
-                return [g.strip() for g in (val or "").split(",") if g.strip()]
+              return [g.strip() for g in (val or "").split(",") if g.strip()]
 
             def allowed_by_globs(name: str, includes: List[str], excludes: List[str]) -> bool:
-                if includes:
-                    if not any(fnmatch.fnmatch(name, pat) for pat in includes):
-                        return False
-                for pat in excludes:
-                    if fnmatch.fnmatch(name, pat):
-                        return False
-                return True
+              if includes:
+                if not any(fnmatch.fnmatch(name, pat) for pat in includes):
+                  return False
+              for pat in excludes:
+                if fnmatch.fnmatch(name, pat):
+                  return False
+              return True
 
             def parse_args() -> argparse.Namespace:
-                ap = argparse.ArgumentParser()
-                ap.add_argument("--org", required=True)
-                ap.add_argument("--reusable-ref", required=True)
-                ap.add_argument("--allowlist-branch", required=True)
-                ap.add_argument("--allowlist-path", required=True)
-                ap.add_argument("--sign-phrase", required=True)
-                ap.add_argument("--secret-name", default="CLA_ASSISTANT_PAT")
-                ap.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS",""))
-                ap.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS",""))
-                return ap.parse_args()
+              ap = argparse.ArgumentParser()
+              ap.add_argument("--org", required=True)
+              ap.add_argument("--reusable-ref", required=True)
+              ap.add_argument("--allowlist-branch", required=True)
+              ap.add_argument("--allowlist-path", required=True)
+              ap.add_argument("--sign-phrase", required=True)
+              ap.add_argument("--secret-name", default="CLA_ASSISTANT_PAT")
+              ap.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS",""))
+              ap.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS",""))
+              return ap.parse_args()
 
             def main() -> None:
-                args = parse_args()
-                token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
-                if not token:
-                    print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr); sys.exit(2)
+              args = parse_args()
+              token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
+              if not token:
+                print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr); sys.exit(2)
 
-                includes = globs_to_list(args.include_repos)
-                excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
+              includes = globs_to_list(args.include_repos)
+              excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
 
-                repos = list_public_repos(args.org, token)
+              repos = list_public_repos(args.org, token)
+              for r in repos:
+                name = r.get("name") or ""
+                if not name:
+                  print("REPO=? STATUS=error DECISION=None MSG=missing repo name", file=sys.stderr); continue
+                if not allowed_by_globs(name, includes, excludes):
+                  print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude"); continue
 
-                for r in repos:
-                    name = r.get("name") or ""
-                    if not name:
-                        print("REPO=? STATUS=error DECISION=None MSG=missing repo name", file=sys.stderr)
-                        continue
+                try:
+                  decision: Optional[bool] = None
+                  try:
+                    decision = requires_cla.requires_CLA(f"{args.org}/{name}", token=token)
+                  except Exception:
+                    decision = None  # fail-safe
+                  requires = True if decision is None else bool(decision)
 
-                    if not allowed_by_globs(name, includes, excludes):
-                        print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude")
-                        continue
+                  default_branch = get_default_branch(args.org, name, token)
+                  existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
 
-                    full = f"{args.org}/{name}"
-                    try:
-                        decision: Optional[bool] = None
-                        try:
-                            decision = requires_cla.requires_CLA(full, token=token)
-                        except Exception:
-                            decision = None  # fail-safe
-
-                        requires = True if decision is None else bool(decision)
-
-                        default_branch = get_default_branch(args.org, name, token)
-                        existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
-
-                        if requires:
-                            status = ensure_stub(args.org, name, token, default_branch,
-                                                 args.reusable_ref, args.allowlist_branch, args.allowlist_path,
-                                                 args.sign_phrase, args.secret_name)
-                            print(f"REPO={name} STATUS={status} DECISION={requires} MSG=CLA required")
-                        else:
-                            if existing and sha:
-                                delete_file(args.org, name, STUB_PATH, default_branch, token, sha,
-                                            "chore(cla): remove trigger stub (CLA not required)")
-                                print(f"REPO={name} STATUS=stub_removed_not_required DECISION={requires} MSG=Removed stub")
-                            else:
-                                print(f"REPO={name} STATUS=skipped_not_required DECISION={requires} MSG=No stub (as expected)")
-                    except Exception as e:
-                        print(f"REPO={name} STATUS=error DECISION=None MSG={e}", file=sys.stderr)
+                  if requires:
+                    status = ensure_stub(args.org, name, token, default_branch,
+                                         args.reusable_ref, args.allowlist_branch, args.allowlist_path,
+                                         args.sign_phrase, args.secret_name)
+                    print(f"REPO={name} STATUS={status} DECISION={requires} MSG=CLA required")
+                  else:
+                    if existing and sha:
+                      delete_file(args.org, name, STUB_PATH, default_branch, token, sha,
+                                  "chore(cla): remove trigger stub (CLA not required)")
+                      print(f"REPO={name} STATUS=stub_removed_not_required DECISION={requires} MSG=Removed stub")
+                    else:
+                      print(f"REPO={name} STATUS=skipped_not_required DECISION={requires} MSG=No stub (as expected)")
+                except Exception as e:
+                  print(f"REPO={name} STATUS=error DECISION=None MSG={e}", file=sys.stderr)
 
             if __name__ == "__main__":
-                main()
+              main()
             `;
 
             fs.writeFileSync(file, py);
