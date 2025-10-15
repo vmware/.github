@@ -1,0 +1,19 @@
+version: 1
+org_members: true        # if true, any org member skips CLA
+teams:
+#  - eng/maintainers
+#  - docs/reviewers
+bots:
+  - dependabot[bot]
+  - github-actions[bot]
+users:
+ # - alice-ext
+ # - bob-consultant
+emails:
+  - "@broadcom.com"         # any verified email ending with this domain
+temp_exemptions:
+ # - login: carol-temp
+ #   until: "2025-12-31"
+ #   reason: "Partner pilot"
+rules:
+  # require_dco_for_externals: true
