@@ -56,8 +56,10 @@ jobs:
       SIGN_PHRASE: ${{ inputs.sign_phrase }}
       SECRET_NAME: ${{ inputs.secret_name }}
       ORG_PAT: ${{ secrets.ORG_PAT }}
-      INCLUDE_REPOS: ${{ inputs.include_repos || env.INCLUDE_REPOS }}
-      EXCLUDE_REPOS: ${{ inputs.exclude_repos || env.EXCLUDE_REPOS }}
+
+      # Use repo/org Variables (Settings → Variables) as fallbacks if inputs are blank
+      INCLUDE_REPOS: ${{ inputs.include_repos != '' && inputs.include_repos || (vars.INCLUDE_REPOS || '') }}
+      EXCLUDE_REPOS: ${{ inputs.exclude_repos != '' && inputs.exclude_repos || (vars.EXCLUDE_REPOS || '') }}
 
     steps:
       - name: Plan
