@@ -40,7 +40,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.run_id }}
+  group: "${{ github.workflow }}-${{ github.run_id }}"
   cancel-in-progress: false
 
 jobs:
