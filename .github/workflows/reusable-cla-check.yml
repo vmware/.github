@@ -1,113 +1,162 @@
-# File: .github/.github/workflows/reusable-cla-check.yml
-# Purpose: Centralized, reusable workflow for performing the CLA check.
-# Signatures are read from and committed to a CSV file within this .github repository.
-
-name: Reusable CLA Check (Repo Signatures)
+name: Reusable — CLA Check
 
 on:
-
   workflow_call:
-    secrets:
-      # This PAT is used by cla-assistant/github-action for:
-      # 1. PR interactions (comments, labels, statuses) on the TARGET repository.
-      # 2. Reading and committing signatures to the CLA.csv file in THIS .github repository.
-      # It requires:
-      # - Pull requests: R/W, Issues: R/W, Commit statuses: R/W (for all target repos).
-      # - Contents: R/W (for THIS .github repository to manage CLA.csv).
-      CONTRIBUTOR_ASSISTANT_PAT:
-        description: 'PAT for CLA Assistant Lite (PR interaction on target repos AND signature commits to this .github repo).'
-        required: true
     inputs:
-      # URL or path to the CLA document text.
-      # If a path, it's relative to the root of THIS .github repository after checkout.
       cla_document_url:
-        description: 'URL or path to the CLA document text.'
-        required: false # Made optional, can default
+        description: "URL to the CLA document"
         type: string
-        default: 'https://vmware.github.io/cla-docs/GenericCLA.html' # Dynamic default
-        # default: 'https://github.com/${{ github.repository_owner }}/.github/blob/main/.github/CONTRIBUTOR_LICENSE_AGREEMENT.md' # Dynamic default
-      # Path to the CSV signature file within THIS .github repository.
+        default: https://raw.githubusercontent.com/${{ github.repository_owner }}/.github/main/CLA.md
       signature_file_path:
-        description: 'Path to the CSV signature file within this .github repository.'
-        required: false
+        description: "Path to signatures file in .github"
         type: string
-        default: 'signatures/CLA.json' # Default path
-      # Branch in THIS .github repository where signatures are stored and committed.
+        # You said signatures live at <org>/.github/signatures — this keeps the default under that dir.
+        default: signatures/CLA.json
       signature_branch:
-        description: 'Branch in this .github repository where signatures are stored and committed.'
-        required: false
+        description: "Branch in .github where signatures are stored"
         type: string
-        default: 'main' # Default branch (e.g., main or your .github repo's default)
+        default: main
+      allowlist_branch:
+        description: "Branch in .github with allowlist config"
+        type: string
+        default: cla-config
+      allowlist_path:
+        description: "YAML allowlist path in .github"
+        type: string
+        default: cla/allowlist.yml
+      sign_comment_exact:
+        description: 'Exact phrase required to sign via comment'
+        type: string
+        default: 'I have read the CLA Document and I hereby sign the CLA'
+    secrets:
+      CONTRIBUTOR_ASSISTANT_PAT:
+        required: true
 
-# Permissions this reusable workflow's GITHUB_TOKEN needs in the context of the CALLER's repository (target repo).
-# cla-assistant/github-action primarily uses its own CONTRIBUTOR_ASSISTANT_PAT for its operations.
 permissions:
-  pull-requests: write # For commenting/labeling on the target PR.
-  issues: write        # For commenting on issues on the target PR.
-  statuses: write      # For setting commit statuses on the target PR.
-  # Contents: write on THIS .github repo is handled by the CONTRIBUTOR_ASSISTANT_PAT PAT,
-  # not this workflow's GITHUB_TOKEN.
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}-${{ github.event.pull_request.number || github.event.issue.number || github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  cla_check:
+  cla:
+    name: CLA gate
     runs-on: ubuntu-latest
-        # The 'if' condition to run this job is now primarily handled by the CALLER (the stub workflow).
-        # Run only for relevant PR actions.
+    timeout-minutes: 10
+    env:
+      ORG: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      GH_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+
     steps:
-      # Checkout THIS .github repository.
-      # This makes the signature file (e.g., .github/signatures/CLA.csv) and potentially the
-      # CLA document (if stored locally) available to the cla-assistant-lite action.
-      - name: Checkout .github repository (for signature file access)
-        uses: actions/checkout@v4.1.1
+      - name: Checkout .github (allowlist)
+        uses: actions/checkout@v4
         with:
-          # Explicitly checkout THIS .github repository where the workflow runs and signatures are stored.
-          repository: ${{ github.repository }} # e.g., YOUR_ORG/.github
-          # Checkout the branch where the signature file (CLA.csv) is located and where new signatures will be committed.
-          ref: ${{ inputs.signature_branch }}
-          # The default GITHUB_TOKEN of this job is sufficient for checking out its own repository.
+          repository: ${{ github.repository_owner }}/.github
+          ref: ${{ inputs.allowlist_branch }}
+          path: ./.github-central
+          persist-credentials: false
+          fetch-depth: 1
 
-      - name: CLA Assistant Lite (Signatures in Repo)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-        # Use the official cla-assistant/github-action. Pin to a specific version.
-        uses: contributor-assistant/github-action@v2.6.1
+      - name: Install YAML parser
+        run: |
+          cd ./.github-central
+          npm init -y >/dev/null 2>&1
+          npm i yaml >/dev/null 2>&1
+
+      - name: Compute allowlisted/member
+        id: allow
+        uses: actions/github-script@v7
         env:
-          # Provide the dedicated PAT. This PAT needs permissions for:
-          # 1. PR interactions (comments, labels, statuses) on the *target repository* (where the PR was opened).
-          # 2. Contents Read & Write permissions on *this .github repository* to read/commit CLA.csv.
-          GITHUB_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
-          # PERSONAL_ACCESS_TOKEN is REQUIRED for writing signatures to a remote repository.
-          # We can use the same PAT if it has the necessary permissions for the .github repo.
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}          
+          ALLOWLIST_PATH: ${{ inputs.allowlist_path }}
+          SIGN_PHRASE: ${{ inputs.sign_comment_exact }}
         with:
-          # --- Configuration for Centralized Signatures ---
-          # Organization where the .github repository (hosting signatures) resides.
-          remote-organization-name: ${{ github.repository_owner }} # e.g., 'vmware'
-          # Name of the repository hosting the signatures (i.e., '.github').
-          remote-repository-name: '.github' # The name of your .github repository
-       
-          # Path to the signature CSV file within the checked-out .github repository.
+          github-token: ${{ env.GH_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const YAML = require(path.join(process.env.GITHUB_WORKSPACE, '.github-central', 'node_modules', 'yaml'));
+            const allowPath = path.join(process.env.GITHUB_WORKSPACE, '.github-central', process.env.ALLOWLIST_PATH);
+            let cfg = {};
+            try {
+              cfg = YAML.parse(fs.readFileSync(allowPath, 'utf8')) || {};
+            } catch (e) {
+              core.warning(`Allowlist not found/parse error at ${allowPath}: ${e}`);
+            }
+            const actor = context.payload.sender?.login;
+            const org = context.repo.owner;
+            const nowIso = new Date().toISOString();
+            const asSet = xs => new Set((xs || []).map(s => String(s).toLowerCase()));
+            const inSet = (set, s) => set.has(String(s || '').toLowerCase());
+            let isMember = false;
+            try { await github.rest.orgs.checkMembershipForUser({ org, username: actor }); isMember = true; } catch {}
+            const botSet = asSet(cfg.bots), userSet = asSet(cfg.users);
+            let allow = inSet(botSet, actor) || inSet(userSet, actor);
+            let reason = allow ? 'explicit user/bot' : '';
+            if (!allow && cfg.teams?.length) {
+              try {
+                const { data: teams } = await github.rest.teams.listForUserInOrg({ org, username: actor });
+                const desired = asSet(cfg.teams.map(t => t.includes('/') ? t : `${org}/${t}`));
+                allow = teams.some(t => desired.has(`${t.organization.login}/${t.slug}`.toLowerCase()));
+                if (allow) reason = 'team';
+              } catch (e) { core.warning(`Team lookup failed: ${e}`); }
+            }
+            if (!allow && cfg.org_members === true && isMember) { allow = true; reason = 'org member'; }
+            if (!allow && Array.isArray(cfg.temp_exemptions)) {
+              const hit = cfg.temp_exemptions.find(x => String(x.login).toLowerCase() === String(actor).toLowerCase());
+              if (hit?.until && nowIso <= new Date(hit.until).toISOString()) { allow = true; reason = 'temporary exemption'; }
+            }
+            core.setOutput('allow', allow ? 'true' : 'false');
+            core.setOutput('reason', reason || '');
+            core.setOutput('sign_phrase', process.env.SIGN_PHRASE);
+
+      - name: Verify signer equals PR author (for comment-based sign)
+        if: ${{ github.event_name == 'issue_comment' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.GH_TOKEN }}
+          script: |
+            const actor = context.payload.sender?.login;
+            const commentBody = context.payload.comment?.body?.trim() || '';
+            const expected = `${{ steps.allow.outputs.sign_phrase }}`.trim();
+            if (commentBody !== expected) {
+              core.setFailed(`Sign phrase must match exactly: "${expected}"`); return;
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number
+            });
+            if (!pr) { core.setFailed('PR not found for this comment'); return; }
+            if (pr.user?.login !== actor) core.setFailed(`Signer (${actor}) must be the PR author (${pr.user?.login})`);
+
+      - name: Allowlisted — skip CLA
+        if: ${{ steps.allow.outputs.allow == 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.GH_TOKEN }}
+        # (comment omitted for brevity; keeping logs clean)
+          script: |
+            core.info(`✅ CLA not required (allowlisted: ${{ steps.allow.outputs.reason }})`);
+
+      - name: CLA Assistant Lite
+        if: ${{ steps.allow.outputs.allow != 'true' }}
+        uses: contributor-assistant/github-action@v2.6.1
+        with:
           path-to-signatures: ${{ inputs.signature_file_path }}
-          # Path or URL to the CLA document text.
           path-to-document: ${{ inputs.cla_document_url }}
-          # Branch in THIS .github repository where new signatures should be committed.
           branch: ${{ inputs.signature_branch }}
-          # List of users/bots to ignore for CLA checks.
-          allowlist: bot*,dependabot[bot],github-actions[bot],renovate[bot]
-
-          # --- Optional configurations for cla-assistant-lite ---
-          # Custom commit message when a new signature is added to CLA.csv.
-          # Uses GitHub context variables available to cla-assistant-lite.
-          create-file-commit-message: 'chore(CLA): Add signature for @${{ github.event.sender.login }} for PR #${{ github.event.pull_request.number }} on ${{ github.event.repository.full_name }}'
-          # This tells the action what comment triggers a signature.
-          # The README image you provided had 'custom-pr-sign-comment'.
-          custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
-          
-          # User to attribute commits to if the action commits signatures.
-          # github-actions[bot] is a good default if you want to distinguish these commits.
-          # commit-author-name: 'CLA Automation'
-          # commit-author-email: 'cla-bot@users.noreply.github.com' # Or a dedicated bot user email
-
-          # Lock PR from non-members until CLA is signed
-          # lock-pullrequest-after: true
-          # Custom message when CLA is required
-          # sigRequiredComment: 'Thanks for your contribution! Please sign our CLA to proceed.'
+          remote-organization-name: ${{ github.repository_owner }}
+          remote-repository-name: .github
+          custom-pr-sign-comment: ${{ inputs.sign_comment_exact }}
+          allowlist: 'dependabot[bot],github-actions[bot]'
+        env:
+          GITHUB_TOKEN: ${{ env.GH_TOKEN }}
