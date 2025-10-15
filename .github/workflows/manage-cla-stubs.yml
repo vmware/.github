@@ -39,9 +39,9 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: "${{ github.workflow }}-${{ github.run_id }}"
-  cancel-in-progress: false
+#concurrency:
+#  group: "${{ github.workflow }}-${{ github.run_id }}"
+#  cancel-in-progress: false
 
 jobs:
   manage:
