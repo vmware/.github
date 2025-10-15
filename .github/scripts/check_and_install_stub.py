@@ -1,239 +1,438 @@
-# File: .github/scripts/check_and_install_stub.py
-# Purpose: Determines a repository's license, classifies it, and manages a CLA trigger workflow stub.
-# The stub now triggers on both pull_request_target and issue_comment events.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Org-wide CLA Stub Manager (requires_cla edition)
 
-import os
-import json
-import subprocess
-import base64
-import time
-import logging
-from github import Github, GithubException, UnknownObjectException
+Purpose
+-------
+Reconcile per-repo CLA trigger stubs across all *public* repositories in an org.
+This version delegates the "does this repo require CLA?" decision to your
+`.github/scripts/requires_cla.py` module (and its helpers), eliminating any
+license detection inside the workflow.
 
-# --- Configuration ---
-ORG_NAME = os.environ.get("GITHUB_REPOSITORY_OWNER")
-# IMPORTANT: Increment this version due to changes in the stub template's trigger logic.
-TARGET_STUB_VERSION = "1.1.0" # Example: Major.Minor.Patch -> new trigger is significant
-STUB_WORKFLOW_PATH = ".github/workflows/cla-check-trigger.yml"
+Behavior
+--------
+For each public repo (filtered by include/exclude globs):
+  - decision = requires_cla.requires_CLA("<org>/<repo>", token)
+  - If decision is True  or None (error/unknown): ensure stub PRESENT/UPDATED
+  - If decision is False: ensure stub ABSENT (delete if present)
 
-# Get the Licensee Docker image tag from an environment variable set by the workflow.
-LICENSEE_DOCKER_IMAGE_TAG = os.environ.get("LICENSEE_DOCKER_IMAGE", "local-org-licensee:latest")
+Outputs one machine-parsable line per repo:
+  REPO=<name> STATUS=<status> DECISION=<True|False|None> MSG=<text>
 
-if not ORG_NAME:
-    logging.critical("CRITICAL: GITHUB_REPOSITORY_OWNER environment variable not set. Cannot proceed.")
-    exit(1)
+Where STATUS ∈ {
+  stub_created_or_updated, stub_ok, stub_removed_not_required,
+  skipped_not_required, skipped_filtered, error
+}
 
-# Default URL to your CLA document stored within the .github repository itself.
-# This will be embedded in the stub workflow.
-DEFAULT_CLA_DOCUMENT_URL_IN_STUB = f"https://github.com/{ORG_NAME}/.github/blob/main/.github/CONTRIBUTOR_LICENSE_AGREEMENT.md"
-# If you prefer to configure this via an environment variable from manage-cla-stubs.yml:
-# CLA_DOCUMENT_URL_FOR_STUB_FINAL = os.environ.get("CLA_DOCUMENT_URL_FOR_STUBS_ENV_VAR", DEFAULT_CLA_DOCUMENT_URL_IN_STUB)
+Usage (typical in GitHub Actions)
+---------------------------------
+python3 .github/scripts/check_and_install_stub.py \
+  --org "<ORG>" \
+  --reusable-ref "main" \
+  --allowlist-branch "cla-config" \
+  --allowlist-path "cla/allowlist.yml" \
+  --sign-phrase "I have read the CLA Document and I hereby sign the CLA" \
+  --secret-name "CLA_ASSISTANT_PAT" \
+  --include-repos "" \
+  --exclude-repos ""
 
+Env / Secrets
+-------------
+- GITHUB_TOKEN or ORG_PAT : PAT with Content R/W across target repos,
+  and read access to list org repositories.
+- Optional env overrides for filters:
+  INCLUDE_REPOS, EXCLUDE_REPOS (comma-separated globs)
 
-# Define the content of the stub workflow file.
-# This stub triggers the reusable workflow for both PR events and relevant PR comments.
-STUB_WORKFLOW_CONTENT_TEMPLATE = f"""\
-# This file is auto-generated and managed by the organization's .github repository.
-# Do not modify manually. Version: {TARGET_STUB_VERSION}
-name: CLA Check Trigger
-
-on:
-  # Trigger on pull request events (opened, new commits pushed, reopened)
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-  # Trigger on issue comments (pull requests are also 'issues' in GitHub's model)
-  issue_comment:
-    types: [created] # Only when a new comment is made
-
-jobs:
-  call_cla_check:
-    # This job will run if:
-    # 1. The event is 'pull_request_target'.
-    # OR
-    # 2. The event is 'issue_comment' AND the comment was made on a pull request.
-    # The 'contributor-assistant/github-action' in the reusable workflow will then
-    # determine if the comment body is relevant for CLA signing or rechecking.
-    if: >
-      github.event_name == 'pull_request_target' ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
-
-    # Call the organization's centralized reusable CLA checking workflow.
-    # Pinning to a specific versioned tag (e.g., @v1.0.0) or commit SHA of the reusable workflow is highly recommended for stability.
-    uses: {ORG_NAME}/.github/.github/workflows/reusable-cla-check.yml@main
-    secrets:
-      # Pass the PAT required by contributor-assistant. This PAT needs permissions for:
-      # - PR interactions (comments, labels, statuses) on THIS repository (where the stub runs).
-      # - Contents Read & Write on the {ORG_NAME}/.github repository to manage the CLA.csv signature file.
-      CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.CLA_ASSISTANT_PAT }}}} # Note: Secret name is still CLA_ASSISTANT_PAT as per previous setup
-                                                                 # Can be renamed if desired, but ensure consistency.
-    with:
-      # Provide the URL to the CLA document.
-      cla_document_url: {DEFAULT_CLA_DOCUMENT_URL_IN_STUB} # Using the default determined in Python script
-      # Optional overrides for signature file path and branch if defaults in reusable workflow are not suitable:
-      # signature_file_path: '.github/signatures/CLA.csv'
-      # signature_branch: 'main'
+Notes
+-----
+- Public repositories only (by policy).
+- Fail-safe: if requires_CLA() returns None or raises -> treat as require CLA.
+- The per-repo stub forwards the repo secret (default "CLA_ASSISTANT_PAT")
+  to the reusable workflow as CONTRIBUTOR_ASSISTANT_PAT.
+- Bump TARGET_STUB_VERSION to force an org-wide stub refresh.
 """
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from __future__ import annotations
 
-# --- get_license_info function ---
-# (This function remains unchanged from the previous correct version that builds licensee locally)
-def get_license_info(repo_full_name, gh_token, temp_base_dir="temp_license_check"):
-    g = Github(gh_token)
+import argparse
+import base64
+import fnmatch
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from typing import Dict, List, Optional, Tuple
+
+
+# ====== Configuration knobs ======
+
+# Auto-managed per-repo stub location
+STUB_PATH = ".github/workflows/cla-check-trigger.yml"
+
+# Increment to force updates across all repos (compares against header in existing stub)
+TARGET_STUB_VERSION = "7"
+
+# Default excludes for discovery (special admin/security repos etc.)
+DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
+
+# Where to try importing your helper modules from (in Actions runner workspace)
+CANDIDATE_MODULE_DIRS = [
+    os.path.join(os.getcwd(), ".github", "scripts"),
+    os.path.join(os.getcwd(), ".github-admin", "scripts"),
+    os.getcwd(),
+]
+
+
+# ====== Utilities ======
+
+def _prepare_import_path() -> None:
+    for p in CANDIDATE_MODULE_DIRS:
+        if os.path.isdir(p) and p not in sys.path:
+            sys.path.insert(0, p)
+
+
+_prepare_import_path()
+
+try:
+    # Your single source of truth for the decision.
+    # May internally import detect_org_repo_licenses.py, license_detector.py, etc.
+    import requires_cla  # type: ignore
+except Exception as e:
+    print(f"ERROR: Could not import requires_cla.py: {e}", file=sys.stderr)
+    sys.exit(2)
+
+
+def gh_api(
+    url: str,
+    token: str,
+    method: str = "GET",
+    body: Optional[bytes] = None,
+    accept: str = "application/vnd.github+json",
+) -> Dict:
+    """Minimal GitHub API helper using urllib (stdlib only)."""
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", accept)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+        req.data = body
     try:
-        repo = g.get_repo(repo_full_name)
-    except UnknownObjectException:
-        logging.warning(f"Repository {repo_full_name} not found or PAT lacks access.")
-        return "REPO_NOT_FOUND", "non-permissive"
-    except Exception as e:
-        logging.error(f"Error accessing repository {repo_full_name} object: {e}")
-        return "REPO_ACCESS_ERROR", "non-permissive"
-
-    license_content = None; license_filename = "LICENSE"
-    common_license_files = ["LICENSE", "LICENSE.MD", "LICENSE.TXT", "COPYING", "COPYING.MD", "UNLICENSE"]
-    try:
-        contents = repo.get_contents("")
-        for content_file in contents:
-            if content_file.name.upper() in common_license_files:
-                license_filename = content_file.name
-                license_content_b64 = repo.get_contents(content_file.path).content
-                license_content = base64.b64decode(license_content_b64).decode('utf-8', errors='replace')
-                logging.info(f"Found license file '{content_file.path}' in {repo_full_name}.")
-                break
-    except Exception as e:
-        logging.warning(f"Could not list root contents or read license file from root for {repo_full_name}: {e}. Will try specific paths.")
-        for fname in common_license_files:
-            try:
-                license_content_b64 = repo.get_contents(fname).content
-                license_content = base64.b64decode(license_content_b64).decode('utf-8', errors='replace')
-                license_filename = fname; logging.info(f"Found license file '{fname}' directly in {repo_full_name}."); break
-            except UnknownObjectException: continue
-            except Exception as e_inner: logging.warning(f"Error fetching specific license file {fname} for {repo_full_name}: {e_inner}"); continue
-    if not license_content:
-        logging.info(f"No common license file found for {repo_full_name} via API. Classifying as non-permissive.")
-        return "NO_LICENSE_FILE", "non-permissive"
-
-    repo_temp_dir = os.path.join(temp_base_dir, repo_full_name.replace("/", "_"))
-    os.makedirs(repo_temp_dir, exist_ok=True)
-    temp_license_filepath = os.path.join(repo_temp_dir, license_filename)
-    try:
-        with open(temp_license_filepath, "w", encoding="utf-8") as f: f.write(license_content)
-        cmd = [ "docker", "run", "--rm", "-v", f"{os.path.abspath(repo_temp_dir)}:/scan_dir", LICENSEE_DOCKER_IMAGE_TAG, "detect", "/scan_dir", "--json" ]
-        logging.info(f"Running licensee for {repo_full_name} using image {LICENSEE_DOCKER_IMAGE_TAG}: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=90)
-        if result.returncode != 0:
-            if "command not found" in result.stderr.lower() or "No such file or directory" in result.stderr.lower():
-                 logging.error(f"Licensee Docker command failed for {repo_full_name}. Docker image '{LICENSEE_DOCKER_IMAGE_TAG}' might not be available or command inside is wrong. Stderr: {result.stderr[:500]}")
-            else: logging.error(f"Licensee Docker command failed for {repo_full_name}. Exit: {result.returncode}, Stderr: {result.stderr[:500]}")
-            return "LICENSEE_ERROR", "non-permissive"
-        license_data = json.loads(result.stdout); spdx_id = "OTHER"
-        if license_data.get("licenses") and isinstance(license_data["licenses"], list) and license_data["licenses"]:
-            best_license = max(license_data["licenses"], key=lambda lic: lic.get("confidence", 0), default=None)
-            if best_license and best_license.get("spdx_id"): spdx_id = best_license["spdx_id"]
-            elif license_data["licenses"][0].get("spdx_id"): spdx_id = license_data["licenses"][0].get("spdx_id", "OTHER")
-        elif license_data.get("matched_files") and license_data["matched_files"][0].get("license") and license_data["matched_files"][0]["license"].get("spdx_id"):
-            spdx_id = license_data["matched_files"][0]["license"]["spdx_id"]
-        logging.info(f"License for {repo_full_name} determined by licensee as: {spdx_id}")
-        return spdx_id, classify_license(spdx_id)
-    except subprocess.TimeoutExpired: logging.error(f"Licensee Docker command timed out for {repo_full_name}."); return "LICENSEE_TIMEOUT", "non-permissive"
-    except json.JSONDecodeError as e: logging.error(f"Failed to parse licensee JSON for {repo_full_name}. Output: {result.stdout[:300]}. Error: {e}"); return "LICENSEE_JSON_ERROR", "non-permissive"
-    except Exception as e: logging.error(f"Unexpected error during licensee processing for {repo_full_name}: {e}"); return "UNKNOWN_ERROR_LICENSEE_PROCESSING", "non-permissive"
-    finally:
-        if os.path.exists(temp_license_filepath): os.remove(temp_license_filepath)
-        if os.path.exists(repo_temp_dir) and not os.listdir(repo_temp_dir): os.rmdir(repo_temp_dir)
-        if os.path.exists(temp_base_dir) and not os.listdir(temp_base_dir):
-            try: os.rmdir(temp_base_dir)
-            except OSError: pass
-
-# --- classify_license function ---
-# (This function remains unchanged)
-def classify_license(spdx_id):
-    permissive_spdx_ids_str = os.environ.get("PERMISSIVE_SPDX_IDS", "MIT,Apache-2.0,BSD-3-Clause,ISC,BSD-2-Clause,CC0-1.0,Unlicense")
-    permissive_ids = {pid.strip().upper() for pid in permissive_spdx_ids_str.split(',')}
-    if spdx_id is None: logging.warning("classify_license received None SPDX ID, defaulting to non-permissive."); return "non-permissive"
-    if spdx_id.upper() in permissive_ids: return "permissive"
-    return "non-permissive"
-
-# --- manage_stub function ---
-# (This function's core logic for creating/updating/deleting files remains unchanged.
-# It will use the updated STUB_WORKFLOW_CONTENT_TEMPLATE.)
-def manage_stub(repo_full_name, gh_token):
-    g = Github(gh_token)
-    try:
-        repo = g.get_repo(repo_full_name)
-        if repo.archived: logging.info(f"Skipping archived repository: {repo_full_name}"); return "skipped_archived"
-    except UnknownObjectException: logging.warning(f"Repository {repo_full_name} not found or PAT lacks access during stub management."); return "error_repo_not_found_stub_mgmt"
-    except Exception as e: logging.error(f"Error accessing repository {repo_full_name} object for stub management: {e}"); return "error_repo_access_stub_mgmt"
-
-    logging.info(f"Managing stub for repository: {repo_full_name}")
-    spdx_id, license_type = get_license_info(repo_full_name, gh_token)
-    logging.info(f"  License classification for {repo_full_name}: {license_type} (SPDX/Code: {spdx_id or 'N/A'})")
-
-    action_taken = "no_action_default"
-    if license_type == "non-permissive":
-        logging.info(f"  Non-permissive license. Ensuring CLA stub workflow exists for {repo_full_name}.")
+        with urllib.request.urlopen(req) as r:
+            raw = r.read()
+            return json.loads(raw.decode()) if raw else {}
+    except urllib.error.HTTPError as e:
+        # Surface HTTP error details for logs while letting caller decide behavior
         try:
-            existing_stub_file = None; existing_content = ""
+            detail = e.read().decode()
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"GitHub API error {e.code} for {url}: {detail}") from e
+
+
+def list_public_repos(org: str, token: str) -> List[Dict]:
+    """List all public, non-archived, non-disabled repos in the org."""
+    results: List[Dict] = []
+    page = 1
+    while True:
+        url = f"https://api.github.com/orgs/{org}/repos?per_page=100&page={page}&type=public&sort=full_name&direction=asc"
+        data = gh_api(url, token)
+        if not isinstance(data, list) or not data:
+            break
+        results.extend(data)
+        page += 1
+
+    return [
+        r
+        for r in results
+        if not (r.get("archived") or r.get("disabled")) and r.get("private") is False
+    ]
+
+
+def get_default_branch(owner: str, repo: str, token: str) -> str:
+    data = gh_api(f"https://api.github.com/repos/{owner}/{repo}", token)
+    return data.get("default_branch", "main")
+
+
+def get_file(owner: str, repo: str, path: str, ref: str, token: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (content_str, sha) or (None, None) if not found."""
+    try:
+        data = gh_api(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}",
+            token,
+        )
+        if isinstance(data, dict) and data.get("content"):
+            content = base64.b64decode(data["content"]).decode()
+            return content, data.get("sha")
+    except Exception:
+        pass
+    return None, None
+
+
+def put_file(
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str,
+    token: str,
+    content: str,
+    sha: Optional[str],
+    message: str,
+) -> Dict:
+    body = {
+        "message": message,
+        "content": base64.b64encode(content.encode()).decode(),
+        "branch": ref,
+    }
+    if sha:
+        body["sha"] = sha
+    return gh_api(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        token,
+        method="PUT",
+        body=json.dumps(body).encode(),
+    )
+
+
+def delete_file(
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str,
+    token: str,
+    sha: str,
+    message: str,
+) -> Dict:
+    body = {"message": message, "sha": sha, "branch": ref}
+    return gh_api(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        token,
+        method="DELETE",
+        body=json.dumps(body).encode(),
+    )
+
+
+def globs_to_list(val: Optional[str]) -> List[str]:
+    return [g.strip() for g in (val or "").split(",") if g.strip()]
+
+
+def allowed_by_globs(name: str, includes: List[str], excludes: List[str]) -> bool:
+    if includes:
+        if not any(fnmatch.fnmatch(name, pat) for pat in includes):
+            return False
+    for pat in excludes:
+        if fnmatch.fnmatch(name, pat):
+            return False
+    return True
+
+
+# ====== Stub template (hardened) ======
+
+STUB_TEMPLATE = """# Auto-managed; DO NOT EDIT MANUALLY
+# Stub Version: {stub_version}
+name: CLA — Trigger Stub
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
+
+concurrency:
+  group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.run_id }}}}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Gate & Dispatch
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+
+    steps:
+      - name: Short-circuit for org members (fast path)
+        id: member
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{{{ secrets.{secret_name} }}}}
+          script: |
+            let isMember = false;
+            try {{
+              await github.rest.orgs.checkMembershipForUser({{ org: context.repo.owner, username: context.payload.sender.login }});
+              isMember = true;
+            }} catch {{}}
+            core.setOutput('is_member', isMember ? 'true' : 'false');
+
+      - name: Skip if org member
+        if: ${{{{ steps.member.outputs.is_member == 'true' }}}}
+        run: echo "Org member — skipping CLA."
+
+      - name: Call reusable CLA checker
+        if: ${{{{ steps.member.outputs.is_member != 'true' }}}}
+        uses: ${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+        secrets:
+          CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.{secret_name} }}}}}
+        with:
+          allowlist_branch: "{allowlist_branch}"
+          allowlist_path: "{allowlist_path}"
+          sign_comment_exact: "{sign_phrase}"
+"""
+
+
+def ensure_stub(
+    owner: str,
+    repo: str,
+    token: str,
+    default_branch: str,
+    reusable_ref: str,
+    allowlist_branch: str,
+    allowlist_path: str,
+    sign_phrase: str,
+    secret_name: str,
+) -> str:
+    """Create or update the stub in a target repo; return status string."""
+    desired = STUB_TEMPLATE.format(
+        stub_version=TARGET_STUB_VERSION,
+        reusable_ref=reusable_ref,
+        allowlist_branch=allowlist_branch,
+        allowlist_path=allowlist_path,
+        sign_phrase=sign_phrase.replace('"', '\\"'),
+        secret_name=secret_name,
+    )
+
+    existing, sha = get_file(owner, repo, STUB_PATH, default_branch, token)
+    if existing:
+        m = re.search(r"Stub Version:\s*(\d+)", existing)
+        cur_ver = m.group(1) if m else "0"
+        needs_update = (cur_ver != TARGET_STUB_VERSION) or (existing.strip() != desired.strip())
+        if needs_update:
+            put_file(
+                owner,
+                repo,
+                STUB_PATH,
+                default_branch,
+                token,
+                desired,
+                sha,
+                f"chore(cla): ensure trigger stub v{TARGET_STUB_VERSION}",
+            )
+            return "stub_created_or_updated"
+        return "stub_ok"
+    else:
+        put_file(
+            owner,
+            repo,
+            STUB_PATH,
+            default_branch,
+            token,
+            desired,
+            None,
+            f"chore(cla): add trigger stub v{TARGET_STUB_VERSION}",
+        )
+        return "stub_created_or_updated"
+
+
+# ====== Main ======
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Reconcile per-repo CLA trigger stubs for all public repos in an org.")
+    p.add_argument("--org", required=True, help="GitHub organization login")
+    p.add_argument("--reusable-ref", required=True, help="Ref in .github containing reusable-cla-check.yml (e.g., main)")
+    p.add_argument("--allowlist-branch", required=True, help="Branch in .github where cla/allowlist.yml lives (e.g., cla-config)")
+    p.add_argument("--allowlist-path", required=True, help="Path to allowlist YAML inside .github (e.g., cla/allowlist.yml)")
+    p.add_argument("--sign-phrase", required=True, help="Exact phrase required to sign via comment")
+    p.add_argument("--secret-name", default="CLA_ASSISTANT_PAT", help="Repo secret name forwarded as CONTRIBUTOR_ASSISTANT_PAT")
+    p.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS", ""), help="Comma-separated globs to include")
+    p.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS", ""), help="Comma-separated globs to exclude (added to defaults)")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
+    if not token:
+        print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr)
+        sys.exit(2)
+
+    includes = globs_to_list(args.include_repos)
+    excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
+
+    try:
+        repos = list_public_repos(args.org, token)
+    except Exception as e:
+        print(f"ERROR: failed to list public repos: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    for r in repos:
+        name = r.get("name") or ""
+        if not name:
+            # Very unlikely, but be defensive
+            print("REPO=? STATUS=error DECISION=None MSG=missing repo name", file=sys.stderr)
+            continue
+
+        # Filter by include/exclude globs
+        if not allowed_by_globs(name, includes, excludes):
+            print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude")
+            continue
+
+        full = f"{args.org}/{name}"
+        try:
+            # Single source of truth (your module)
+            decision: Optional[bool] = None
             try:
-                existing_stub_file = repo.get_contents(STUB_WORKFLOW_PATH, ref=repo.default_branch)
-                existing_content = base64.b64decode(existing_stub_file.content).decode('utf-8')
-            except UnknownObjectException: logging.info(f"    No existing stub found at {STUB_WORKFLOW_PATH} in {repo_full_name}.")
-            current_version_str = "0.0.0"
-            if existing_content:
-                for line in existing_content.splitlines():
-                    if "# Version:" in line: current_version_str = line.split("# Version:")[1].strip(); break
-            if existing_stub_file and current_version_str == TARGET_STUB_VERSION and existing_content.strip() == STUB_WORKFLOW_CONTENT_TEMPLATE.strip():
-                logging.info(f"    CLA stub '{STUB_WORKFLOW_PATH}' is up-to-date (v{TARGET_STUB_VERSION}) in {repo_full_name}.")
-                action_taken = "skipped_stub_up_to_date"
-            elif existing_stub_file:
-                commit_message = f"ci: Update CLA trigger workflow to v{TARGET_STUB_VERSION}"
-                logging.info(f"    Updating existing CLA stub '{STUB_WORKFLOW_PATH}' (Old: v{current_version_str}) in {repo_full_name}.")
-                repo.update_file(STUB_WORKFLOW_PATH, commit_message, STUB_WORKFLOW_CONTENT_TEMPLATE, existing_stub_file.sha, branch=repo.default_branch)
-                action_taken = "stub_updated"
+                decision = requires_cla.requires_CLA(full, token=token)  # type: ignore[attr-defined]
+            except Exception as e:
+                # Fail-safe: treat unknown as require CLA
+                decision = None
+
+            requires = True if decision is None else bool(decision)
+
+            default_branch = get_default_branch(args.org, name, token)
+            existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
+
+            if requires:
+                status = ensure_stub(
+                    args.org,
+                    name,
+                    token,
+                    default_branch,
+                    args.reusable_ref,
+                    args.allowlist_branch,
+                    args.allowlist_path,
+                    args.sign_phrase,
+                    args.secret_name,
+                )
+                print(f"REPO={name} STATUS={status} DECISION={requires} MSG=CLA required")
             else:
-                commit_message = f"ci: Add CLA trigger workflow v{TARGET_STUB_VERSION}"
-                logging.info(f"    CLA stub '{STUB_WORKFLOW_PATH}' not found. Creating in {repo_full_name}.")
-                repo.create_file(STUB_WORKFLOW_PATH, commit_message, STUB_WORKFLOW_CONTENT_TEMPLATE, branch=repo.default_branch)
-                action_taken = "stub_created"
-        except GithubException as e: logging.error(f"    GitHub API error (stub for non-permissive {repo_full_name}): Status {e.status}, Data {e.data}"); action_taken = f"error_api_non_permissive_{e.status}"
-        except Exception as e: logging.error(f"    Unexpected error (stub for non-permissive {repo_full_name}): {e}"); action_taken = "error_unknown_non_permissive"
-    elif license_type == "permissive":
-        logging.info(f"  Permissive license ({spdx_id}). Ensuring CLA stub does NOT exist for {repo_full_name}.")
-        try:
-            existing_stub_file = repo.get_contents(STUB_WORKFLOW_PATH, ref=repo.default_branch)
-            commit_message = f"ci: Remove CLA trigger workflow (license: {spdx_id} is permissive)"
-            logging.info(f"    Permissive license; removing existing CLA stub '{STUB_WORKFLOW_PATH}' from {repo_full_name}.")
-            repo.delete_file(STUB_WORKFLOW_PATH, commit_message, existing_stub_file.sha, branch=repo.default_branch)
-            action_taken = "stub_removed_permissive"
-        except UnknownObjectException: logging.info(f"    Permissive license; CLA stub '{STUB_WORKFLOW_PATH}' does not exist. No action needed."); action_taken = "skipped_permissive_no_stub"
-        except GithubException as e: logging.error(f"    GitHub API error (removing stub for permissive {repo_full_name}): Status {e.status}, Data {e.data}"); action_taken = f"error_api_permissive_{e.status}"
-        except Exception as e: logging.error(f"    Unexpected error (removing stub for permissive {repo_full_name}): {e}"); action_taken = "error_unknown_permissive"
-    else: logging.warning(f"  Unknown license type '{license_type}' for {repo_full_name} (SPDX/Code: {spdx_id}). No action on stub."); action_taken = "skipped_unknown_license_type"
-    return action_taken
+                if existing and sha:
+                    delete_file(
+                        args.org,
+                        name,
+                        STUB_PATH,
+                        default_branch,
+                        token,
+                        sha,
+                        "chore(cla): remove trigger stub (CLA not required)",
+                    )
+                    print(f"REPO={name} STATUS=stub_removed_not_required DECISION={requires} MSG=Removed stub")
+                else:
+                    print(f"REPO={name} STATUS=skipped_not_required DECISION={requires} MSG=No stub (as expected)")
 
-# --- __main__ function ---
-# (This function remains unchanged)
-if __name__ == "__main__":
-    repo_to_process = os.environ.get("TARGET_REPO_FULL_NAME")
-    org_pat = os.environ.get("ORG_PAT")
-    if not repo_to_process: logging.critical("CRITICAL: TARGET_REPO_FULL_NAME not set."); exit(1)
-    if not org_pat: logging.critical("CRITICAL: ORG_PAT not set."); exit(1)
-    max_retries = 1; final_status = "error_unknown_initial"
-    for attempt in range(max_retries + 1):
-        try:
-            final_status = manage_stub(repo_to_process, org_pat)
-            if not final_status.startswith("error_"): break 
         except Exception as e:
-            logging.error(f"Attempt {attempt+1} for {repo_to_process} failed with unhandled exception: {e}")
-            final_status = f"error_unhandled_exception_attempt_{attempt+1}"
-        if attempt < max_retries and final_status.startswith("error_"):
-            sleep_duration = (attempt + 1) * 10
-            logging.info(f"Retrying {repo_to_process} in {sleep_duration}s after status: {final_status}"); time.sleep(sleep_duration)
-        elif attempt == max_retries:
-             logging.error(f"All {max_retries+1} attempts failed for {repo_to_process}. Final status: {final_status}")
-    print(f"REPO_PROCESSED_NAME={repo_to_process}")
-    print(f"REPO_PROCESSED_STATUS={final_status}")
-    if final_status.startswith("error_"): exit(1)
+            print(f"REPO={name} STATUS=error DECISION=None MSG={e}", file=sys.stderr)
 
+
+if __name__ == "__main__":
+    main()
 
