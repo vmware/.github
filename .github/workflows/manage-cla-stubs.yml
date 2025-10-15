@@ -1,231 +1,369 @@
-# File: .github/.github/workflows/manage-cla-stubs.yml
-# Purpose: Periodically manages CLA trigger stubs across organization repositories.
-# Builds the licensee Docker image within each processing job.
-
-name: Manage CLA Stubs Org-Wide
+name: Org — Manage CLA Stubs (requires_cla)
 
 on:
-  # schedule:
-    # - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
-      specific_repos:
-        description: 'Comma-separated list of specific repos (owner/repo1,owner/repo2) to process. Overrides INCLUDE/EXCLUDE.'
+      org:
+        description: "Organization login (defaults to caller's org)"
         required: false
-        default: ''
-      licensee_version_tag:
-        description: 'Licensee git tag to build (e.g., v9.16.1). Default is v9.16.1.'
+      reusable_ref:
+        description: "Ref for reusable CLA workflow (e.g., main)"
         required: false
-        default: 'v9.16.1' # Pin to a known stable version of licensee
+        default: "main"
+      allowlist_branch:
+        description: "Branch in .github with allowlist"
+        required: false
+        default: "cla-config"
+      allowlist_path:
+        description: "Path to YAML allowlist"
+        required: false
+        default: "cla/allowlist.yml"
+      sign_phrase:
+        description: "Exact phrase for signing via comment"
+        required: false
+        default: "I have read the CLA Document and I hereby sign the CLA"
+      secret_name:
+        description: "Repo secret name forwarded to reusable workflow"
+        required: false
+        default: "CLA_ASSISTANT_PAT"
+      include_repos:
+        description: "Comma-separated glob(s) to include (overrides default). Leave blank to include all public except excludes."
+        required: false
+        default: ""
+      exclude_repos:
+        description: "Comma-separated glob(s) to exclude (in addition to defaults)."
+        required: false
+        default: ""
 
-permissions: {}
+permissions:
+  contents: write
+  actions: read
 
-env:
-  EXCLUDE_REPOS_CSV: ${{ vars.EXCLUDE_REPOS || '.github' }}
-  INCLUDE_REPOS_CSV: ${{ vars.INCLUDE_REPOS || '' }}
-  PERMISSIVE_SPDX_IDS_CSV: ${{ vars.PERMISSIVE_SPDX_IDS || 'MIT,Apache-2.0,BSD-3-Clause,ISC,BSD-2-Clause,CC0-1.0,Unlicense' }}
-  # Define the image tag to be used consistently
-  LOCAL_LICENSEE_IMAGE_TAG: 'local-org-licensee:latest' # This tag will be built on each runner
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
-  discover_repositories:
-    name: Discover Repositories
+  manage:
+    name: Discover & reconcile stubs via requires_cla.py
     runs-on: ubuntu-latest
-    outputs:
-      repositories_json: ${{ steps.get_repos.outputs.repo_list_json }}
-      repository_count: ${{ steps.get_repos.outputs.repo_count }}
+    timeout-minutes: 30
+    env:
+      ORG: ${{ inputs.org || github.repository_owner }}
+      REUSABLE_REF: ${{ inputs.reusable_ref }}
+      ALLOWLIST_BRANCH: ${{ inputs.allowlist_branch }}
+      ALLOWLIST_PATH: ${{ inputs.allowlist_path }}
+      SIGN_PHRASE: ${{ inputs.sign_phrase }}
+      SECRET_NAME: ${{ inputs.secret_name }}
+      # Public only per your decision (do not add a toggle)
+      ORG_PAT: ${{ secrets.ORG_PAT }}
+      # Allow override via env vars for one-offs:
+      INCLUDE_REPOS: ${{ inputs.include_repos || env.INCLUDE_REPOS }}
+      EXCLUDE_REPOS: ${{ inputs.exclude_repos || env.EXCLUDE_REPOS }}
     steps:
-      - name: Get Organization Repositories List
-        id: get_repos
-        uses: actions/github-script@v7.0.1
-        env:
-          INCLUDE_REPOS_CSV: ${{ env.INCLUDE_REPOS_CSV }}
-          EXCLUDE_REPOS_CSV: ${{ env.EXCLUDE_REPOS_CSV }}
-          SPECIFIC_REPOS_INPUT: ${{ github.event.inputs.specific_repos }}
+      - name: Plan
+        run: |
+          echo "Org: ${ORG}"
+          echo "Reusable ref: ${REUSABLE_REF}"
+          echo "Allowlist: ${ALLOWLIST_BRANCH}:${ALLOWLIST_PATH}"
+          echo "Sign phrase: ${SIGN_PHRASE}"
+          echo "Secret name: ${SECRET_NAME}"
+          echo "Include globs: ${INCLUDE_REPOS}"
+          echo "Exclude globs: ${EXCLUDE_REPOS}"
+
+      - name: Checkout .github (stage manager & your helper modules)
+        uses: actions/checkout@v4
         with:
-          github-token: ${{ secrets.ORG_PAT }}
+          repository: ${{ github.repository_owner }}/.github
+          path: .github-admin
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Ensure helper modules live at .github/scripts
+        run: |
+          test -f .github-admin/scripts/requires_cla.py || echo "WARNING: requires_cla.py not found in .github-admin/scripts"
+          ls -la .github-admin/scripts || true
+
+      - name: Write manager script (refactored)
+        shell: bash
+        run: |
+          mkdir -p .github-admin/run
+          cat > .github-admin/run/check_and_install_stub.py <<'PY'
+#!/usr/bin/env python3
+"""
+Manager (requires_cla edition) — public repos only
+- Lists org repos (public, non-archived/non-disabled)
+- Applies include/exclude globs (from inputs or env)
+- Calls requires_cla.requires_CLA("<org>/<repo>", token)
+- Ensures trigger stub present when True/None (fail-safe), absent when False
+- Emits: REPO=<name> STATUS=<...> DECISION=<True|False|None> MSG=<text>
+"""
+import os, sys, json, base64, re, fnmatch, urllib.request
+
+TARGET_STUB_VERSION = "7"
+STUB_PATH = ".github/workflows/cla-check-trigger.yml"
+
+# Default excludes you asked for (special GitHub repos):
+DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
+
+# Module import path
+CANDIDATE_MODULE_DIRS = [
+    os.path.join(os.getcwd(), ".github-admin", "scripts"),
+    os.path.join(os.getcwd(), ".github", "scripts"),
+    os.getcwd(),
+]
+for p in CANDIDATE_MODULE_DIRS:
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
+
+try:
+    import requires_cla  # your logic, imports its siblings as needed
+except Exception as e:
+    print(f"ERROR: Could not import requires_cla.py: {e}", file=sys.stderr)
+    sys.exit(2)
+
+def gh_api(url: str, token: str, method="GET", body: bytes|None=None, accept="application/vnd.github+json"):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", accept)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+        req.data = body
+    with urllib.request.urlopen(req) as r:
+        data = r.read()
+        return json.loads(data.decode()) if data else {}
+
+def list_public_repos(org: str, token: str) -> list[dict]:
+    results, page = [], 1
+    while True:
+        url = f"https://api.github.com/orgs/{org}/repos?per_page=100&page={page}&type=public&sort=full_name&direction=asc"
+        data = gh_api(url, token)
+        if not data: break
+        results.extend(data); page += 1
+    return [r for r in results if not (r.get("archived") or r.get("disabled")) and r.get("private") is False]
+
+def get_default_branch(owner: str, repo: str, token: str) -> str:
+    data = gh_api(f"https://api.github.com/repos/{owner}/{repo}", token)
+    return data.get("default_branch", "main")
+
+def get_file(owner: str, repo: str, path: str, ref: str, token: str):
+    try:
+        data = gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}", token)
+        if isinstance(data, dict) and data.get("content"):
+            content = base64.b64decode(data["content"]).decode()
+            return content, data.get("sha")
+    except Exception:
+        pass
+    return None, None
+
+def put_file(owner: str, repo: str, path: str, ref: str, token: str, content: str, sha: str|None, message: str):
+    body = {"message": message, "content": base64.b64encode(content.encode()).decode(), "branch": ref}
+    if sha: body["sha"] = sha
+    return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="PUT", body=json.dumps(body).encode())
+
+def delete_file(owner: str, repo: str, path: str, ref: str, token: str, sha: str, message: str):
+    body = {"message": message, "sha": sha, "branch": ref}
+    return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="DELETE", body=json.dumps(body).encode())
+
+STUB_TEMPLATE = """# Auto-managed; DO NOT EDIT MANUALLY
+# Stub Version: {stub_version}
+name: CLA — Trigger Stub
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
+
+concurrency:
+  group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.run_id }}}}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Gate & Dispatch
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+
+    steps:
+      - name: Short-circuit for org members (fast path)
+        id: member
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{{{ secrets.{secret_name} }}}}
           script: |
-            // ... (JavaScript for discovery - same as before) ...
-            const includeReposList = (process.env.INCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
-            const excludeReposList = (process.env.EXCLUDE_REPOS_CSV || "").split(',').map(r => r.trim()).filter(r => r);
-            const specificReposInput = (process.env.SPECIFIC_REPOS_INPUT || "").split(',').map(r => r.trim()).filter(r => r);
-            let reposToProcess = [];
+            let isMember = false;
+            try {{
+              await github.rest.orgs.checkMembershipForUser({{ org: context.repo.owner, username: context.payload.sender.login }});
+              isMember = true;
+            }} catch {{}}
+            core.setOutput('is_member', isMember ? 'true' : 'false');
 
-            if (specificReposInput.length > 0) {
-              console.log("Processing only specifically provided repositories (from manual input):", specificReposInput);
-              reposToProcess = specificReposInput.map(repoName => {
-                if (repoName.includes('/')) return repoName;
-                return `${context.repo.owner}/${repoName}`;
-              });
-            } else if (includeReposList.length > 0) {
-              console.log("Processing only explicitly included repositories (from VARS_INCLUDE_REPOS):", includeReposList);
-              reposToProcess = includeReposList.map(repoName => `${context.repo.owner}/${repoName}`);
-            } else {
-              console.log("Fetching all non-archived repositories for organization:", context.repo.owner);
-              for await (const response of github.paginate.iterator(github.rest.repos.listForOrg, {
-                org: context.repo.owner, type: 'all', per_page: 100
-              })) {
-                for (const repo of response.data) {
-                  if (!repo.archived) { reposToProcess.push(repo.full_name); }
-                }
-              }
-              console.log(`Found ${reposToProcess.length} non-archived repositories in the organization.`);
-            }
-            
-            const finalRepos = reposToProcess.filter(fullName => {
-                const repoName = fullName.split('/')[1];
-                return !excludeReposList.includes(repoName);
-            });
+      - name: Skip if org member
+        if: ${{{{ steps.member.outputs.is_member == 'true' }}}}
+        run: echo "Org member — skipping CLA."
 
-            console.log(`Final list of ${finalRepos.length} repositories to process:`, finalRepos);
-            core.setOutput('repo_list_json', JSON.stringify(finalRepos));
-            core.setOutput('repo_count', finalRepos.length);
-            
-            await core.summary
-              .addHeading('Repository Discovery Phase')
-              .addRaw(`Discovered <strong>${finalRepos.length}</strong> repositories to process based on include/exclude rules.`)
-              .addSeparator().write();
-
-  process_repositories:
-    name: Process Repository (${{ matrix.repository_full_name }})
-    needs: [discover_repositories] # Does not need a separate build job anymore
-    if: needs.discover_repositories.outputs.repository_count > 0
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        repository_full_name: ${{ fromJson(needs.discover_repositories.outputs.repositories_json) }}
-      fail-fast: false
-    
-    steps:
-      - name: Checkout .github repo (for our management scripts)
-        uses: actions/checkout@v4.1.1
-        # This checks out the content of THIS .github repository.
-
-      - name: Checkout licensee source code
-        uses: actions/checkout@v4.1.1
+      - name: Call reusable CLA checker
+        if: ${{{{ steps.member.outputs.is_member != 'true' }}}}
+        uses: ${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+        secrets:
+          CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.{secret_name} }}}}
         with:
-          repository: licensee/licensee # The official licensee repository
-          path: licensee-src          # Checkout to a subdirectory to avoid conflicts
-          # Use the version tag from workflow_dispatch input or a default.
-          ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }} 
-          # Pin to a specific tag of licensee for stability (e.g., 'v9.16.1')
+          allowlist_branch: "{allowlist_branch}"
+          allowlist_path: "{allowlist_path}"
+          sign_comment_exact: "{sign_phrase}"
+"""
 
-      - name: Build licensee Docker image locally
-        run: |
-          echo "Building licensee Docker image (${{ env.LOCAL_LICENSEE_IMAGE_TAG }}) from ref: ${{ github.event.inputs.licensee_version_tag || 'v9.16.1' }}"
-          docker build ./licensee-src --tag ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
-          echo "Successfully built Docker image: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}"
-          # Verify image exists locally
-          docker images ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
+def ensure_stub(owner: str, repo: str, token: str, default_branch: str,
+                reusable_ref: str, allowlist_branch: str, allowlist_path: str,
+                sign_phrase: str, secret_name: str) -> str:
+    desired = STUB_TEMPLATE.format(
+        stub_version=TARGET_STUB_VERSION,
+        reusable_ref=reusable_ref,
+        allowlist_branch=allowlist_branch,
+        allowlist_path=allowlist_path,
+        sign_phrase=sign_phrase.replace('"','\\"'),
+        secret_name=secret_name
+    )
+    existing, sha = get_file(owner, repo, STUB_PATH, default_branch, token)
+    if existing:
+        m = re.search(r"Stub Version:\s*(\d+)", existing)
+        cur_ver = m.group(1) if m else "0"
+        needs_update = (cur_ver != TARGET_STUB_VERSION) or (existing.strip() != desired.strip())
+        if needs_update:
+            put_file(owner, repo, STUB_PATH, default_branch, token, desired, sha, f"chore(cla): ensure trigger stub v{TARGET_STUB_VERSION}")
+            return "stub_created_or_updated"
+        return "stub_ok"
+    else:
+        put_file(owner, repo, STUB_PATH, default_branch, token, desired, None, f"chore(cla): add trigger stub v{TARGET_STUB_VERSION}")
+        return "stub_created_or_updated"
 
-      - name: DEBUG - Test ORG_PAT Access to ${{ matrix.repository_full_name }}
-        if: matrix.repository_full_name == 'vmware/test-cla-gpl2' # Only run for one repo for testing
-        uses: actions/github-script@v7.0.1
-        with:
-          github-token: ${{ secrets.ORG_PAT }}
-          script: |
-            const repoFullName = '${{ matrix.repository_full_name }}';
-            const owner = repoFullName.split('/')[0];
-            const repo = repoFullName.split('/')[1];
-            core.info(`Attempting to get repo details for ${repoFullName} using ORG_PAT.`);
-            try {
-              const { data: repoData } = await github.rest.repos.get({ owner, repo });
-              core.info(`Successfully fetched repo data: ${JSON.stringify(repoData.name)}`);
-              
-              core.info(`Attempting to get root contents for ${repoFullName}`);
-              const { data: contents } = await github.rest.repos.getContent({ owner, repo, path: '' });
-              core.info(`Successfully fetched root contents. Number of items: ${contents.length}`);
+def globs_to_list(val: str|None) -> list[str]:
+    return [g.strip() for g in (val or "").split(",") if g.strip()]
 
-              // Attempt a "safe" write-like check, e.g., trying to get a specific workflow file,
-              // or even just trying to create a dummy branch (which requires write access).
-              // For now, just reading content which `ORG_PAT` *should* be able to do.
-              // The Python script is failing on a repo.create_file() call.
-            } catch (error) {
-              core.setFailed(`ORG_PAT test failed for ${repoFullName}: ${error.message}`);
-              core.error(JSON.stringify(error)); // Log the full error object
-            }
-            
-      - name: Set up Python
-        uses: actions/setup-python@v5.0.0
-        with:
-          python-version: '3.10'
+def allowed_by_globs(name: str, includes: list[str], excludes: list[str]) -> bool:
+    if includes:
+        ok = any(fnmatch.fnmatch(name, pat) for pat in includes)
+        if not ok: return False
+    for pat in excludes:
+        if fnmatch.fnmatch(name, pat): return False
+    return True
 
-      - name: Install Python dependencies
-        run: pip install PyGithub==1.59.1
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--org", required=True)
+    ap.add_argument("--reusable-ref", required=True)
+    ap.add_argument("--allowlist-branch", required=True)
+    ap.add_argument("--allowlist-path", required=True)
+    ap.add_argument("--sign-phrase", required=True)
+    ap.add_argument("--secret-name", default="CLA_ASSISTANT_PAT")
+    ap.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS",""))
+    ap.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS",""))
+    args = ap.parse_args()
 
-      - name: Check license and manage CLA stub for ${{ matrix.repository_full_name }}
-        id: manage_stub_step
-        run: python .github/scripts/check_and_install_stub.py
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
+    if not token:
+        print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr)
+        sys.exit(2)
+
+    includes = globs_to_list(args.include_repos)
+    excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
+
+    repos = list_public_repos(args.org, token)
+    for r in repos:
+        name = r["name"]
+        if not allowed_by_globs(name, includes, excludes):
+            print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude")
+            continue
+        full = f"{args.org}/{name}"
+        try:
+            # Your decision source
+            decision = None
+            try:
+                decision = requires_cla.requires_CLA(full, token=token)
+            except Exception as e:
+                # Fail-safe: require CLA on error
+                decision = None
+
+            requires = True if decision is None else bool(decision)  # fail-safe to True
+            default_branch = get_default_branch(args.org, name, token)
+            existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
+
+            if requires:
+                status = ensure_stub(args.org, name, token, default_branch,
+                                     args.reusable_ref, args.allowlist_branch, args.allowlist_path,
+                                     args.sign_phrase, args.secret_name)
+                print(f"REPO={name} STATUS={status} DECISION={requires} MSG=CLA required")
+            else:
+                if existing and sha:
+                    delete_file(args.org, name, STUB_PATH, default_branch, token, sha,
+                                "chore(cla): remove trigger stub (CLA not required)")
+                    print(f"REPO={name} STATUS=stub_removed_not_required DECISION={requires} MSG=Removed stub")
+                else:
+                    print(f"REPO={name} STATUS=skipped_not_required DECISION={requires} MSG=No stub (as expected)")
+        except Exception as e:
+            print(f"REPO={name} STATUS=error DECISION=None MSG={e}", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
+PY
+
+      - name: Ensure Python available
+        run: python3 -V
+
+      - name: Run manager (requires_cla)
+        id: runmgr
         env:
-          TARGET_REPO_FULL_NAME: ${{ matrix.repository_full_name }}
-          ORG_PAT: ${{ secrets.ORG_PAT }}
-          PERMISSIVE_SPDX_IDS: ${{ env.PERMISSIVE_SPDX_IDS_CSV }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          # Pass the locally built image tag to the Python script.
-          LICENSEE_DOCKER_IMAGE: ${{ env.LOCAL_LICENSEE_IMAGE_TAG }}
-          
-      - name: Record action for ${{ matrix.repository_full_name }} to Job Summary
-        if: always() # Run even if previous steps fail, to capture status.
+          GITHUB_TOKEN: ${{ env.ORG_PAT }}
         run: |
-          echo "Debug: manage_stub_step stdout was: [${{ steps.manage_stub_step.outputs.stdout }}]"
-          echo "Debug: manage_stub_step outcome was: [${{ steps.manage_stub_step.outcome }}]"
+          set -o pipefail
+          python3 .github-admin/run/check_and_install_stub.py \
+            --org "${ORG}" \
+            --reusable-ref "${REUSABLE_REF}" \
+            --allowlist-branch "${ALLOWLIST_BRANCH}" \
+            --allowlist-path "${ALLOWLIST_PATH}" \
+            --sign-phrase "${SIGN_PHRASE}" \
+            --secret-name "${SECRET_NAME}" \
+            --include-repos "${INCLUDE_REPOS}" \
+            --exclude-repos "${EXCLUDE_REPOS}" \
+          2>&1 | tee manager-results.log
 
-          # Attempt to parse the status from stdout if available
-          # Initialize FINAL_STATUS to reflect the outcome if stdout parsing fails
-          FINAL_STATUS="status_unknown_due_to_step_failure"
-          if [[ "${{ steps.manage_stub_step.outcome }}" == "success" ]]; then
-            FINAL_STATUS="success_script_did_not_error" # Default if successful but no specific status
-          fi
-
-          # Try to get the more specific status if stdout is available
-          # Use a temporary variable to avoid issues if grep finds nothing
-          PYTHON_STDOUT_CAPTURE="${{ steps.manage_stub_step.outputs.stdout }}"
-          STATUS_LINE=$(echo "${PYTHON_STDOUT_CAPTURE}" | grep REPO_PROCESSED_STATUS= || true) # Prevent grep from failing the line if no match
-
-          if [[ -n "${STATUS_LINE}" ]]; then # If STATUS_LINE is not empty
-            PARSED_STATUS=${STATUS_LINE#*=}
-            if [[ -n "${PARSED_STATUS}" ]]; then # If PARSED_STATUS is not empty after extraction
-              FINAL_STATUS="${PARSED_STATUS}"
-            fi
-          elif [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
-             FINAL_STATUS="script_failed_see_logs" # If script failed and we couldn't parse specific status
-          fi
-
-          ICON="ℹ️ Unknown" # Default icon
-          if [[ "${{ steps.manage_stub_step.outcome }}" == "failure" ]]; then
-            ICON="❌ Error"
-          elif [[ "${{ steps.manage_stub_step.outcome }}" == "success" ]]; then
-            # If successful, refine icon based on parsed status
-            if [[ "${FINAL_STATUS}" == "skipped_"* ]]; then ICON="⚪ Skipped";
-            elif [[ "${FINAL_STATUS}" == *"updated"* || "${FINAL_STATUS}" == *"created"* || "${FINAL_STATUS}" == *"removed"* ]]; then ICON="📝 Action";
-            elif [[ "${FINAL_STATUS}" == "success_script_did_not_error" || "${FINAL_STATUS}" == "skipped_stub_up_to_date" || "${FINAL_STATUS}" == "skipped_permissive_no_stub" ]]; then ICON="✅ Success/NoOp";
-            else ICON="✅ Success (Status: ${FINAL_STATUS})"; fi # Catch other success statuses
-          fi
-          
-          echo "#### ${{ matrix.repository_full_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Parsed Status: ${FINAL_STATUS}" >> $GITHUB_STEP_SUMMARY # Use the determined FINAL_STATUS
-          echo "- Step Outcome: ${ICON} (${{ steps.manage_stub_step.outcome }})" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-
-  summarize_run:
-    name: Final Run Summary
-    if: always()
-    needs: [discover_repositories, process_repositories] # Removed build_licensee_image from needs here
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create final summary of the run
+      - name: Summarize reconciliation in job summary
         run: |
-          echo "### CLA Stub Management Full Run Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Total Repositories Discovered for Processing: **${{ needs.discover_repositories.outputs.repository_count || 0 }}**" >> $GITHUB_STEP_SUMMARY
-          # No separate build job status to report now, as it's part of each matrix job.
-          # You could infer overall build success if all matrix jobs succeeded, but that's indirect.
-          
-          RESULT_MSG="ℹ️ **Overall Repository Processing Result:** Status - ${{ needs.process_repositories.result }}."
-          if [[ "${{ needs.process_repositories.result }}" == "failure" ]]; then
-            RESULT_MSG="⚠️ **Overall Repository Processing Result:** At least one repository failed processing. This could be due to image build, license check, or API errors."
-          elif [[ "${{ needs.process_repositories.result }}" == "success" ]]; then
-            RESULT_MSG="✅ **Overall Repository Processing Result:** All processed repositories completed without error."
-          elif [[ "${{ needs.process_repositories.result }}" == "skipped" ]]; then
-            RESULT_MSG="⚪ **Overall Repository Processing Result:** Processing job was skipped."
-          fi
-          echo "$RESULT_MSG Check individual 'Process Repository' job logs and their summaries for details." >> $GITHUB_STEP_SUMMARY
+          python3 - <<'PY'
+          import os, re
+          from collections import Counter
+          rows = []
+          with open('manager-results.log','r',encoding='utf-8',errors='ignore') as f:
+              for line in f:
+                  m = re.search(r'REPO=([^ ]+)\s+STATUS=([^ ]+)\s+DECISION=([^ ]+)\s+MSG=(.*)', line.strip())
+                  if m: rows.append(m.groups())
+          counts = Counter(r[1] for r in rows)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write("## CLA Stub Reconciliation — Summary (requires_cla)\n\n")
+              if counts:
+                  out.write("**Counts by status:** " + ", ".join(f"`{k}`={v}" for k,v in counts.items()) + "\n\n")
+              else:
+                  out.write("_No reconciliation rows parsed; check raw log below._\n\n")
+              out.write("| Repo | Status | RequiresCLA | Message |\n")
+              out.write("|---|---|---|---|\n")
+              for repo, status, decision, msg in rows:
+                  out.write(f"| `{repo}` | `{status}` | `{decision}` | {msg} |\n")
+          PY
+
+      - name: Upload raw results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manager-results
+          path: manager-results.log
+          if-no-files-found: warn
