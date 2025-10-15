@@ -27,11 +27,11 @@ on:
         required: false
         default: "CLA_ASSISTANT_PAT"
       include_repos:
-        description: "Comma-separated glob(s) to include (overrides default). Leave blank to include all public except excludes."
+        description: "Comma-separated glob(s) to include (optional)"
         required: false
         default: ""
       exclude_repos:
-        description: "Comma-separated glob(s) to exclude (in addition to defaults)."
+        description: "Comma-separated glob(s) to exclude (optional)"
         required: false
         default: ""
 
@@ -55,9 +55,7 @@ jobs:
       ALLOWLIST_PATH: ${{ inputs.allowlist_path }}
       SIGN_PHRASE: ${{ inputs.sign_phrase }}
       SECRET_NAME: ${{ inputs.secret_name }}
-      # Public only per your decision (do not add a toggle)
-      ORG_PAT: ${{ secrets.ORG_PAT }}
-      # Allow override via env vars for one-offs:
+      ORG_PAT: ${{ secrets.ORG_PAT }}          # PAT with the required scopes
       INCLUDE_REPOS: ${{ inputs.include_repos || env.INCLUDE_REPOS }}
       EXCLUDE_REPOS: ${{ inputs.exclude_repos || env.EXCLUDE_REPOS }}
     steps:
@@ -71,7 +69,7 @@ jobs:
           echo "Include globs: ${INCLUDE_REPOS}"
           echo "Exclude globs: ${EXCLUDE_REPOS}"
 
-      - name: Checkout .github (stage manager & your helper modules)
+      - name: Checkout .github (stage manager & helper modules)
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/.github
@@ -79,10 +77,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Ensure helper modules live at .github/scripts
+      - name: Ensure helper modules exist
         run: |
-          test -f .github-admin/scripts/requires_cla.py || echo "WARNING: requires_cla.py not found in .github-admin/scripts"
           ls -la .github-admin/scripts || true
+          test -f .github-admin/scripts/requires_cla.py || echo "WARNING: requires_cla.py not found in .github-admin/scripts"
 
       - name: Write manager script (refactored)
         shell: bash
@@ -90,15 +88,28 @@ jobs:
           mkdir -p .github-admin/run
           cat > .github-admin/run/check_and_install_stub.py <<'PY'
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Manager (requires_cla edition) — public repos only
+
 - Lists org repos (public, non-archived/non-disabled)
 - Applies include/exclude globs (from inputs or env)
 - Calls requires_cla.requires_CLA("<org>/<repo>", token)
 - Ensures trigger stub present when True/None (fail-safe), absent when False
 - Emits: REPO=<name> STATUS=<...> DECISION=<True|False|None> MSG=<text>
 """
-import os, sys, json, base64, re, fnmatch, urllib.request
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fnmatch
+import json
+import os
+import re
+import sys
+import urllib.request
+from typing import Dict, List, Optional, Tuple
 
 TARGET_STUB_VERSION = "7"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
@@ -106,7 +117,7 @@ STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 # Default excludes you asked for (special GitHub repos):
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
 
-# Module import path
+# Module import path candidates
 CANDIDATE_MODULE_DIRS = [
     os.path.join(os.getcwd(), ".github-admin", "scripts"),
     os.path.join(os.getcwd(), ".github", "scripts"),
@@ -117,12 +128,12 @@ for p in CANDIDATE_MODULE_DIRS:
         sys.path.insert(0, p)
 
 try:
-    import requires_cla  # your logic, imports its siblings as needed
+    import requires_cla  # your decision module
 except Exception as e:
     print(f"ERROR: Could not import requires_cla.py: {e}", file=sys.stderr)
     sys.exit(2)
 
-def gh_api(url: str, token: str, method="GET", body: bytes|None=None, accept="application/vnd.github+json"):
+def gh_api(url: str, token: str, method: str = "GET", body: bytes | None = None, accept: str = "application/vnd.github+json") -> Dict:
     req = urllib.request.Request(url, method=method)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", accept)
@@ -133,12 +144,13 @@ def gh_api(url: str, token: str, method="GET", body: bytes|None=None, accept="ap
         data = r.read()
         return json.loads(data.decode()) if data else {}
 
-def list_public_repos(org: str, token: str) -> list[dict]:
+def list_public_repos(org: str, token: str) -> List[Dict]:
     results, page = [], 1
     while True:
         url = f"https://api.github.com/orgs/{org}/repos?per_page=100&page={page}&type=public&sort=full_name&direction=asc"
         data = gh_api(url, token)
-        if not data: break
+        if not isinstance(data, list) or not data:
+            break
         results.extend(data); page += 1
     return [r for r in results if not (r.get("archived") or r.get("disabled")) and r.get("private") is False]
 
@@ -146,7 +158,7 @@ def get_default_branch(owner: str, repo: str, token: str) -> str:
     data = gh_api(f"https://api.github.com/repos/{owner}/{repo}", token)
     return data.get("default_branch", "main")
 
-def get_file(owner: str, repo: str, path: str, ref: str, token: str):
+def get_file(owner: str, repo: str, path: str, ref: str, token: str) -> Tuple[Optional[str], Optional[str]]:
     try:
         data = gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}", token)
         if isinstance(data, dict) and data.get("content"):
@@ -156,12 +168,12 @@ def get_file(owner: str, repo: str, path: str, ref: str, token: str):
         pass
     return None, None
 
-def put_file(owner: str, repo: str, path: str, ref: str, token: str, content: str, sha: str|None, message: str):
+def put_file(owner: str, repo: str, path: str, ref: str, token: str, content: str, sha: str | None, message: str) -> Dict:
     body = {"message": message, "content": base64.b64encode(content.encode()).decode(), "branch": ref}
     if sha: body["sha"] = sha
     return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="PUT", body=json.dumps(body).encode())
 
-def delete_file(owner: str, repo: str, path: str, ref: str, token: str, sha: str, message: str):
+def delete_file(owner: str, repo: str, path: str, ref: str, token: str, sha: str, message: str) -> Dict:
     body = {"message": message, "sha": sha, "branch": ref}
     return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="DELETE", body=json.dumps(body).encode())
 
@@ -247,19 +259,19 @@ def ensure_stub(owner: str, repo: str, token: str, default_branch: str,
         put_file(owner, repo, STUB_PATH, default_branch, token, desired, None, f"chore(cla): add trigger stub v{TARGET_STUB_VERSION}")
         return "stub_created_or_updated"
 
-def globs_to_list(val: str|None) -> list[str]:
+def globs_to_list(val: str | None) -> List[str]:
     return [g.strip() for g in (val or "").split(",") if g.strip()]
 
-def allowed_by_globs(name: str, includes: list[str], excludes: list[str]) -> bool:
+def allowed_by_globs(name: str, includes: List[str], excludes: List[str]) -> bool:
     if includes:
-        ok = any(fnmatch.fnmatch(name, pat) for pat in includes)
-        if not ok: return False
+        if not any(fnmatch.fnmatch(name, pat) for pat in includes):
+            return False
     for pat in excludes:
-        if fnmatch.fnmatch(name, pat): return False
+        if fnmatch.fnmatch(name, pat):
+            return False
     return True
 
-def main():
-    import argparse
+def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--org", required=True)
     ap.add_argument("--reusable-ref", required=True)
@@ -269,33 +281,40 @@ def main():
     ap.add_argument("--secret-name", default="CLA_ASSISTANT_PAT")
     ap.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS",""))
     ap.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS",""))
-    args = ap.parse_args()
+    return ap.parse_args()
 
+def main() -> None:
+    args = parse_args()
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
     if not token:
-        print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr)
-        sys.exit(2)
+        print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr); sys.exit(2)
 
     includes = globs_to_list(args.include_repos)
     excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
 
+    # List public repos
     repos = list_public_repos(args.org, token)
+
     for r in repos:
-        name = r["name"]
+        name = r.get("name") or ""
+        if not name:
+            print("REPO=? STATUS=error DECISION=None MSG=missing repo name", file=sys.stderr)
+            continue
+
         if not allowed_by_globs(name, includes, excludes):
             print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude")
             continue
+
         full = f"{args.org}/{name}"
         try:
-            # Your decision source
-            decision = None
+            decision: Optional[bool] = None
             try:
                 decision = requires_cla.requires_CLA(full, token=token)
-            except Exception as e:
-                # Fail-safe: require CLA on error
-                decision = None
+            except Exception:
+                decision = None  # fail-safe path
 
-            requires = True if decision is None else bool(decision)  # fail-safe to True
+            requires = True if decision is None else bool(decision)
+
             default_branch = get_default_branch(args.org, name, token)
             existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
 
