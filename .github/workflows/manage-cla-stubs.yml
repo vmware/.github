@@ -57,7 +57,7 @@ jobs:
       SECRET_NAME: ${{ inputs.secret_name }}
       ORG_PAT: ${{ secrets.ORG_PAT }}
 
-      # Use repo/org Variables (Settings → Variables) as fallbacks if inputs are blank
+      # Fallbacks to repo/org Variables (Settings → Variables) if inputs are blank
       INCLUDE_REPOS: ${{ inputs.include_repos != '' && inputs.include_repos || (vars.INCLUDE_REPOS || '') }}
       EXCLUDE_REPOS: ${{ inputs.exclude_repos != '' && inputs.exclude_repos || (vars.EXCLUDE_REPOS || '') }}
 
@@ -95,6 +95,7 @@ jobs:
             const dir = path.join(process.cwd(), '.github-admin', 'run');
             fs.mkdirSync(dir, { recursive: true });
             const file = path.join(dir, 'check_and_install_stub.py');
+
             const py = String.raw`#!/usr/bin/env python3
             # -*- coding: utf-8 -*-
             """
@@ -121,11 +122,8 @@ jobs:
 
             TARGET_STUB_VERSION = "7"
             STUB_PATH = ".github/workflows/cla-check-trigger.yml"
-
-            # Default excludes (special GitHub repos, admin/security):
             DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
 
-            # Module import path candidates
             CANDIDATE_MODULE_DIRS = [
                 os.path.join(os.getcwd(), ".github-admin", "scripts"),
                 os.path.join(os.getcwd(), ".github", "scripts"),
@@ -203,7 +201,7 @@ jobs:
               actions: read
 
             concurrency:
-              group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.run_id }}}}
+              group: $${{{{ github.workflow }}}}-$${{{{ github.event.pull_request.number || github.run_id }}}}
               cancel-in-progress: true
 
             jobs:
@@ -219,7 +217,7 @@ jobs:
                     id: member
                     uses: actions/github-script@v7
                     with:
-                      github-token: ${{{{ secrets.{secret_name} }}}}
+                      github-token: $${{{{ secrets.{secret_name} }}}}
                       script: |
                         let isMember = false;
                         try {{
@@ -229,14 +227,14 @@ jobs:
                         core.setOutput('is_member', isMember ? 'true' : 'false');
 
                   - name: Skip if org member
-                    if: ${{{{ steps.member.outputs.is_member == 'true' }}}}
+                    if: $${{{{ steps.member.outputs.is_member == 'true' }}}}
                     run: echo "Org member — skipping CLA."
 
                   - name: Call reusable CLA checker
-                    if: ${{{{ steps.member.outputs.is_member != 'true' }}}}
-                    uses: ${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+                    if: $${{{{ steps.member.outputs.is_member != 'true' }}}}
+                    uses: $${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
                     secrets:
-                      CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.{secret_name} }}}}
+                      CONTRIBUTOR_ASSISTANT_PAT: $${{{{ secrets.{secret_name} }}}}
                     with:
                       allowlist_branch: "{allowlist_branch}"
                       allowlist_path: "{allowlist_path}"
@@ -343,6 +341,7 @@ jobs:
             if __name__ == "__main__":
                 main()
             `;
+
             fs.writeFileSync(file, py);
             fs.chmodSync(file, 0o755);
 
