@@ -36,7 +36,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 concurrency:
@@ -220,10 +220,12 @@ jobs:
                       github-token: $${{{{ secrets.{secret_name} }}}}
                       script: |
                         let isMember = false;
-                        try {{
-                          await github.rest.orgs.checkMembershipForUser({{ org: context.repo.owner, username: context.payload.sender.login }});
+                        try {
+                          await github.rest.orgs.checkMembershipForUser(
+                            { org: context.repo.owner, username: context.payload.sender.login }
+                          );
                           isMember = true;
-                        }} catch {{}}
+                        } catch {}
                         core.setOutput('is_member', isMember ? 'true' : 'false');
 
                   - name: Skip if org member
