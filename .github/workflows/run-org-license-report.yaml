@@ -65,7 +65,7 @@ jobs:
           CACHE_DIR: .github/tools/.cache
         run: |
           python scripts/detect_org_repo_licenses.py \
-            --org "${{ inputs.org:-'vmware' }}" \
+            --org "${{ inputs.org:-vmware }}" \
             --max-concurrency "${{ inputs.max_concurrency:-16 }}" \
             --timeout-s "${{ inputs.request_timeout_s:-20 }}" \
             --output-json "license_report.json" \
