@@ -442,7 +442,7 @@ def main() -> None:
 
     log_debug(f"Python {sys.version.split()[0]} running cla_manager.py")
     log_debug(f"Inputs: org={args.org}, reusable_ref={args.reusable_ref}, allowlist={args.allowlist_branch}:{args.allowlist_path}")
-    log_debug(f"Sign phrase='{args.sign_phrase}', secret_name='{args.secret_name}'")
+    log_debug("Inputs received (sign phrase and secret name hidden)")
 
     includes = globs_to_list(args.include_repos)
     excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
