@@ -10,7 +10,6 @@ on:
       signature_file_path:
         description: "Path to signatures file in .github"
         type: string
-        # You said signatures live at <org>/.github/signatures — this keeps the default under that dir.
         default: signatures/CLA.json
       signature_branch:
         description: "Branch in .github where signatures are stored"
@@ -54,6 +53,7 @@ jobs:
       GH_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
 
     steps:
+      # Preflight clarifies whether the PAT can access org .github and the allowlist branch/path.
       - name: Preflight: verify token can reach .github and branch exists
         shell: bash
         env:
@@ -62,9 +62,7 @@ jobs:
           PAT: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
         run: |
           set -euo pipefail
-
           api() { curl -sS -w "\n%{http_code}" -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" "$1"; }
-
           echo "Checking repo visibility and token access to ${ORG}/.github"
           read -r body code < <(api "https://api.github.com/repos/${ORG}/.github")
           echo "GET /repos/${ORG}/.github -> HTTP ${code}"
@@ -75,7 +73,6 @@ jobs:
             echo "::error::Repo '${ORG}/.github' not found (private? wrong org? different name?)."
             exit 2
           fi
-
           echo "Checking branch '${BRANCH}'"
           read -r b2 c2 < <(api "https://api.github.com/repos/${ORG}/.github/git/refs/heads/${BRANCH}")
           echo "GET /git/refs/heads/${BRANCH} -> HTTP ${c2}"
@@ -85,7 +82,6 @@ jobs:
             api "https://api.github.com/repos/${ORG}/.github/branches?per_page=100" | sed -n '1,200p'
             exit 3
           fi
-
           echo "Checking allowlist file path '${{ inputs.allowlist_path }}'"
           read -r b3 c3 < <(api "https://api.github.com/repos/${ORG}/.github/contents/${{ inputs.allowlist_path }}?ref=${BRANCH}")
           echo "GET /contents/${{ inputs.allowlist_path }}?ref=${BRANCH} -> HTTP ${c3}"
@@ -93,20 +89,15 @@ jobs:
             echo "::error::Allowlist not found at that path/branch."
             exit 4
           fi
-
           echo "Preflight OK."
 
-      # Ensure we can read the allowlist from org .github repo
+      # Trusted checkout — ONLY the org's .github repo to read allowlist
       - name: Checkout .github (allowlist)
         uses: actions/checkout@v4
         with:
-          # Use the org that owns the current repo
           repository: ${{ github.repository_owner }}/.github
-          # The branch where your allowlist lives (input default: cla-config)
           ref: ${{ inputs.allowlist_branch }}
-          # IMPORTANT: use the forwarded PAT, not the default GITHUB_TOKEN
           token: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
-          # Put it in a separate folder to avoid mixing with the current repo
           path: .github-central
           fetch-depth: 1
           persist-credentials: false
@@ -205,7 +196,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           github-token: ${{ env.GH_TOKEN }}
-        # (comment omitted for brevity; keeping logs clean)
           script: |
             core.info(`✅ CLA not required (allowlisted: ${{ steps.allow.outputs.reason }})`);
 
