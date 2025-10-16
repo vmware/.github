@@ -62,9 +62,17 @@ def _req(url: str, token: str, method: str = "GET",
         req.add_header("Content-Type", "application/json")
         req.data = body
     log_debug(f"HTTP {method} {url}")
-    with urllib.request.urlopen(req) as r:
-        raw = r.read()
-        return json.loads(raw.decode()) if raw else {}
+    try:
+        with urllib.request.urlopen(req) as r:
+            raw = r.read()
+            return json.loads(raw.decode()) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode()
+        except Exception:
+            err = ""
+        log_debug(f"HTTP ERROR {e.code} {method} {url} body={err or '<no body>'}")
+        raise
 
 def gh_api(path: str, token: str, **kw) -> Dict:
     url = path if path.startswith("http") else "https://api.github.com" + path
@@ -173,6 +181,26 @@ def comment_on_pr(owner: str, repo: str, pr_number: int, token: str, body: str) 
     gh_api(f"/repos/{owner}/{repo}/issues/{pr_number}/comments", token,
            method="POST", body=json.dumps({"body": body}).encode())
 
+def find_any_pr(owner: str, repo: str, head_branch: str, base_branch: str, token: str) -> Optional[Dict]:
+    head = f"{owner}:{head_branch}"
+    pulls = gh_api(
+        f"/repos/{owner}/{repo}/pulls?state=all&head={urllib.parse.quote(head)}&base={urllib.parse.quote(base_branch)}&per_page=100",
+        token
+    )
+    if isinstance(pulls, list) and pulls:
+        # Prefer the most recent
+        return sorted(pulls, key=lambda p: p.get("number", 0), reverse=True)[0]
+    return None
+
+def reopen_pr(owner: str, repo: str, number: int, title: str, body: str, token: str) -> Dict:
+    log_debug(f"Reopening PR #{number} in {owner}/{repo}")
+    return gh_api(
+        f"/repos/{owner}/{repo}/pulls/{number}",
+        token,
+        method="PATCH",
+        body=json.dumps({"state": "open", "title": title, "body": body}).encode()
+    )
+
 def open_or_update_pr(owner: str, repo: str, head_branch: str, base_branch: str,
                       title: str, body: str, token: str) -> Dict:
     log_debug(f"Opening or updating PR head={head_branch} base={base_branch} in {owner}/{repo}")
@@ -183,15 +211,25 @@ def open_or_update_pr(owner: str, repo: str, head_branch: str, base_branch: str,
                method="PATCH", body=json.dumps({"title": title, "body": body}).encode())
         return pr
     payload = {"title": title, "head": head_branch, "base": base_branch, "body": body}
-    pr = gh_api(f"/repos/{owner}/{repo}/pulls", token, method="POST", body=json.dumps(payload).encode())
-    comment_on_pr(
-        owner, repo, pr["number"], token,
-        "🤖 **Org management automation:** This pull request was opened automatically to ensure "
-        "that the required CLA trigger stub exists and is up to date. "
-        "Merging this PR keeps the repository in compliance with the org-wide CLA policy."
-    )
-    log_debug(f"Posted automation comment on PR #{pr['number']} in {owner}/{repo}")
-    return pr
+    try:
+        pr = gh_api(f"/repos/{owner}/{repo}/pulls", token, method="POST", body=json.dumps(payload).encode())
+        comment_on_pr(
+            owner, repo, pr["number"], token,
+            "🤖 **Org management automation:** This pull request was opened automatically to ensure "
+            "that the required CLA trigger stub exists and is up to date. "
+            "Merging this PR keeps the repository in compliance with the org-wide CLA policy."
+        )
+        log_debug(f"Posted automation comment on PR #{pr['number']} in {owner}/{repo}")
+        return pr
+    except urllib.error.HTTPError as e:
+        # Fallback: try to reopen an existing closed PR with same head/base
+        any_pr = find_any_pr(owner, repo, head_branch, base_branch, token)
+        if any_pr and any_pr.get("state") == "closed":
+            pr = reopen_pr(owner, repo, any_pr["number"], title, body, token)
+            return pr
+        # Surface a clearer error in the logs; caller will mark STATUS=error
+        raise
+
 
 # ----------------------------- Stub template ----------------------------------
 def stub_template(reusable_ref: str, allowlist_branch: str,
