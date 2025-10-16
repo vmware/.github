@@ -79,7 +79,7 @@ jobs:
           ORG_PAT: ${{ secrets.ORG_PAT }}   # FG-PAT with Contents:RW + Pull Requests:RW (Issues:RW if you want PR comments)
         run: |
           set -euo pipefail
-          python .github/scripts/cla_manager.py \
+          python scripts/cla_manager.py \
             --org "${ORG}" \
             --reusable-ref "${REUSABLE_REF}" \
             --allowlist-branch "${ALLOWLIST_BRANCH}" \
