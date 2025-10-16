@@ -197,8 +197,9 @@ def open_or_update_pr(owner: str, repo: str, head_branch: str, base_branch: str,
 def stub_template(reusable_ref: str, allowlist_branch: str,
                   allowlist_path: str, sign_phrase: str,
                   secret_name: str) -> str:
-    # Use str.format (not f-strings) to avoid conflicts with ${{ }}.
-    return """# Auto-managed; DO NOT EDIT MANUALLY
+    # NOTE: we purposely keep ALL GitHub expression delimiters as sentinel tokens
+    # during .format(), then swap them at the end. This avoids any brace parsing.
+    tmpl = """# Auto-managed; DO NOT EDIT MANUALLY
 # Stub Version: {version}
 name: CLA — Trigger Stub
 
@@ -216,7 +217,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{{{ github.workflow }}}}-${{{{{ github.event.pull_request.number || github.run_id }}}}}
+  group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.run_id __GHA_CLOSE__
   cancel-in-progress: true
 
 jobs:
@@ -243,19 +244,21 @@ jobs:
             core.setOutput('is_member', isMember ? 'true' : 'false');
 
       - name: Skip if org member
-        if: ${{{{ steps.member.outputs.is_member == 'true' }}}}
+        if: __GHA_OPEN__ steps.member.outputs.is_member == 'true' __GHA_CLOSE__
         run: echo "Org member — skipping CLA."
 
       - name: Call reusable CLA checker
-        if: ${{{{ steps.member.outputs.is_member != 'true' }}}}
-        uses: ${{{{ github.repository_owner }}}}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+        if: __GHA_OPEN__ steps.member.outputs.is_member != 'true' __GHA_CLOSE__
+        uses: __GHA_OPEN__ github.repository_owner __GHA_CLOSE__/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
         with:
           allowlist_branch: "{allowlist_branch}"
           allowlist_path: "{allowlist_path}"
           sign_comment_exact: "{sign_phrase}"
         secrets:
-          CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.{secret_name} }}}}
-""".format(
+          CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.{secret_name} __GHA_CLOSE__
+"""
+    # 1) Do the safe .format() substitutions for our *own* variables only
+    out = tmpl.format(
         version=TARGET_STUB_VERSION,
         reusable_ref=reusable_ref,
         allowlist_branch=allowlist_branch,
@@ -263,6 +266,9 @@ jobs:
         sign_phrase=sign_phrase.replace('"', '\\"'),
         secret_name=secret_name,
     )
+    # 2) Now swap placeholders to real GitHub expression delimiters
+    out = out.replace("__GHA_OPEN__", "${{").replace("__GHA_CLOSE__", "}}")
+    return out
 
 # ----------------------------- PR-everywhere ops ------------------------------
 def compose_pr_body(action: str, reason: str) -> str:
@@ -282,7 +288,12 @@ def ensure_stub_via_pr(owner: str, repo: str, token: str, base_branch: str,
                        sign_phrase: str, secret_name: str) -> str:
     log_debug(f"Ensuring stub via PR for {owner}/{repo}")
     ensure_branch(owner, repo, base_branch, WORK_BRANCH, token)
-    desired = stub_template(reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name)
+    try:
+        desired = stub_template(reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name)
+    except Exception as e:
+        log_debug(f"stub_template formatting error for {owner}/{repo}: {e}")
+        raise                           
+#    desired = stub_template(reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name)
     existing_on_work, sha_work = get_file(owner, repo, STUB_PATH, WORK_BRANCH, token)
     put_file(owner, repo, STUB_PATH, WORK_BRANCH, token, desired, sha_work, "chore(cla): ensure trigger stub")
     title = "chore(cla): add/ensure required CLA trigger stub"
