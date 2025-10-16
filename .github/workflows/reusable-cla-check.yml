@@ -54,7 +54,7 @@ jobs:
 
     steps:
       # Preflight clarifies whether the PAT can access org .github and the allowlist branch/path.
-      - name: Preflight: verify token can reach .github and branch exists
+      - name: "Preflight: verify token can reach .github and branch exists"
         shell: bash
         env:
           ORG: ${{ github.repository_owner }}
@@ -62,33 +62,49 @@ jobs:
           PAT: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
         run: |
           set -euo pipefail
-          api() { curl -sS -w "\n%{http_code}" -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" "$1"; }
+          api() { curl -sS -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" "$1"; }
+          api_code() { curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" "$1"; }
+          api_body_code() { 
+            local url="$1"
+            local out="$(mktemp)"
+            local code
+            code="$(curl -sS -o "$out" -w "%{http_code}" -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" "$url")"
+            printf "%s\n" "$out"
+            printf "%s\n" "$code"
+          }
+
           echo "Checking repo visibility and token access to ${ORG}/.github"
-          read -r body code < <(api "https://api.github.com/repos/${ORG}/.github")
-          echo "GET /repos/${ORG}/.github -> HTTP ${code}"
-          if [ "${code}" = "403" ] || grep -qi 'resource not accessible' <<<"$body"; then
+          out_and_code=($(api_body_code "https://api.github.com/repos/${ORG}/.github"))
+          OUT_FILE="${out_and_code[0]}"
+          CODE="${out_and_code[1]}"
+          echo "GET /repos/${ORG}/.github -> HTTP ${CODE}"
+          if [ "${CODE}" = "403" ]; then
             echo "::error::403 from /repos: token lacks access or SSO not authorized for org '${ORG}'."
+            cat "${OUT_FILE}" || true
             exit 2
-          elif [ "${code}" = "404" ]; then
+          elif [ "${CODE}" = "404" ]; then
             echo "::error::Repo '${ORG}/.github' not found (private? wrong org? different name?)."
             exit 2
           fi
+
           echo "Checking branch '${BRANCH}'"
-          read -r b2 c2 < <(api "https://api.github.com/repos/${ORG}/.github/git/refs/heads/${BRANCH}")
-          echo "GET /git/refs/heads/${BRANCH} -> HTTP ${c2}"
-          if [ "${c2}" = "404" ]; then
+          CODE="$(api_code "https://api.github.com/repos/${ORG}/.github/git/refs/heads/${BRANCH}")"
+          echo "GET /git/refs/heads/${BRANCH} -> HTTP ${CODE}"
+          if [ "${CODE}" = "404" ]; then
             echo "::error::Branch '${BRANCH}' does not exist in ${ORG}/.github. Create it or change inputs.allowlist_branch."
-            echo "Listing branches (first 100):"
-            api "https://api.github.com/repos/${ORG}/.github/branches?per_page=100" | sed -n '1,200p'
+            curl -sS -H "Authorization: Bearer ${PAT}" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${ORG}/.github/branches?per_page=100" | sed -n '1,200p' || true
             exit 3
           fi
+
           echo "Checking allowlist file path '${{ inputs.allowlist_path }}'"
-          read -r b3 c3 < <(api "https://api.github.com/repos/${ORG}/.github/contents/${{ inputs.allowlist_path }}?ref=${BRANCH}")
-          echo "GET /contents/${{ inputs.allowlist_path }}?ref=${BRANCH} -> HTTP ${c3}"
-          if [ "${c3}" = "404" ]; then
+          CODE="$(api_code "https://api.github.com/repos/${ORG}/.github/contents/${{ inputs.allowlist_path }}?ref=${BRANCH}")"
+          echo "GET /contents/${{ inputs.allowlist_path }}?ref=${BRANCH} -> HTTP ${CODE}"
+          if [ "${CODE}" = "404" ]; then
             echo "::error::Allowlist not found at that path/branch."
             exit 4
           fi
+
           echo "Preflight OK."
 
       # Trusted checkout — ONLY the org's .github repo to read allowlist
