@@ -4,34 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       org:
-        description: "Organization login (defaults to caller's org)"
+        description: Organization login (defaults to caller's org)
         required: false
       reusable_ref:
-        description: "Ref for reusable CLA workflow (e.g., main)"
+        description: Ref for reusable CLA workflow (e.g., main)
         required: false
-        default: "main"
+        default: main
       allowlist_branch:
-        description: "Branch in .github with allowlist"
+        description: Branch in .github with allowlist
         required: false
-        default: "cla-config"
+        default: cla-config
       allowlist_path:
-        description: "Path to YAML allowlist"
+        description: Path to YAML allowlist in .github
         required: false
-        default: "cla/allowlist.yml"
+        default: cla/allowlist.yml
       sign_phrase:
-        description: "Exact phrase for signing via comment"
+        description: Exact phrase for signing via comment
         required: false
-        default: "I have read the CLA Document and I hereby sign the CLA"
+        default: I have read the CLA Document and I hereby sign the CLA
       secret_name:
-        description: "Repo secret name forwarded to reusable workflow"
+        description: Secret forwarded to reusable workflow
         required: false
-        default: "CLA_ASSISTANT_PAT"
+        default: CLA_ASSISTANT_PAT
       include_repos:
-        description: "Comma-separated glob(s) to include (optional)"
+        description: Comma-separated glob(s) to include (optional)
         required: false
         default: ""
       exclude_repos:
-        description: "Comma-separated glob(s) to exclude (optional)"
+        description: Comma-separated glob(s) to exclude (optional)
         required: false
         default: ""
 
@@ -40,12 +40,12 @@ permissions:
   actions: read
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.run_id }}"
+  group: ${{ github.workflow }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   manage:
-    name: Discover & reconcile stubs via requires_cla.py
+    name: Discover & reconcile stubs via cla_manager.py
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -55,310 +55,31 @@ jobs:
       ALLOWLIST_PATH: ${{ inputs.allowlist_path }}
       SIGN_PHRASE: ${{ inputs.sign_phrase }}
       SECRET_NAME: ${{ inputs.secret_name }}
-      ORG_PAT: ${{ secrets.ORG_PAT }}
-
-      # Fallbacks to repo/org Variables (Settings → Variables) if inputs are blank
-      INCLUDE_REPOS: ${{ inputs.include_repos != '' && inputs.include_repos || (vars.INCLUDE_REPOS || '') }}
-      EXCLUDE_REPOS: ${{ inputs.exclude_repos != '' && inputs.exclude_repos || (vars.EXCLUDE_REPOS || '') }}
+      INCLUDE_REPOS: ${{ inputs.include_repos }}
+      EXCLUDE_REPOS: ${{ inputs.exclude_repos }}
 
     steps:
-      - name: Plan
-        run: |
-          echo "Org: ${ORG}"
-          echo "Reusable ref: ${REUSABLE_REF}"
-          echo "Allowlist: ${ALLOWLIST_BRANCH}:${ALLOWLIST_PATH}"
-          echo "Sign phrase: ${SIGN_PHRASE}"
-          echo "Secret name: ${SECRET_NAME}"
-          echo "Include globs: ${INCLUDE_REPOS}"
-          echo "Exclude globs: ${EXCLUDE_REPOS}"
-
-      - name: Checkout .github (stage manager & helper modules)
+      - name: Check out current repo (for scripts)
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/.github
-          path: .github-admin
-          persist-credentials: false
           fetch-depth: 1
 
-      - name: Ensure helper modules exist
-        run: |
-          ls -la .github-admin/scripts || true
-          test -f .github-admin/scripts/requires_cla.py || echo "WARNING: requires_cla.py not found in .github-admin/scripts"
-
-      # Write the manager Python script WITHOUT heredoc (use Node fs)
-      - name: Write manager script (refactored)
-        uses: actions/github-script@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            const dir = path.join(process.cwd(), '.github-admin', 'run');
-            fs.mkdirSync(dir, { recursive: true });
-            const file = path.join(dir, 'check_and_install_stub.py');
+          python-version: "3.11"
 
-            const py = String.raw`#!/usr/bin/env python3
-            # -*- coding: utf-8 -*-
-            """
-            Manager (requires_cla edition) — public repos only
-
-            - Lists org repos (public, non-archived/non-disabled)
-            - Applies include/exclude globs (from inputs or env)
-            - Calls requires_cla.requires_CLA("<org>/<repo>", token)
-            - Ensures trigger stub present when True/None (fail-safe), absent when False
-            - Emits: REPO=<name> STATUS=<...> DECISION=<True|False|None> MSG=<text>
-            """
-
-            from __future__ import annotations
-
-            import argparse
-            import base64
-            import fnmatch
-            import json
-            import os
-            import re
-            import sys
-            import urllib.request
-            from typing import Dict, List, Optional, Tuple
-
-            TARGET_STUB_VERSION = "7"
-            STUB_PATH = ".github/workflows/cla-check-trigger.yml"
-            DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
-
-            CANDIDATE_MODULE_DIRS = [
-                os.path.join(os.getcwd(), ".github-admin", "scripts"),
-                os.path.join(os.getcwd(), ".github", "scripts"),
-                os.getcwd(),
-            ]
-            for p in CANDIDATE_MODULE_DIRS:
-                if os.path.isdir(p) and p not in sys.path:
-                    sys.path.insert(0, p)
-
-            try:
-                import requires_cla  # decision module
-            except Exception as e:
-                print(f"ERROR: Could not import requires_cla.py: {e}", file=sys.stderr)
-                sys.exit(2)
-
-            def gh_api(url: str, token: str, method: str = "GET", body: bytes | None = None, accept: str = "application/vnd.github+json") -> Dict:
-                req = urllib.request.Request(url, method=method)
-                req.add_header("Authorization", f"Bearer {token}")
-                req.add_header("Accept", accept)
-                if body is not None:
-                    req.add_header("Content-Type", "application/json")
-                    req.data = body
-                with urllib.request.urlopen(req) as r:
-                    data = r.read()
-                    return json.loads(data.decode()) if data else {}
-
-            def list_public_repos(org: str, token: str) -> List[Dict]:
-                results, page = [], 1
-                while True:
-                    url = f"https://api.github.com/orgs/{org}/repos?per_page=100&page={page}&type=public&sort=full_name&direction=asc"
-                    data = gh_api(url, token)
-                    if not isinstance(data, list) or not data:
-                        break
-                    results.extend(data); page += 1
-                return [r for r in results if not (r.get("archived") or r.get("disabled")) and r.get("private") is False]
-
-            def get_default_branch(owner: str, repo: str, token: str) -> str:
-                data = gh_api(f"https://api.github.com/repos/{owner}/{repo}", token)
-                return data.get("default_branch", "main")
-
-            def get_file(owner: str, repo: str, path: str, ref: str, token: str) -> Tuple[Optional[str], Optional[str]]:
-                try:
-                    data = gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}", token)
-                    if isinstance(data, dict) and data.get("content"):
-                        content = base64.b64decode(data["content"]).decode()
-                        return content, data.get("sha")
-                except Exception:
-                    pass
-                return None, None
-
-            def put_file(owner: str, repo: str, path: str, ref: str, token: str, content: str, sha: str | None, message: str) -> Dict:
-                body = {"message": message, "content": base64.b64encode(content.encode()).decode(), "branch": ref}
-                if sha: body["sha"] = sha
-                return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="PUT", body=json.dumps(body).encode())
-
-            def delete_file(owner: str, repo: str, path: str, ref: str, token: str, sha: str, message: str) -> Dict:
-                body = {"message": message, "sha": sha, "branch": ref}
-                return gh_api(f"https://api.github.com/repos/{owner}/{repo}/contents/{path}", token, method="DELETE", body=json.dumps(body).encode())
-
-            # IMPORTANT: avoid any literal '{{' in this workflow. Use placeholders and replace at runtime.
-            STUB_TEMPLATE_SAFE = """# Auto-managed; DO NOT EDIT MANUALLY
-            # Stub Version: @@STUB_VERSION@@
-            name: CLA — Trigger Stub
-
-            on:
-              pull_request_target:
-                types: [opened, synchronize, reopened]
-              issue_comment:
-                types: [created]
-
-            permissions:
-              contents: read
-              pull-requests: write
-              issues: write
-              statuses: write
-              actions: read
-
-            concurrency:
-              group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.run_id __GHA_CLOSE__
-              cancel-in-progress: true
-
-            jobs:
-              guard:
-                name: Gate & Dispatch
-                runs-on: ubuntu-latest
-                if: >
-                  (github.event_name == 'pull_request_target') ||
-                  (github.event_name == 'issue_comment' && github.event.issue.pull_request)
-
-                steps:
-                  - name: Short-circuit for org members (fast path)
-                    id: member
-                    uses: actions/github-script@v7
-                    with:
-                      github-token: __GHA_OPEN__ secrets.@@SECRET_NAME@@ __GHA_CLOSE__
-                      script: |
-                        let isMember = false;
-                        try {
-                          await github.rest.orgs.checkMembershipForUser(
-                            { org: context.repo.owner, username: context.payload.sender.login }
-                          );
-                          isMember = true;
-                        } catch {}
-                        core.setOutput('is_member', isMember ? 'true' : 'false');
-
-                  - name: Skip if org member
-                    if: __GHA_OPEN__ steps.member.outputs.is_member == 'true' __GHA_CLOSE__
-                    run: echo "Org member — skipping CLA."
-
-                  - name: Call reusable CLA checker
-                    if: __GHA_OPEN__ steps.member.outputs.is_member != 'true' __GHA_CLOSE__
-                    uses: __GHA_OPEN__ github.repository_owner __GHA_CLOSE__/.github/.github/workflows/reusable-cla-check.yml@@REUSABLE_REF@@
-                    secrets:
-                      CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.@@SECRET_NAME@@ __GHA_CLOSE__
-                    with:
-                      allowlist_branch: "@@ALLOWLIST_BRANCH@@"
-                      allowlist_path: "@@ALLOWLIST_PATH@@"
-                      sign_comment_exact: "@@SIGN_PHRASE@@"
-            """
-
-            def ensure_stub(owner: str, repo: str, token: str, default_branch: str,
-                            reusable_ref: str, allowlist_branch: str, allowlist_path: str,
-                            sign_phrase: str, secret_name: str) -> str:
-              # Build the real ${{ }} tokens WITHOUT embedding '{{' in this workflow file
-              GHA_OPEN = '$' + '{' + '{'
-              GHA_CLOSE = '}' + '}'
-              template = (STUB_TEMPLATE_SAFE
-                          .replace('__GHA_OPEN__', GHA_OPEN)
-                          .replace('__GHA_CLOSE__', GHA_CLOSE)
-                          .replace('@@STUB_VERSION@@', TARGET_STUB_VERSION)
-                          .replace('@@REUSABLE_REF@@', '@' + reusable_ref)
-                          .replace('@@ALLOWLIST_BRANCH@@', allowlist_branch)
-                          .replace('@@ALLOWLIST_PATH@@', allowlist_path)
-                          .replace('@@SIGN_PHRASE@@', sign_phrase.replace('"', '\\"'))
-                          .replace('@@SECRET_NAME@@', secret_name))
-
-              desired = template
-
-              existing, sha = get_file(owner, repo, STUB_PATH, default_branch, token)
-              if existing:
-                m = re.search(r"Stub Version:\\s*(\\d+)", existing)
-                cur_ver = m.group(1) if m else "0"
-                needs_update = (cur_ver != TARGET_STUB_VERSION) or (existing.strip() != desired.strip())
-                if needs_update:
-                  put_file(owner, repo, STUB_PATH, default_branch, token, desired, sha, "chore(cla): ensure trigger stub")
-                  return "stub_created_or_updated"
-                return "stub_ok"
-              else:
-                put_file(owner, repo, STUB_PATH, default_branch, token, desired, None, "chore(cla): add trigger stub")
-                return "stub_created_or_updated"
-
-            def globs_to_list(val: str | None) -> List[str]:
-              return [g.strip() for g in (val or "").split(",") if g.strip()]
-
-            def allowed_by_globs(name: str, includes: List[str], excludes: List[str]) -> bool:
-              if includes:
-                if not any(fnmatch.fnmatch(name, pat) for pat in includes):
-                  return False
-              for pat in excludes:
-                if fnmatch.fnmatch(name, pat):
-                  return False
-              return True
-
-            def parse_args() -> argparse.Namespace:
-              ap = argparse.ArgumentParser()
-              ap.add_argument("--org", required=True)
-              ap.add_argument("--reusable-ref", required=True)
-              ap.add_argument("--allowlist-branch", required=True)
-              ap.add_argument("--allowlist-path", required=True)
-              ap.add_argument("--sign-phrase", required=True)
-              ap.add_argument("--secret-name", default="CLA_ASSISTANT_PAT")
-              ap.add_argument("--include-repos", default=os.environ.get("INCLUDE_REPOS",""))
-              ap.add_argument("--exclude-repos", default=os.environ.get("EXCLUDE_REPOS",""))
-              return ap.parse_args()
-
-            def main() -> None:
-              args = parse_args()
-              token = os.environ.get("GITHUB_TOKEN") or os.environ.get("ORG_PAT")
-              if not token:
-                print("ERROR: GITHUB_TOKEN/ORG_PAT not set", file=sys.stderr); sys.exit(2)
-
-              includes = globs_to_list(args.include_repos)
-              excludes = DEFAULT_EXCLUDES + globs_to_list(args.exclude_repos)
-
-              repos = list_public_repos(args.org, token)
-              for r in repos:
-                name = r.get("name") or ""
-                if not name:
-                  print("REPO=? STATUS=error DECISION=None MSG=missing repo name", file=sys.stderr); continue
-                if not allowed_by_globs(name, includes, excludes):
-                  print(f"REPO={name} STATUS=skipped_filtered DECISION=None MSG=Filtered by include/exclude"); continue
-
-                try:
-                  decision: Optional[bool] = None
-                  try:
-                    decision = requires_cla.requires_CLA(f"{args.org}/{name}", token=token)
-                  except Exception:
-                    decision = None  # fail-safe
-                  requires = True if decision is None else bool(decision)
-
-                  default_branch = get_default_branch(args.org, name, token)
-                  existing, sha = get_file(args.org, name, STUB_PATH, default_branch, token)
-
-                  if requires:
-                    status = ensure_stub(args.org, name, token, default_branch,
-                                         args.reusable_ref, args.allowlist_branch, args.allowlist_path,
-                                         args.sign_phrase, args.secret_name)
-                    print(f"REPO={name} STATUS={status} DECISION={requires} MSG=CLA required")
-                  else:
-                    if existing and sha:
-                      delete_file(args.org, name, STUB_PATH, default_branch, token, sha,
-                                  "chore(cla): remove trigger stub (CLA not required)")
-                      print(f"REPO={name} STATUS=stub_removed_not_required DECISION={requires} MSG=Removed stub")
-                    else:
-                      print(f"REPO={name} STATUS=skipped_not_required DECISION={requires} MSG=No stub (as expected)")
-                except Exception as e:
-                  print(f"REPO={name} STATUS=error DECISION=None MSG={e}", file=sys.stderr)
-
-            if __name__ == "__main__":
-              main()
-            `;
-
-            fs.writeFileSync(file, py);
-            fs.chmodSync(file, 0o755);
-
-      - name: Ensure Python available
-        run: python3 -V
-
-      - name: Run manager (requires_cla)
-        id: runmgr
-        env:
-          GITHUB_TOKEN: ${{ env.ORG_PAT }}
+      - name: Install deps (optional)
         run: |
-          set -o pipefail
-          python3 .github-admin/run/check_and_install_stub.py \
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run CLA manager (opens/updates PRs everywhere)
+        env:
+          ORG_PAT: ${{ secrets.ORG_PAT }}   # FG-PAT with Contents:RW + Pull Requests:RW (Issues:RW if you want PR comments)
+        run: |
+          set -euo pipefail
+          python .github/scripts/cla_manager.py \
             --org "${ORG}" \
             --reusable-ref "${REUSABLE_REF}" \
             --allowlist-branch "${ALLOWLIST_BRANCH}" \
@@ -369,30 +90,29 @@ jobs:
             --exclude-repos "${EXCLUDE_REPOS}" \
           2>&1 | tee manager-results.log
 
-      - name: Summarize reconciliation in job summary
+      - name: Summarize reconciliation
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import os, re
           from collections import Counter
-          rows = []
+          rows=[]
           with open('manager-results.log','r',encoding='utf-8',errors='ignore') as f:
               for line in f:
-                  m = re.search(r'REPO=([^ ]+)\s+STATUS=([^ ]+)\s+DECISION=([^ ]+)\s+MSG=(.*)', line.strip())
+                  m=re.search(r'REPO=([^ ]+)\s+STATUS=([^ ]+)\s+DECISION=([^ ]+)\s+MSG=(.*)', line.strip())
                   if m: rows.append(m.groups())
-          counts = Counter(r[1] for r in rows)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
-              out.write("## CLA Stub Reconciliation — Summary (requires_cla)\n\n")
+          counts=Counter(r[1] for r in rows)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as out:
+              out.write("## CLA Stub Reconciliation — Summary (PR-everywhere)\n\n")
               if counts:
                   out.write("**Counts by status:** " + ", ".join(f"`{k}`={v}" for k,v in counts.items()) + "\n\n")
               else:
                   out.write("_No reconciliation rows parsed; check raw log below._\n\n")
-              out.write("| Repo | Status | RequiresCLA | Message |\n")
-              out.write("|---|---|---|---|\n")
-              for repo, status, decision, msg in rows:
+              out.write("| Repo | Status | RequiresCLA | Message |\n|---|---|---|---|\n")
+              for repo,status,decision,msg in rows:
                   out.write(f"| `{repo}` | `{status}` | `{decision}` | {msg} |\n")
           PY
 
-      - name: Upload raw results artifact
+      - name: Upload raw log
         uses: actions/upload-artifact@v4
         with:
           name: manager-results
