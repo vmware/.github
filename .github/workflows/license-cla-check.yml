@@ -1,32 +1,49 @@
 name: License Compliance & CLA Gate
 
 on:
+  # CLA gate still needs pull_request_target + issue_comment
   pull_request_target:
     types: [opened, reopened, synchronize]
   issue_comment:
     types: [created]
+  # License check runs in an unprivileged job on plain pull_request
+  pull_request:
+    types: [opened, reopened, synchronize]
 
-permissions:
-  contents: read
-  pull-requests: write
+# Keep top-level perms minimal; set per-job below
+permissions: {}
 
 jobs:
-  license-check:
-    # Run on PR events or CLA-related comments
+  # ---------------------------
+  # 1) CLA gate (privileged)
+  # ---------------------------
+  cla-gate:
+    # Run on PR_TARGET or CLA-related comments
     if: |
-      github.event_name == 'pull_request_target' || 
-      (github.event_name == 'issue_comment' && 
-       github.event.issue.pull_request && 
-       (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       (
+         github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+       )
+      )
     runs-on: ubuntu-latest
+
+    # CLA job needs to write comments/statuses, but MUST NOT checkout PR code
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+
     steps:
-      - name: Debug Event Payload
+      - name: Debug Event Payload (CLA gate)
         run: |
-          echo "Event Name: ${{ github.event_name }}"
-          echo "Repository: ${{ github.repository }}"
+          echo "Event: ${{ github.event_name }}"
+          echo "Repo:  ${{ github.repository }}"
           echo "Enabled Repos: ${{ vars.ENABLED_REPOS }}"
           echo "Excluded Repos: ${{ vars.EXCLUDED_REPOS }}"
-          
+
       - name: Check if repository is enabled or excluded
         id: repo_filter
         shell: python
@@ -35,105 +52,26 @@ jobs:
           EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS || '[]' }}
           CURRENT_REPO: ${{ github.repository }}
         run: |
-          import os
-          import json
+          import os, json
+          enabled = json.loads(os.environ['ENABLED_REPOS'])
+          excluded = json.loads(os.environ['EXCLUDED_REPOS'])
+          current = os.environ['CURRENT_REPO']
+          def set_out(v):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh: fh.write(f"should_run={v}")
+          if enabled and current not in enabled:
+              print(f"⚠️ Skipping {current} - not in enabled list"); set_out("false"); raise SystemExit(0)
+          if current in excluded:
+              print(f"⚠️ Skipping {current} - in excluded list"); set_out("false"); raise SystemExit(0)
+          print(f"✅ Running CLA for {current}"); set_out("true")
 
-          try:
-              # Load repository lists from environment variables
-              enabled_repos = json.loads(os.environ['ENABLED_REPOS'])
-              excluded_repos = json.loads(os.environ['EXCLUDED_REPOS'])
-              current_repo = os.environ['CURRENT_REPO']
+      # ❗️No checkout of PR code here.
 
-              # Check enabled repos first if specified
-              if enabled_repos:
-                  if current_repo not in enabled_repos:
-                      print(f"⚠️ Skipping {current_repo} - not in enabled list")
-                      print(f"Enabled repos: {', '.join(enabled_repos)}")
-                      with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-                          fh.write('should_run=false')
-                      exit(0)
-
-              # Then check excluded repos
-              if current_repo in excluded_repos:
-                  print(f"⚠️ Skipping {current_repo} - in excluded list")
-                  print(f"Excluded repos: {', '.join(excluded_repos)}")
-                  with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-                      fh.write('should_run=false')
-                  exit(0)
-
-              # Repository is allowed to run
-              print(f"✅ Running checks for {current_repo}")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-                  fh.write('should_run=true')
-
-          except json.JSONDecodeError as e:
-              print(f"❌ Error parsing repository lists: {e}")
-              print(f"ENABLED_REPOS: {os.environ['ENABLED_REPOS']}")
-              print(f"EXCLUDED_REPOS: {os.environ['EXCLUDED_REPOS']}")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-                  fh.write('should_run=false')
-              exit(1)
-
-      - name: Get PR SHA
-        id: pr_sha
-        if: steps.repo_filter.outputs.should_run == 'true'
-        shell: python
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_PATH: ${{ github.event_path }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          import os
-          import json
-          from github import Github
-
-          try:
-              event_name = os.environ['EVENT_NAME']
-              
-              # For pull_request_target events, get SHA directly from event payload
-              if event_name == 'pull_request_target':
-                  with open(os.environ['EVENT_PATH']) as f:
-                      event_data = json.load(f)
-                      sha = event_data['pull_request']['head']['sha']
-                      print(f"✅ Got SHA from pull_request_target event: {sha}")
-              
-              # For issue_comment events, need to fetch PR details
-              else:
-                  g = Github(os.environ['GITHUB_TOKEN'])
-                  repo = g.get_repo(os.environ['REPOSITORY'])
-                  with open(os.environ['EVENT_PATH']) as f:
-                      event_data = json.load(f)
-                      pr_number = event_data['issue']['number']
-                  
-                  pr = repo.get_pull(pr_number)
-                  sha = pr.head.sha
-                  print(f"✅ Got SHA from PR #{pr_number}: {sha}")
-
-              # Write SHA to output
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-                  fh.write(f'sha={sha}')
-
-          except Exception as e:
-              print(f"❌ Error getting PR SHA: {e}")
-              exit(1)
-
-      - name: Checkout PR Head
-        if: steps.repo_filter.outputs.should_run == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.pr_sha.outputs.sha }}
-          fetch-depth: 0
-
-      - name: Fuzzy License Validation
-        if: steps.repo_filter.outputs.should_run == 'true'
-        id: license_check
-        uses: ./.github/actions/check-license
-
+      # Use your CLA assistant exactly as before (works via API)
       - name: Enforce CLA
-        if: steps.license_check.outputs.license_status == 'non-permissive' && steps.repo_filter.outputs.should_run == 'true'
+        if: steps.repo_filter.outputs.should_run == 'true'
         uses: contributor-assistant/github-action@v2.6.1
         env:
+          # GITHUB_TOKEN is fine here; job has statuses/pull-requests write
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: 'signatures/version1/${{ github.repository }}/cla.json'
@@ -150,3 +88,62 @@ jobs:
           # custom-allsigned-prcomment: 'All contributors have signed the CLA.'
           # lock-pullrequest-aftermerge: false
           # use-dco-flag: false
+          # If you previously relied on a custom sign phrase/comment,
+          # keep the same optional inputs as needed.
+
+  # ------------------------------------------
+  # 2) License check (UNprivileged, read-only)
+  # ------------------------------------------
+  license-check:
+    # Runs only for 'pull_request'; never in the privileged PR_TARGET job
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    # Read-only permissions while inspecting untrusted code
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Debug Event Payload (license)
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Repo:  ${{ github.repository }}"
+
+      - name: Check if repository is enabled or excluded
+        id: repo_filter
+        shell: python
+        env:
+          ENABLED_REPOS: ${{ vars.ENABLED_REPOS || '[]' }}
+          EXCLUDED_REPOS: ${{ vars.EXCLUDED_REPOS || '[]' }}
+          CURRENT_REPO: ${{ github.repository }}
+        run: |
+          import os, json
+          enabled = json.loads(os.environ['ENABLED_REPOS'])
+          excluded = json.loads(os.environ['EXCLUDED_REPOS'])
+          current = os.environ['CURRENT_REPO']
+          def set_out(v):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as fh: fh.write(f"should_run={v}")
+          if enabled and current not in enabled:
+              print(f"⚠️ Skipping {current} - not in enabled list"); set_out("false"); raise SystemExit(0)
+          if current in excluded:
+              print(f"⚠️ Skipping {current} - in excluded list"); set_out("false"); raise SystemExit(0)
+          print(f"✅ Running license check for {current}"); set_out("true")
+
+      # Safe checkout of PR HEAD with no persisted creds
+      - name: Checkout PR head (read-only, no creds)
+        if: steps.repo_filter.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      # Your local action runs against the checked out tree;
+      # this job has only read permissions.
+      - name: Fuzzy License Validation
+        if: steps.repo_filter.outputs.should_run == 'true'
+        id: license_check
+        uses: ./.github/actions/check-license
