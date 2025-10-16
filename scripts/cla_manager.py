@@ -157,12 +157,9 @@ def open_or_update_pr(owner: str, repo: str, head_branch: str, base_branch: str,
     return pr
 
 # ---- Stub template ------------------------------------------------------------
-def stub_template(reusable_ref: str, allowlist_branch: str,
-                  allowlist_path: str, sign_phrase: str,
-                  secret_name: str) -> str:
-    # This file lives in target repos; real ${{ }} is expected and correct.
-    return f"""# Auto-managed; DO NOT EDIT MANUALLY
-# Stub Version: {TARGET_STUB_VERSION}
+def stub_template(reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name):
+    return """# Auto-managed; DO NOT EDIT MANUALLY
+# Stub Version: {version}
 name: CLA — Trigger Stub
 
 on:
@@ -215,10 +212,18 @@ jobs:
         with:
           allowlist_branch: "{allowlist_branch}"
           allowlist_path: "{allowlist_path}"
-          sign_comment_exact: "{sign_phrase.replace('"','\\"')}"
+          sign_comment_exact: "{sign_phrase}"
         secrets:
           CONTRIBUTOR_ASSISTANT_PAT: ${{{{ secrets.{secret_name} }}}}
-"""
+""".format(
+        version=TARGET_STUB_VERSION,
+        reusable_ref=reusable_ref,
+        allowlist_branch=allowlist_branch,
+        allowlist_path=allowlist_path,
+        sign_phrase=sign_phrase.replace('"', '\\"'),
+        secret_name=secret_name,
+    )
+
 
 # ---- Content orchestration (PR-everywhere policy) -----------------------------
 def compose_pr_body(action: str, reason: str) -> str:
