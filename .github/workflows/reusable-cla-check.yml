@@ -54,14 +54,34 @@ jobs:
       GH_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
 
     steps:
+      # Ensure we can read the allowlist from org .github repo
       - name: Checkout .github (allowlist)
         uses: actions/checkout@v4
         with:
+          # Use the org that owns the current repo
           repository: ${{ github.repository_owner }}/.github
+          # The branch where your allowlist lives (input default: cla-config)
           ref: ${{ inputs.allowlist_branch }}
-          path: ./.github-central
-          persist-credentials: false
+          # IMPORTANT: use the forwarded PAT, not the default GITHUB_TOKEN
+          token: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+          # Put it in a separate folder to avoid mixing with the current repo
+          path: .github-central
           fetch-depth: 1
+          persist-credentials: false
+
+      - name: Debug checkout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git --version
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "Listing .github-central:"
+          ls -la .github-central
+          echo "Expected allowlist: .github-central/${{ inputs.allowlist_path }}"
+          if [ ! -f ".github-central/${{ inputs.allowlist_path }}" ]; then
+            echo "::error::Allowlist not found at .github-central/${{ inputs.allowlist_path }}"
+            exit 2
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
