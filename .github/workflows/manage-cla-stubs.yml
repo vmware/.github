@@ -78,6 +78,16 @@ jobs:
           fi
 #          if [ -f scripts/requirements.txt ]; then pip install -r scripts/requirements.txt; fi
 
+      - name: Mask secrets
+        run: |
+          # Mask these tokens so if they get echoed, they are redacted in logs
+          if [ -n "${{ secrets.ORG_PAT }}" ]; then
+            echo "::add-mask::${{ secrets.ORG_PAT }}"
+          fi
+          if [ -n "${{ secrets.CLA_ASSISTANT_PAT }}" ]; then
+            echo "::add-mask::${{ secrets.CLA_ASSISTANT_PAT }}"
+          fi
+
       - name: Run CLA manager (opens/updates PRs everywhere)
         env:
           ORG_PAT: ${{ secrets.ORG_PAT }}   # FG-PAT with Contents:RW + Pull Requests:RW (Issues:RW if you want PR comments)
