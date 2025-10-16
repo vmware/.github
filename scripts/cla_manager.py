@@ -24,6 +24,21 @@ WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
 
 # ----------------------------- Debug helper -----------------------------------
+import re
+
+_SECRET_PATTERNS = [
+    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.=]+", re.I),
+    re.compile(r"([?&]access_token=)[^&]+", re.I),
+]
+
+def _scrub(s: str) -> str:
+    s = _SECRET_PATTERNS[0].sub("Bearer ***", str(s))
+    s = _SECRET_PATTERNS[1].sub(r"\1***", s)
+    return s
+
+def log_debug(msg: str) -> None:
+    print(f"DEBUG {datetime.datetime.utcnow().isoformat()}Z: {_scrub(msg)}", file=sys.stderr)
+
 def log_debug(msg: str) -> None:
     """Structured debug printer with UTC timestamp (stderr)."""
     print(f"DEBUG {datetime.datetime.utcnow().isoformat()}Z: {msg}", file=sys.stderr)
