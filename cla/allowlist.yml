@@ -15,5 +15,9 @@ temp_exemptions:
  # - login: carol-temp
  #   until: "2025-12-31"
  #   reason: "Partner pilot"
+license_overrides:
+  require_cla:
+    - libref-broadcom
+  allow_dco:
 rules:
   # require_dco_for_externals: true
