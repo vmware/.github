@@ -45,7 +45,7 @@ def _norm_license_name(name: str) -> str:
     if not name:
         return ""
     s = str(name).strip().lower()
-    return re.sub(r"[^a-z0-9.\-+]", "-", s)
+    return re.sub(r"[\s_]+", "-", s)
 
 def _load_allowlist() -> dict:
     """Load .github/cla/allowlist.yml if present; return {} if missing or invalid."""
