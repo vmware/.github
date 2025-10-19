@@ -142,6 +142,10 @@ async def get_license_decision_async(
                                 "policy_reason": f"{why}; override={'require_cla' if ov else 'allow_dco'}",
                                 "error": None,
                             }
+                        # DEBUG: log when an override triggers
+                        print(f"[DEBUG] Override applied for '{license_name or license_id}' "
+                              f"-> requires_CLA={ov} (source: allowlist.yml)")
+                                          
                     except Exception:
                         # On any override error, fall back to default behavior
                         pass
@@ -185,6 +189,10 @@ async def get_license_decision_async(
                             "policy_reason": f"{why}; override={'require_cla' if ov else 'allow_dco'}",
                             "error": None,
                         }
+                    # DEBUG: log when an override triggers
+                    print(f"[DEBUG] Override applied for '{license_name or license_id}' "
+                          f"-> requires_CLA={ov} (source: allowlist.yml)")
+                      
                 except Exception:
                     # On any override error, fall back to default behavior
                     pass
