@@ -19,5 +19,6 @@ license_overrides:
   require_cla:
     - Broadcom_Source_Available
   allow_dco:
+    - GPL-2.0
 rules:
   # require_dco_for_externals: true
