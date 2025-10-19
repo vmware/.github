@@ -258,7 +258,7 @@ name: CLA — Trigger Stub
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
