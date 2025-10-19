@@ -17,7 +17,7 @@ temp_exemptions:
  #   reason: "Partner pilot"
 license_overrides:
   require_cla:
-    - libref-broadcom
+    - Broadcom_Source_Available
   allow_dco:
 rules:
   # require_dco_for_externals: true
