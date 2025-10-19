@@ -105,6 +105,17 @@ FALLBACK_PERMISSIVE_SPDX = {
     "Zlib", "Unlicense", "BSL-1.0", "Python-2.0", "CC0-1.0"
 }
 
+# --- begin: normalization helper for reuse -----------------------------------
+def normalize_license_id(name_or_id: str) -> str:
+    """
+    Normalize a license id or name to a lowercase SPDX-like token so matching is stable.
+    Keeps '.', '-', '+' which are common in SPDX; maps everything else to '-'.
+    """
+    if not name_or_id:
+        return ""
+    return re.sub(r"[^a-z0-9.\-+]", "-", name_or_id.strip().lower())
+# --- end: normalization helper for reuse -------------------------------------
+
 # ---------- Text helpers ----------
 def _normalize(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n").lower()
