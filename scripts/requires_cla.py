@@ -35,8 +35,17 @@ import detect_org_repo_licenses as dorl            # GitHub fetchers (we call it
 # unreadable, the behavior is unchanged.
 
 from pathlib import Path
-import yaml
 import re
+# Gracefully degrade if PyYAML is missing
+try:
+    import yaml  # type: ignore
+    _YAML_AVAILABLE = True
+except ModuleNotFoundError:
+    import sys
+    print("WARNING: PyYAML not installed; allowlist overrides disabled", file=sys.stderr)
+    _YAML_AVAILABLE = False
+
+import yaml
 
 _ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "cla" / "allowlist.yml"
 
@@ -49,6 +58,8 @@ def _norm_license_name(name: str) -> str:
 
 def _load_allowlist() -> dict:
     """Load .github/cla/allowlist.yml if present; return {} if missing or invalid."""
+    if not _YAML_AVAILABLE:
+        return {}  
     try:
         with open(_ALLOWLIST_PATH, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
