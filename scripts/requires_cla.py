@@ -29,6 +29,50 @@ from aiohttp import ClientTimeout
 import license_detector as ld                       # match + policy
 import detect_org_repo_licenses as dorl            # GitHub fetchers (we call its functions)
 
+# --- begin: license override helpers -----------------------------------------
+# These helpers load .github/cla/allowlist.yml and apply license-based
+# policy overrides (require_cla / allow_dco). If the file is missing or
+# unreadable, the behavior is unchanged.
+
+from pathlib import Path
+import yaml
+import re
+
+_ALLOWLIST_PATH = Path(__file__).resolve().parents[1] / "cla" / "allowlist.yml"
+
+def _norm_license_name(name: str) -> str:
+    """Normalize license name/id to a lowercase SPDX-like token."""
+    if not name:
+        return ""
+    s = str(name).strip().lower()
+    return re.sub(r"[^a-z0-9.\-+]", "-", s)
+
+def _load_allowlist() -> dict:
+    """Load .github/cla/allowlist.yml if present; return {} if missing or invalid."""
+    try:
+        with open(_ALLOWLIST_PATH, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        # Fail-closed (ignore if unreadable)
+        return {}
+
+def _override_requires_cla(norm_license: str, allowlist: dict) -> None | bool:
+    """
+    Return True (force CLA), False (force DCO), or None (no override).
+    """
+    section = allowlist.get("license_overrides") or {}
+    req = {_norm_license_name(x) for x in (section.get("require_cla") or [])}
+    dco = {_norm_license_name(x) for x in (section.get("allow_dco") or [])}
+    if norm_license in req:
+        return True
+    if norm_license in dco:
+        return False
+    return None
+# --- end: license override helpers -------------------------------------------
+
 # --- Small helpers (just glue; everything else is reused) ---------------------
 
 def _auth_headers(token: Optional[str]) -> Dict[str, str]:
@@ -82,6 +126,27 @@ async def get_license_decision_async(
                     _, id_to_name = ld.catalog_maps()
                     canonical_name = id_to_name.get(spdx_id) or (data.get("license") or {}).get("name") or spdx_id
                     perm, why = ld.is_permissive_with_reason(canonical_name, spdx_id)
+                  
+                    # --- begin: check license overrides (API path) ---------------------
+                    try:
+                        allow_cfg = _load_allowlist()
+                        ov = _override_requires_cla(_norm_license_name(spdx_id or canonical_name), allow_cfg)
+                        if ov is not None:
+                            return {
+                                "repo": repo_full,
+                                "license_name": canonical_name,
+                                "spdx_id": spdx_id,
+                                "match": "api",
+                                "permissive": perm,
+                                "requires_CLA": ov,
+                                "policy_reason": f"{why}; override={'require_cla' if ov else 'allow_dco'}",
+                                "error": None,
+                            }
+                    except Exception:
+                        # On any override error, fall back to default behavior
+                        pass
+                    # --- end: check license overrides (API path) -----------------------
+
                     return {
                         "repo": repo_full,
                         "license_name": canonical_name,
@@ -104,6 +169,27 @@ async def get_license_decision_async(
             det = ld.detect_from_text(text)
             if det.get("matched"):
                 perm, why = ld.is_permissive_with_reason(det.get("name"), det.get("id"))
+              
+                # --- begin: check license overrides (text path) -----------------------
+                try:
+                    allow_cfg = _load_allowlist()
+                    ov = _override_requires_cla(_norm_license_name(det.get("id") or det.get("name")), allow_cfg)
+                    if ov is not None:
+                        return {
+                            "repo": repo_full,
+                            "license_name": det.get("name"),
+                            "spdx_id": det.get("id"),
+                            "match": det.get("match"),
+                            "permissive": perm,
+                            "requires_CLA": ov,
+                            "policy_reason": f"{why}; override={'require_cla' if ov else 'allow_dco'}",
+                            "error": None,
+                        }
+                except Exception:
+                    # On any override error, fall back to default behavior
+                    pass
+                # --- end: check license overrides (text path) -------------------------      
+              
                 return {
                     "repo": repo_full,
                     "license_name": det.get("name"),
