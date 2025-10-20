@@ -313,7 +313,7 @@ jobs:
     # 1) Do the safe .format() substitutions for our *own* variables only
     out = tmpl.format(
         version=TARGET_STUB_VERSION,
-        owner=owner
+        owner=owner,
         reusable_ref=reusable_ref,
         allowlist_branch=allowlist_branch,
         allowlist_path=allowlist_path,
