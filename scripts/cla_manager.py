@@ -18,7 +18,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # ----------------------------- Config -----------------------------------------
-TARGET_STUB_VERSION = "8"
+TARGET_STUB_VERSION = "9"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
