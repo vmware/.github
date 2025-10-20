@@ -275,12 +275,13 @@ concurrency:
 
 jobs:
   guard:
-    name: Gate & Dispatch
+    name: Gate & Decide
     runs-on: ubuntu-latest
     if: >
-      (github.event_name == 'pull_request_target') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
-
+      __GHA_OPEN__ github.event_name == 'pull_request_target' __GHA_CLOSE__ ||
+      __GHA_OPEN__ github.event_name == 'issue_comment' && github.event.issue.pull_request __GHA_CLOSE__
+    outputs:
+      is_member: __GHA_OPEN__ steps.member.outputs.is_member __GHA_CLOSE__
     steps:
       - name: Short-circuit for org members (fast path)
         id: member
@@ -288,28 +289,32 @@ jobs:
         with:
           script: |
             let isMember = false;
-            try {{
-              await github.rest.orgs.checkMembershipForUser(
-                {{ org: context.repo.owner, username: context.payload.sender.login }}
-              );
+            try {
+              await github.rest.orgs.checkMembershipForUser({
+                org: context.repo.owner,
+                username: context.payload.sender.login
+              });
               isMember = true;
-            }} catch {{}}
+            } catch {}
             core.setOutput('is_member', isMember ? 'true' : 'false');
 
       - name: Skip if org member
         if: __GHA_OPEN__ steps.member.outputs.is_member == 'true' __GHA_CLOSE__
         run: echo "Org member — skipping CLA."
 
-      - name: Call reusable CLA checker
-        if: __GHA_OPEN__ steps.member.outputs.is_member != 'true' __GHA_CLOSE__
-        uses: {owner}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
-        with:
-          allowlist_branch: "{allowlist_branch}"
-          allowlist_path: "{allowlist_path}"
-          sign_comment_exact: "{sign_phrase}"
-        secrets:
-          CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.{secret_name} __GHA_CLOSE__
+  call-cla:
+    name: Call reusable CLA checker
+    needs: guard
+    if: __GHA_OPEN__ needs.guard.outputs.is_member != 'true' __GHA_CLOSE__
+    uses: {owner}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+    with:
+      allowlist_branch: "{allowlist_branch}"
+      allowlist_path: "{allowlist_path}"
+      sign_comment_exact: "{sign_phrase}"
+    secrets:
+      CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.{secret_name} __GHA_CLOSE__
 """
+
     # 1) Do the safe .format() substitutions for our *own* variables only
     out = tmpl.format(
         version=TARGET_STUB_VERSION,
@@ -318,7 +323,7 @@ jobs:
         allowlist_branch=allowlist_branch,
         allowlist_path=allowlist_path,
         sign_phrase=sign_phrase.replace('"', '\\"'),
-        secret_name=secret_name,
+        secret_name=secret_name
     )
     # 2) Now swap placeholders to real GitHub expression delimiters
     out = out.replace("__GHA_OPEN__", "${{").replace("__GHA_CLOSE__", "}}")
