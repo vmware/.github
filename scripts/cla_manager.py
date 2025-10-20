@@ -18,7 +18,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # ----------------------------- Config -----------------------------------------
-TARGET_STUB_VERSION = "7"
+TARGET_STUB_VERSION = "8"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
@@ -247,7 +247,7 @@ def open_or_update_pr(owner: str, repo: str, head_branch: str, base_branch: str,
 
 
 # ----------------------------- Stub template ----------------------------------
-def stub_template(reusable_ref: str, allowlist_branch: str,
+def stub_template(owner: str, reusable_ref: str, allowlist_branch: str,
                   allowlist_path: str, sign_phrase: str,
                   secret_name: str) -> str:
     # NOTE: we purposely keep ALL GitHub expression delimiters as sentinel tokens
@@ -270,7 +270,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.run_id __GHA_CLOSE__
+  group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.event.issue.number || github.run_id __GHA_CLOSE__
   cancel-in-progress: true
 
 jobs:
@@ -302,7 +302,7 @@ jobs:
 
       - name: Call reusable CLA checker
         if: __GHA_OPEN__ steps.member.outputs.is_member != 'true' __GHA_CLOSE__
-        uses: __GHA_OPEN__ github.repository_owner __GHA_CLOSE__/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
+        uses: {owner}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
         with:
           allowlist_branch: "{allowlist_branch}"
           allowlist_path: "{allowlist_path}"
@@ -342,7 +342,7 @@ def ensure_stub_via_pr(owner: str, repo: str, token: str, base_branch: str,
     log_debug(f"Ensuring stub via PR for {owner}/{repo}")
     ensure_branch(owner, repo, base_branch, WORK_BRANCH, token)
     try:
-        desired = stub_template(reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name)
+        desired = stub_template(owner, reusable_ref, allowlist_branch, allowlist_path, sign_phrase, secret_name)
     except Exception as e:
         log_debug(f"stub_template formatting error for {owner}/{repo}: {e}")
         raise                           
