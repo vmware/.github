@@ -289,13 +289,13 @@ jobs:
         with:
           script: |
             let isMember = false;
-            try {
-              await github.rest.orgs.checkMembershipForUser({
+            try {{
+              await github.rest.orgs.checkMembershipForUser({{
                 org: context.repo.owner,
                 username: context.payload.sender.login
-              });
+              }});
               isMember = true;
-            } catch {}
+            }} catch {{}}
             core.setOutput('is_member', isMember ? 'true' : 'false');
 
       - name: Skip if org member
