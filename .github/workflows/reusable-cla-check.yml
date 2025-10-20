@@ -132,16 +132,14 @@ jobs:
             exit 2
           fi
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install YAML parser
+      - name: Install yq (YAML CLI)
+        shell: bash
         run: |
-          cd ./.github-central
-          npm init -y >/dev/null 2>&1
-          npm i yaml >/dev/null 2>&1
+          set -euo pipefail
+          YQ_VER=v4.44.3
+          curl -sSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64"
+          chmod +x /usr/local/bin/yq
+          yq --version
 
       - name: Compute allowlisted/member
         id: allow
@@ -152,27 +150,32 @@ jobs:
         with:
           github-token: ${{ env.GH_TOKEN }}
           script: |
-            const fs = require('fs');
-            const path = require('path');
-            const YAML = require(path.join(process.env.GITHUB_WORKSPACE, '.github-central', 'node_modules', 'yaml'));
+            const { execSync } = require('node:child_process');
+            const path = require('node:path');
+
             const allowPath = path.join(process.env.GITHUB_WORKSPACE, '.github-central', process.env.ALLOWLIST_PATH);
             let cfg = {};
             try {
-              cfg = YAML.parse(fs.readFileSync(allowPath, 'utf8')) || {};
+              const json = execSync(`yq -o=json '${allowPath}'`, { stdio: ['ignore','pipe','pipe'] }).toString();
+              cfg = JSON.parse(json) || {};
             } catch (e) {
               core.warning(`Allowlist not found/parse error at ${allowPath}: ${e}`);
             }
+
             const actor = context.payload.sender?.login;
             const org = context.repo.owner;
             const nowIso = new Date().toISOString();
             const asSet = xs => new Set((xs || []).map(s => String(s).toLowerCase()));
             const inSet = (set, s) => set.has(String(s || '').toLowerCase());
+
             let isMember = false;
             try { await github.rest.orgs.checkMembershipForUser({ org, username: actor }); isMember = true; } catch {}
+
             const botSet = asSet(cfg.bots), userSet = asSet(cfg.users);
             let allow = inSet(botSet, actor) || inSet(userSet, actor);
             let reason = allow ? 'explicit user/bot' : '';
-            if (!allow && cfg.teams?.length) {
+
+            if (!allow && Array.isArray(cfg.teams) && cfg.teams.length) {
               try {
                 const { data: teams } = await github.rest.teams.listForUserInOrg({ org, username: actor });
                 const desired = asSet(cfg.teams.map(t => t.includes('/') ? t : `${org}/${t}`));
@@ -180,11 +183,14 @@ jobs:
                 if (allow) reason = 'team';
               } catch (e) { core.warning(`Team lookup failed: ${e}`); }
             }
+
             if (!allow && cfg.org_members === true && isMember) { allow = true; reason = 'org member'; }
+
             if (!allow && Array.isArray(cfg.temp_exemptions)) {
               const hit = cfg.temp_exemptions.find(x => String(x.login).toLowerCase() === String(actor).toLowerCase());
               if (hit?.until && nowIso <= new Date(hit.until).toISOString()) { allow = true; reason = 'temporary exemption'; }
             }
+
             core.setOutput('allow', allow ? 'true' : 'false');
             core.setOutput('reason', reason || '');
             core.setOutput('sign_phrase', process.env.SIGN_PHRASE);
