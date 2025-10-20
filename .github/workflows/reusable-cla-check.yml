@@ -50,7 +50,7 @@ jobs:
     env:
       ORG: ${{ github.repository_owner }}
       REPO: ${{ github.event.repository.name }}
-      GH_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       # Preflight clarifies whether the PAT can access org .github and the allowlist branch/path.
@@ -233,4 +233,7 @@ jobs:
           custom-pr-sign-comment: ${{ inputs.sign_comment_exact }}
           allowlist: 'dependabot[bot],github-actions[bot]'
         env:
-          GITHUB_TOKEN: ${{ env.GH_TOKEN }}
+          # For PR API (comments/status). Comes from base repo; safe in forks.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # For writing signatures into <org>/.github (cross-repo write from fork).
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
