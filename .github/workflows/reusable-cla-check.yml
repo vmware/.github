@@ -137,6 +137,89 @@ jobs:
           path: .github-central
           fetch-depth: 1
           persist-credentials: false
+          
+      - name: Locate license policy scripts
+        id: find_scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=".github-central"
+          # Search common locations; adjust/add paths if your repo uses a different layout
+          CANDIDATES=$(printf "%s\n" \
+            "$ROOT/scripts" \
+            "$ROOT/tools" \
+            "$ROOT/cla" \
+            "$ROOT" \
+          )
+          hit=""
+          for d in $CANDIDATES; do
+            if [ -f "$d/requires_cla.py" ] && [ -f "$d/license_detector.py" ] && [ -f "$d/detect_org_repo_licenses.py" ]; then
+              hit="$d"; break
+            fi
+          done
+          if [ -z "$hit" ]; then
+            echo "::error::Could not find requires_cla.py + license_detector.py + detect_org_repo_licenses.py under .github-central"
+            exit 2
+          fi
+          echo "dir=$hit" >> "$GITHUB_OUTPUT"
+          echo "Found policy scripts in: $hit"
+
+      - name: Setup Python (for policy scripts)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Determine enforcement from license policy (requires_cla.py)
+        id: policy
+        shell: bash
+        env:
+          ORG:  ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          cd "${{ steps.find_scripts.outputs.dir }}"
+
+          run_and_capture() {
+            set +e
+            OUT="$("$@")"; EC=$?
+            set -e
+            printf "%s\n" "$OUT"
+            return $EC
+          }
+
+          # Try: requires_cla.py --org ORG --repo REPO
+          RAW="$(run_and_capture python requires_cla.py --org "$ORG" --repo "$REPO" 2>/dev/null || true)"
+          EC=$?
+          if [ $EC -ne 0 ] || [ -z "$RAW" ]; then
+            # Try: requires_cla.py ORG/REPO
+            RAW="$(run_and_capture python requires_cla.py "$ORG/$REPO" 2>/dev/null || true)"
+            EC=$?
+          fi
+
+          # Interpret result:
+          ENFORCE=""
+          # 1) JSON like {"requires_cla": true}
+          if printf "%s" "$RAW" | grep -qi '"requires_cla"\s*:\s*true'; then ENFORCE="true"; fi
+          if printf "%s" "$RAW" | grep -qi '"requires_cla"\s*:\s*false'; then ENFORCE="false"; fi
+          # 2) Plain boolean
+          if [ -z "$ENFORCE" ]; then
+            case "$(printf "%s" "$RAW" | tr 'A-Z' 'a-z' | tr -d '[:space:]')" in
+              true) ENFORCE="true" ;;
+              false) ENFORCE="false" ;;
+            esac
+          fi
+          # 3) Exit code convention (0=enforce, 1=do not enforce) — if the tool uses that
+          if [ -z "$ENFORCE" ]; then
+            if [ $EC -eq 0 ]; then ENFORCE="true"; else ENFORCE="false"; fi
+          fi
+
+          if [ -z "$ENFORCE" ]; then
+            echo "::warning::Could not interpret requires_cla.py output; defaulting to enforce=true"
+            ENFORCE="true"
+          fi
+
+          echo "enforce=$ENFORCE" >> "$GITHUB_OUTPUT"
+          echo "license_policy_enforce=$ENFORCE"
 
       - name: Debug checkout
         shell: bash
@@ -151,6 +234,14 @@ jobs:
             echo "::error::Allowlist not found at .github-central/${{ inputs.allowlist_path }}"
             exit 2
           fi
+
+      - name: Skip — permissive by license policy
+        if: ${{ steps.policy.outputs.enforce != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.GH_TOKEN }}
+          script: |
+            core.info('✅ CLA not required (permissive license policy)');
 
       - name: Install yq (YAML CLI)
         shell: bash
