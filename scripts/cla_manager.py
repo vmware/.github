@@ -18,7 +18,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # ----------------------------- Config -----------------------------------------
-TARGET_STUB_VERSION = "9"
+TARGET_STUB_VERSION = "10"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
@@ -252,9 +252,10 @@ def stub_template(owner: str, reusable_ref: str, allowlist_branch: str,
                   secret_name: str) -> str:
     # NOTE: we purposely keep ALL GitHub expression delimiters as sentinel tokens
     # during .format(), then swap them at the end. This avoids any brace parsing.
+
     tmpl = """# Auto-managed; DO NOT EDIT MANUALLY
 # Stub Version: {version}
-name: CLA — Trigger Stub
+name: CLA — Trigger
 
 on:
   pull_request_target:
@@ -262,59 +263,21 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  statuses: write
-  actions: read
-
-concurrency:
-  group: __GHA_OPEN__ github.workflow __GHA_CLOSE__-__GHA_OPEN__ github.event.pull_request.number || github.event.issue.number || github.run_id __GHA_CLOSE__
-  cancel-in-progress: true
+# Keep the stub minimal; the reusable owns permissions & concurrency
+permissions: {}
 
 jobs:
-  guard:
-    name: Gate & Decide
-    runs-on: ubuntu-latest
-    if: >
-      __GHA_OPEN__ github.event_name == 'pull_request_target' __GHA_CLOSE__ ||
-      __GHA_OPEN__ github.event_name == 'issue_comment' && github.event.issue.pull_request __GHA_CLOSE__
-    outputs:
-      is_member: __GHA_OPEN__ steps.member.outputs.is_member __GHA_CLOSE__
-    steps:
-      - name: Short-circuit for org members (fast path)
-        id: member
-        uses: actions/github-script@v7
-        with:
-          script: |
-            let isMember = false;
-            try {{
-              await github.rest.orgs.checkMembershipForUser({{
-                org: context.repo.owner,
-                username: context.payload.sender.login
-              }});
-              isMember = true;
-            }} catch {{}}
-            core.setOutput('is_member', isMember ? 'true' : 'false');
-
-      - name: Skip if org member
-        if: __GHA_OPEN__ steps.member.outputs.is_member == 'true' __GHA_CLOSE__
-        run: echo "Org member — skipping CLA."
-
-  call-cla:
+  cla:
     name: Call reusable CLA checker
-    needs: guard
-    if: __GHA_OPEN__ needs.guard.outputs.is_member != 'true' __GHA_CLOSE__
     uses: {owner}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
     with:
       allowlist_branch: "{allowlist_branch}"
       allowlist_path: "{allowlist_path}"
       sign_comment_exact: "{sign_phrase}"
     secrets:
+      # preserve existing mapping: pass repo/org secret <secret_name> into the reusable as CONTRIBUTOR_ASSISTANT_PAT
       CONTRIBUTOR_ASSISTANT_PAT: __GHA_OPEN__ secrets.{secret_name} __GHA_CLOSE__
 """
-
     # 1) Do the safe .format() substitutions for our *own* variables only
     out = tmpl.format(
         version=TARGET_STUB_VERSION,
