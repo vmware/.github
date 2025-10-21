@@ -107,6 +107,18 @@ jobs:
 
           echo "Preflight OK."
 
+      - name: Resolve GH_TOKEN (prefer PAT, fallback to GITHUB_TOKEN)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}" ]; then
+            echo "GH_TOKEN=${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}" >> "$GITHUB_ENV"
+            echo "Using CONTRIBUTOR_ASSISTANT_PAT for GitHub API calls."
+          else
+            echo "GH_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> "$GITHUB_ENV"
+            echo "Falling back to GITHUB_TOKEN for GitHub API calls."
+          fi
+
       # Trusted checkout — ONLY the org's .github repo to read allowlist
       - name: Checkout .github (allowlist)
         uses: actions/checkout@v4
