@@ -264,7 +264,7 @@ on:
     types: [created]
 
 # Keep the stub minimal; the reusable owns permissions & concurrency
-permissions: {}
+permissions: {{}}
 
 jobs:
   cla:
