@@ -286,37 +286,11 @@ jobs:
             let allow = inSet(botSet, actor) || inSet(userSet, actor);
             let reason = allow ? 'explicit user/bot' : '';
 
-            // ---- Repo policy: decide if this repo requires CLA at all (defaults to permissive unless configured) ----
-            function repoRequiresCLA(cfg, ownerName, repoName) {
-              // Global default: enforce only if explicitly true
-              let enforce = cfg?.require_cla === true;
-      
-              // Fine-grained map wins
-              if (cfg?.repos && Object.prototype.hasOwnProperty.call(cfg.repos, repoName)) {
-                const v = cfg.repos[repoName]?.require_cla;
-                if (typeof v === 'boolean') enforce = v;
-              } else {
-                // Fallback to simple lists
-                if (Array.isArray(cfg?.non_permissive_repos) && cfg.non_permissive_repos.includes(repoName)) enforce = true;
-                if (Array.isArray(cfg?.permissive_repos) && cfg.permissive_repos.includes(repoName)) enforce = false;
-              }
-              return enforce;
-            }
-      
-            const repoName = context.repo.repo;
-            const enforce = repoRequiresCLA(cfg, org, repoName);
-      
-            // If this repo is permissive, expose outputs and exit early
-            if (!enforce) {
-              core.setOutput('policy_enforce', 'false');
-              core.setOutput('allow', 'true');
-              core.setOutput('reason', `permissive_repo:${repoName}`);
-              return;
-            }
-      
-            // Mark that enforcement is active; continue with allowlist checks below
-            core.setOutput('policy_enforce', 'true');
-
+            // Bridge: only the earlier license-policy step decides enforcement.
+            // Do NOT return here; the separate "Skip — permissive by license policy" step already exits early.
+            const policyEnforce = '${{ steps.policy.outputs.enforce }}' === 'true';
+            core.setOutput('policy_enforce', policyEnforce ? 'true' : 'false');
+ 
             if (!allow && Array.isArray(cfg.teams) && cfg.teams.length) {
               try {
                 const { data: teams } = await github.rest.teams.listForUserInOrg({ org, username: actor });
