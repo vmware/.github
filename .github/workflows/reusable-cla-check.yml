@@ -39,11 +39,20 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.run_id }}-${{ github.event.pull_request.number || github.event.issue.number || github.sha }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   cla:
+    # Debounce: always run for PR events; for issue_comment only if it contains the exact sign phrase
+    if: >
+      ${{
+        github.event_name == 'pull_request_target' ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         contains(github.event.comment.body, inputs.sign_comment_exact))
+      }}
+  
     name: CLA gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
