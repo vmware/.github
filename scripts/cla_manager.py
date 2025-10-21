@@ -18,7 +18,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # ----------------------------- Config -----------------------------------------
-TARGET_STUB_VERSION = "11"
+TARGET_STUB_VERSION = "12"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
@@ -264,7 +264,12 @@ on:
     types: [created]
 
 # Keep the stub minimal; the reusable owns permissions & concurrency
-permissions: {{}}
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
 
 jobs:
   cla:
