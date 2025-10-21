@@ -44,6 +44,7 @@ concurrency:
 
 jobs:
   cla:
+    name: CLA gate
     # Debounce: always run for PR events; for issue_comment only if it contains the exact sign phrase
     if: >
       ${{
@@ -52,8 +53,6 @@ jobs:
          github.event.issue.pull_request &&
          contains(github.event.comment.body, inputs.sign_comment_exact))
       }}
-  
-    name: CLA gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -196,6 +195,37 @@ jobs:
             let allow = inSet(botSet, actor) || inSet(userSet, actor);
             let reason = allow ? 'explicit user/bot' : '';
 
+            // ---- Repo policy: decide if this repo requires CLA at all (defaults to permissive unless configured) ----
+            function repoRequiresCLA(cfg, ownerName, repoName) {
+              // Global default: enforce only if explicitly true
+              let enforce = cfg?.require_cla === true;
+      
+              // Fine-grained map wins
+              if (cfg?.repos && Object.prototype.hasOwnProperty.call(cfg.repos, repoName)) {
+                const v = cfg.repos[repoName]?.require_cla;
+                if (typeof v === 'boolean') enforce = v;
+              } else {
+                // Fallback to simple lists
+                if (Array.isArray(cfg?.non_permissive_repos) && cfg.non_permissive_repos.includes(repoName)) enforce = true;
+                if (Array.isArray(cfg?.permissive_repos) && cfg.permissive_repos.includes(repoName)) enforce = false;
+              }
+              return enforce;
+            }
+      
+            const repoName = context.repo.repo;
+            const enforce = repoRequiresCLA(cfg, org, repoName);
+      
+            // If this repo is permissive, expose outputs and exit early
+            if (!enforce) {
+              core.setOutput('policy_enforce', 'false');
+              core.setOutput('allow', 'true');
+              core.setOutput('reason', `permissive_repo:${repoName}`);
+              return;
+            }
+      
+            // Mark that enforcement is active; continue with allowlist checks below
+            core.setOutput('policy_enforce', 'true');
+
             if (!allow && Array.isArray(cfg.teams) && cfg.teams.length) {
               try {
                 const { data: teams } = await github.rest.teams.listForUserInOrg({ org, username: actor });
@@ -243,7 +273,7 @@ jobs:
             core.info(`✅ CLA not required (allowlisted: ${{ steps.allow.outputs.reason }})`);
 
       - name: CLA Assistant Lite
-        if: ${{ steps.allow.outputs.allow != 'true' }}
+        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' }}
         uses: contributor-assistant/github-action@v2.6.1
         with:
           path-to-signatures: ${{ inputs.signature_file_path }}
