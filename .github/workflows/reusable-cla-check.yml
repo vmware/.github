@@ -362,6 +362,7 @@ jobs:
         # run the assistant if (A) we must enforce CLA and the actor isn’t allowlisted
         # OR (B) we’re permissive but DCO is required for this actor.
         if: ${{ (steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true') || steps.allow.outputs.need_dco == 'true' }}
+        continue-on-error: true
         uses: contributor-assistant/github-action@v2.6.1
         with:
           path-to-signatures: ${{ inputs.signature_file_path }}
@@ -376,3 +377,35 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # For writing signatures into <org>/.github (cross-repo write from fork).
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+
+      - name: Assert CLA satisfied (turn job green when signed)
+        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.GH_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const prNum = context.payload.pull_request?.number;
+            if (!prNum) { core.setFailed('No PR number'); return; }
+      
+            // 1) If assistant reported success in this run, we’re done.
+            if ('${{ steps.cla_assistant.outcome }}' === 'success') {
+              core.info('Assistant outcome = success');
+              return;
+            }
+      
+            // 2) Otherwise, look for the bot’s success comment (fork-safe path).
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNum, per_page: 100 });
+            const BOT_USER_ID = 418; // github-actions[bot]
+            const ok = comments.some(c =>
+              c.user?.id === BOT_USER_ID &&
+              /all contributors have signed the cla/i.test(c.body || '') &&
+              new Date(c.created_at) >= new Date('${{ github.run_started_at }}')
+            );
+      
+            if (ok) {
+              core.info('Found assistant success comment after this run started → treating as satisfied.');
+            } else {
+              core.setFailed('CLA not satisfied yet (no assistant success found for this commit/PR).');
+            }
