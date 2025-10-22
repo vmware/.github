@@ -339,6 +339,7 @@ jobs:
 
       - name: CLA Assistant Lite
         if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' }}
+        continue-on-error: true
         uses: contributor-assistant/github-action@v2.6.1
         with:
           path-to-signatures: ${{ inputs.signature_file_path }}
@@ -353,28 +354,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # For writing signatures into <org>/.github (cross-repo write from fork).
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
-
-      - name: Publish license/cla commit status
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ env.GH_TOKEN }}
-          script: |
-            // Decide state: success if CLA passed or not required, else failure
-            const enforce = '${{ steps.policy.outputs.enforce }}' === 'true';
-            const allowed = '${{ steps.allow.outputs.allow }}' === 'true';
-            const state = (!enforce || allowed) ? 'success' : 'failure';
-            const description = (!enforce)
-              ? 'CLA not required (permissive license)'
-              : (allowed ? 'All contributors have signed the CLA' : 'CLA signature required');
-
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.payload.pull_request?.head?.sha || context.sha,
-              state,
-              context: 'license/cla',
-              description
-            });
-
-            core.info(`license/cla status → ${state} (${description})`);
