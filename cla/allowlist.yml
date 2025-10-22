@@ -1,23 +1,73 @@
-version: 1
-org_members: true        # if true, any org member skips CLA
-teams:
-#  - eng/maintainers
-#  - docs/reviewers
+
+# .github/cla/allowlist.yml
+# Purpose: (A) workflow overrides for CLA/DCO, (B) license overrides for requires_cla.py
+
+# -----------------------------
+# A) WORKFLOW OVERRIDES (used by reusable-cla-check.yml)
+# -----------------------------
+
+# If true, any org member is treated as allowed (no CLA/DCO gate).
+org_members: true
+
+# Run DCO on permissive repos?
+#   off            -> never run assistant on permissive repos
+#   external_only  -> run assistant (DCO mode) for non-members only
+#   all            -> run assistant (DCO mode) for everyone
+dco_on_permissive: external_only
+
+# GitHub logins that always skip the gate (case-insensitive)
+# users:
+#   - alice-ext
+#   - bob-consultant
+
+# Bot accounts that always skip the gate
 bots:
   - dependabot[bot]
   - github-actions[bot]
-users:
- # - alice-ext
- # - bob-consultant
-emails:
-  - "@broadcom.com"         # any verified email ending with this domain
-temp_exemptions:
- # - login: carol-temp
- #   until: "2025-12-31"
- #   reason: "Partner pilot"
+
+# Teams whose members always skip the gate.
+# Accepts "org/team" or bare "team" (interpreted as <current-org>/team).
+# teams:
+#   - myorg/maintainers
+#   - release-engineering
+
+# Optional global exemption window (everyone is allowed during this period).
+# ISO 8601 timestamps; end is inclusive to the minute.
+#temporary_exemptions:
+#  start: 2025-12-30T00:00:00Z
+#  end:   2025-12-31T23:59:59Z
+#  reason: "Partner pilot"
+
+# -----------------------------
+# B) LICENSE POLICY OVERRIDES (used by requires_cla.py)
+# -----------------------------
+# Base truth for permissive/non-permissive comes from:
+#   data/permissive.json + data/licenses_all.json
+# The keys below *override* that base decision.
 license_overrides:
+
+  # Treat the listed SPDX (or LicenseRef) identifiers as *requiring CLA*,
+  # even if the base tables list them as permissive.
+  # Supports exact IDs and simple '*' wildcards (handled by requires_cla.py).
   require_cla:
     - LicenseRef-Broadcom_Source_Available
-#  allow_dco:
-#rules:
-  # require_dco_for_externals: true
+    - LicenseRef-Broadcom*
+    # (add more as needed)
+
+  # (Optional) Treat specific IDs as permissive (force allow), even if base says otherwise.
+  # Only use this if you intend to *downgrade* certain licenses to permissive.
+#  permissive:
+
+  # (Optional) Per-repo overrides. Keys can be "<owner>/<repo>" or just "<repo>".
+  # Useful when the detector result needs correction or you want to force policy.
+#  repos:
+#    myorg/special-repo:
+#      require_cla: true           # force enforcement for this repo
+      # force_spdx: "MIT"         # pretend this is the detected license (rarely needed)
+#    docs-site:
+#      require_cla: false          # force permissive for this repo
+
+  # (Optional) Normalize odd/legacy license IDs to canonical SPDX before evaluation.
+  # The left side is what the detector finds; the right side is the canonical ID.
+#  spdx_aliases:
+#    "LicenseRef-BSA": "LicenseRef-Broadcom_Source_Available"
