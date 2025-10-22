@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "rexracer23",
+      "id": 239053532,
+      "comment_id": 3433281548,
+      "created_at": "2025-10-22T16:40:50Z",
+      "repoId": 921107922,
+      "pullRequestNo": 55
+    }
+  ]
 }
