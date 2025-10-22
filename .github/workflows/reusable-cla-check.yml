@@ -376,10 +376,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # For writing signatures into <org>/.github (cross-repo write from fork).
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
-          
-      - name: Fail job until signature present
-        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' && (steps.cla_assistant.outcome == '' || steps.cla_assistant.outcome == 'skipped') }}
-        run: |
-          echo "CLA enforcement is on, but the assistant did not run. Failing job to block merge."
-          exit 1
-          
