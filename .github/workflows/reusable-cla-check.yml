@@ -362,7 +362,6 @@ jobs:
         # run the assistant if (A) we must enforce CLA and the actor isn’t allowlisted
         # OR (B) we’re permissive but DCO is required for this actor.
         if: ${{ (steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true') || steps.allow.outputs.need_dco == 'true' }}
-        continue-on-error: true
         uses: contributor-assistant/github-action@v2.6.1
         with:
           path-to-signatures: ${{ inputs.signature_file_path }}
@@ -378,107 +377,9 @@ jobs:
           # For writing signatures into <org>/.github (cross-repo write from fork).
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
           
-      - name: Satisfy ruleset when assistant won’t run (publish license/cla success)
-        # Write a success status only when:
-        #   - license policy is permissive AND DCO is not required for this actor, OR
-        #   - the actor was allowlisted (members/users/teams/temp/sign-by-comment)
-        if: ${{ (steps.policy.outputs.enforce != 'true' && steps.allow.outputs.need_dco != 'true') || steps.allow.outputs.allow == 'true' }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ env.GH_TOKEN }}
-          script: |
-            const owner = context.repo.owner;
-            const repo  = context.repo.repo;
-            const sha   = context.payload.pull_request?.head?.sha || context.sha;
-
-            const policyEnforce = '${{ steps.policy.outputs.enforce }}' === 'true';
-            const allowed       = '${{ steps.allow.outputs.allow }}' === 'true';
-
-            const state = 'success';
-            const description = !policyEnforce
-              ? 'CLA not required (permissive license)'
-              : 'All contributors have signed the CLA';
-
-            await github.rest.repos.createCommitStatus({
-              owner, repo, sha,
-              state,
-              context: 'license/cla',
-              description
-            });
-
-            core.info(`license/cla → ${state} (${description}) for ${owner}/${repo}@${sha}`);
-
-      - name: Backfill license/cla if assistant reported success but no status exists
-        # Only in enforced cases (assistant should run) and when the user wasn’t allowlisted
-        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ env.GH_TOKEN }}
-          script: |
-            const owner = context.repo.owner;
-            const repo  = context.repo.repo;
-            const prNum = context.payload.pull_request?.number;
-            const sha   = context.payload.pull_request?.head?.sha || context.sha;
-
-            // 0) Ensure the assistant step actually ran in this job
-            const assistantRan = '${{ steps.cla_assistant_lite.outcome || '' }}' !== '' || true; // fallback: step id may differ
-            // If you named the step "CLA Assistant Lite" with id 'cla', use: steps.cla.outcome
-            // If you didn't set an id, leave as-is; we still rely on bot comment + timestamps.
-
-            // 1) If license/cla status already exists → nothing to do
-            const { data: st } = await github.rest.repos.listCommitStatusesForRef({ owner, repo, ref: sha, per_page: 100 });
-            if (st.some(s => s.context === 'license/cla')) {
-              core.info('license/cla already present → skip backfill');
-              return;
-            }
-
-            if (!prNum) { core.info('No PR number found; skip backfill'); return; }
-
-            // 2) Gather PR comments (we’ll look for both the signer’s comment and the bot’s success)
-            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNum, per_page: 100 });
-
-            // 2a) Find the latest “sign by comment” from the PR author (optional but strengthens ordering)
-            const prAuthor = context.payload.pull_request?.user?.login?.toLowerCase();
-            const signPhrase = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1); // unquote
-            const authorSign = comments
-              .filter(c => (c.user?.login || '').toLowerCase() === prAuthor)
-              .filter(c => (c.body || '').includes(signPhrase))
-              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
-
-            // 2b) Find the CLA Assistant Lite success comment from github-actions[bot] (id=418)
-            const SUCCESS_RE = /all contributors have signed the cla/i;
-            const BOT_USER_ID = 418;
-            const assistantSuccess = comments
-              .filter(c => c.user?.id === BOT_USER_ID)
-              .filter(c => SUCCESS_RE.test(c.body || ''))
-              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
-
-            if (!assistantSuccess) {
-              core.info('No assistant success comment found → do not backfill');
-              return;
-            }
-
-            // 3) Order-of-events checks to reduce false positives
-            const jobStartedAt = new Date('${{ github.run_started_at }}');
-            const successAt = new Date(assistantSuccess.created_at);
-            if (successAt < jobStartedAt) {
-              core.info(`Assistant success comment (${assistantSuccess.created_at}) predates this run → skip backfill`);
-              return;
-            }
-            if (authorSign) {
-              const signAt = new Date(authorSign.created_at);
-              if (successAt < signAt) {
-                core.info(`Assistant success (${assistantSuccess.created_at}) predates signer comment (${authorSign.created_at}) → skip backfill`);
-                return;
-              }
-            }
-
-            // 4) Everything checks out → publish green status to satisfy the ruleset
-            await github.rest.repos.createCommitStatus({
-              owner, repo, sha,
-              state: 'success',
-              context: 'license/cla',
-              description: 'All contributors have signed the CLA'
-            });
-            core.info(`Backfilled license/cla → success for ${owner}/${repo}@${sha}`);
-            
+      - name: Fail job until signature present
+        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' && (steps.cla_assistant.outcome == '' || steps.cla_assistant.outcome == 'skipped') }}
+        run: |
+          echo "CLA enforcement is on, but the assistant did not run. Failing job to block merge."
+          exit 1
+          
