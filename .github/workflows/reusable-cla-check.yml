@@ -302,7 +302,7 @@ jobs:
               needDco = !isMember;
             }
             // If already allowlisted (users/bots/teams/temp/comment-sign), DCO not needed.
-            if (allow) needDco = false;
+            if (allow) needDco = false; // allowlisted → no DCO
             
             // Publish for downstream if/conditions
             core.setOutput('need_dco', needDco ? 'true' : 'false');
@@ -377,3 +377,33 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # For writing signatures into <org>/.github (cross-repo write from fork).
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CONTRIBUTOR_ASSISTANT_PAT }}
+          
+      - name: Satisfy ruleset when assistant won’t run (publish license/cla success)
+        # Write a success status only when:
+        #   - license policy is permissive AND DCO is not required for this actor, OR
+        #   - the actor was allowlisted (members/users/teams/temp/sign-by-comment)
+        if: ${{ (steps.policy.outputs.enforce != 'true' && steps.allow.outputs.need_dco != 'true') || steps.allow.outputs.allow == 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.GH_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const sha   = context.payload.pull_request?.head?.sha || context.sha;
+
+            const policyEnforce = '${{ steps.policy.outputs.enforce }}' === 'true';
+            const allowed       = '${{ steps.allow.outputs.allow }}' === 'true';
+
+            const state = 'success';
+            const description = !policyEnforce
+              ? 'CLA not required (permissive license)'
+              : 'All contributors have signed the CLA';
+
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              state,
+              context: 'license/cla',
+              description
+            });
+
+            core.info(`license/cla → ${state} (${description}) for ${owner}/${repo}@${sha}`);
