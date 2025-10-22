@@ -386,26 +386,69 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo  = context.repo.repo;
-            const prNum = context.payload.pull_request?.number;
-            if (!prNum) { core.setFailed('No PR number'); return; }
+            const pr    = context.payload.pull_request;
+            if (!pr) { core.setFailed('No pull request payload'); return; }
       
-            // 1) If assistant reported success in this run, we’re done.
-            if ('${{ steps.cla_assistant.outcome }}' === 'success') {
-              core.info('Assistant outcome = success');
+            // If the assistant step itself succeeded, accept immediately.
+            if ('${{ steps.cla_assistant.outcome || '' }}' === 'success') {
+              core.info('Assistant outcome=success → passing');
               return;
             }
       
-            // 2) Otherwise, look for the bot’s success comment (fork-safe path).
-            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNum, per_page: 100 });
-            const BOT_USER_ID = 418; // github-actions[bot]
-            const ok = comments.some(c =>
-              c.user?.id === BOT_USER_ID &&
-              /all contributors have signed the cla/i.test(c.body || '') &&
-              new Date(c.created_at) >= new Date('${{ github.run_started_at }}')
-            );
+            const prNum = pr.number;
+            const prAuthor = (pr.user?.login || '').toLowerCase();
+            const headSha = pr.head?.sha;
+            if (!headSha) { core.setFailed('No head SHA on PR'); return; }
       
-            if (ok) {
-              core.info('Found assistant success comment after this run started → treating as satisfied.');
-            } else {
-              core.setFailed('CLA not satisfied yet (no assistant success found for this commit/PR).');
+            // Fetch current head commit timestamp
+            const { data: headCommit } = await github.rest.repos.getCommit({ owner, repo, ref: headSha });
+            const headAt = new Date(headCommit.commit?.committer?.date || headCommit.commit?.author?.date || pr.updated_at);
+            core.info(`Head @ ${headAt.toISOString()} (sha ${headSha.slice(0,7)})`);
+      
+            // Pull all comments
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNum, per_page: 100 });
+      
+            // Latest author sign comment (if using sign-by-comment)
+            const SIGN = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1);
+            const authorSigns = comments
+              .filter(c => (c.user?.login || '').toLowerCase() === prAuthor)
+              .filter(c => (c.body || '').includes(SIGN))
+              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            const latestSignAt = authorSigns.length ? new Date(authorSigns[0].created_at) : null;
+      
+            // Latest CLA Assistant Lite success comment from github-actions[bot]
+            const BOT_USER_ID = 418;
+            const successComments = comments
+              .filter(c => c.user?.id === BOT_USER_ID)
+              .filter(c => /all contributors have signed the cla/i.test(c.body || ''))
+              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            const success = successComments[0];
+      
+            if (!success) {
+              core.setFailed('CLA not satisfied yet (no assistant success comment found).');
+              return;
             }
+      
+            const successAt = new Date(success.created_at);
+      
+            // Acceptance gates:
+            // 1) success must be after the current head commit time
+            if (successAt < headAt) {
+              core.setFailed(`Assistant success (${successAt.toISOString()}) predates current head (${headAt.toISOString()}).`);
+              return;
+            }
+      
+            // 2) if using sign-by-comment, success must be after the latest sign phrase from the author
+            if (latestSignAt && successAt < latestSignAt) {
+              core.setFailed(`Assistant success (${successAt.toISOString()}) predates latest sign (${latestSignAt.toISOString()}).`);
+              return;
+            }
+      
+            // 3) optional freshness TTL to avoid extremely stale approvals on long-lived PRs
+            const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+            if ((Date.now() - successAt.getTime()) > SIX_HOURS_MS) {
+              core.setFailed(`Assistant success is too old (${Math.round((Date.now() - successAt)/1000)}s); ask contributor to comment 'recheck'.`);
+              return;
+            }
+      
+            core.info('CLA satisfied for current head → passing');
