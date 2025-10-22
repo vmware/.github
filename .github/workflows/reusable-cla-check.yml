@@ -286,6 +286,27 @@ jobs:
             let allow = inSet(botSet, actor) || inSet(userSet, actor);
             let reason = allow ? 'explicit user/bot' : '';
 
+            // --- DCO on permissive repos ---
+            // Read optional DCO policy from allowlist:
+            //   dco_on_permissive: "off" | "external_only" | "all"
+            // Defaults to "off" if absent.
+            const dcoMode = (cfg?.dco_on_permissive || 'off').toLowerCase(); // off | external_only | all
+            
+            // We already computed isMember above. If you don't have it, derive it here:
+            // let isMember = false; try { await github.rest.orgs.checkMembershipForUser({ org, username: actor }); isMember = true; } catch {}
+            
+            let needDco = false;
+            if (dcoMode === 'all') {
+              needDco = true;
+            } else if (dcoMode === 'external_only') {
+              needDco = !isMember;
+            }
+            // If already allowlisted (users/bots/teams/temp/comment-sign), DCO not needed.
+            if (allow) needDco = false;
+            
+            // Publish for downstream if/conditions
+            core.setOutput('need_dco', needDco ? 'true' : 'false');
+
             // Bridge: only the earlier license-policy step decides enforcement.
             // Do NOT return here; the separate "Skip — permissive by license policy" step already exits early.
             const policyEnforce = '${{ steps.policy.outputs.enforce }}' === 'true';
@@ -338,7 +359,9 @@ jobs:
             core.info(`✅ CLA not required (allowlisted: ${{ steps.allow.outputs.reason }})`);
 
       - name: CLA Assistant Lite
-        if: ${{ steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true' }}
+        # run the assistant if (A) we must enforce CLA and the actor isn’t allowlisted
+        # OR (B) we’re permissive but DCO is required for this actor.
+        if: ${{ (steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true') || steps.allow.outputs.need_dco == 'true' }}
         continue-on-error: true
         uses: contributor-assistant/github-action@v2.6.1
         with:
