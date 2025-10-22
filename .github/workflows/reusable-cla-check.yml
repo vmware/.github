@@ -359,6 +359,7 @@ jobs:
             core.info(`✅ CLA not required (allowlisted: ${{ steps.allow.outputs.reason }})`);
 
       - name: CLA Assistant Lite
+        id: cla_assistant
         # run the assistant if (A) we must enforce CLA and the actor isn’t allowlisted
         # OR (B) we’re permissive but DCO is required for this actor.
         if: ${{ (steps.allow.outputs.policy_enforce == 'true' && steps.allow.outputs.allow != 'true') || steps.allow.outputs.need_dco == 'true' }}
