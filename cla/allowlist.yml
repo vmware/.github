@@ -24,6 +24,7 @@ dco_on_permissive: external_only
 bots:
   - dependabot[bot]
   - github-actions[bot]
+  - normansden
 
 # Teams whose members always skip the gate.
 # Accepts "org/team" or bare "team" (interpreted as <current-org>/team).
