@@ -392,7 +392,7 @@ jobs:
       
             core.info(`DEBUG → PR#${pr.number} by ${pr.user?.login}; runStarted=${{ toJson(github.run_started_at) }}`);
       
-            // 0) If assistant step succeeded, pass immediately.
+            // 0) If the assistant step itself succeeded, accept immediately.
             const outcome = '${{ steps.cla_assistant.outcome || '' }}';
             core.info(`DEBUG → Assistant outcome='${outcome}'`);
             if (outcome === 'success') {
@@ -400,10 +400,27 @@ jobs:
               return;
             }
       
-            const prNum = pr.number;
+            const prNum    = pr.number;
             const prAuthor = (pr.user?.login || '').toLowerCase();
       
-            // Helper: get latest commit timestamp on this PR (works for forks)
+            // --- INSERTED "normalize + debug" SNIPPET: place it RIGHT HERE ---
+            // (After line: the two consts directly above: prNum and prAuthor)
+      
+            // Normalize sign phrase: trim, lowercase, collapse whitespace (incl. NBSP)
+            function normalize(s) {
+              return (s || '')
+                .replace(/\u00A0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+            }
+      
+            const SIGN_RAW  = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1);
+            const SIGN_NORM = normalize(SIGN_RAW);
+            core.info(`DEBUG → sign phrase length=${SIGN_RAW.length}, norm='${SIGN_NORM}'`);
+            // ---------------------------------------------------------------
+      
+            // Helper: latest commit timestamp on this PR (works for forks)
             async function getLastCommitInfo() {
               const commits = await github.paginate(github.rest.pulls.listCommits, {
                 owner, repo, pull_number: prNum, per_page: 100
@@ -414,21 +431,16 @@ jobs:
               return { sha: last.sha, at: lastAt };
             }
       
-            // Tolerant sign matcher
-            const SIGN_RAW = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1);
-            const SIGN = (SIGN_RAW || '').trim().toLowerCase();
-            core.info(`DEBUG → SIGN len=${SIGN.length}`);
-      
             function findSignals(comments, lastAt) {
               // Latest author sign (if used)
               const signs = comments
                 .filter(c => (c.user?.login || '').toLowerCase() === prAuthor)
-                .filter(c => SIGN ? (c.body || '').toLowerCase().includes(SIGN) : false)
+                .filter(c => SIGN_NORM ? normalize(c.body).includes(SIGN_NORM) : false)
                 .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
               const latestSignAt = signs.length ? new Date(signs[0].created_at) : null;
       
-              // Latest assistant success
-              const BOT_ID = 418; // github-actions[bot]
+              // Latest CLA Assistant Lite success from github-actions[bot] (id 418)
+              const BOT_ID = 418;
               const successes = comments
                 .filter(c => c.user?.id === BOT_ID)
                 .filter(c => /all contributors have signed the cla/i.test(c.body || ''))
@@ -443,10 +455,9 @@ jobs:
               return { latestSignAt, successAt };
             }
       
-            // Poll for the assistant’s success comment to appear (race on fork PRs)
-            const maxTries = 10;          // ~60s max
+            // Poll for the assistant’s success comment (fork race)
+            const maxTries = 10;        // ~60s total
             const sleepMs  = 6000;
-      
             let ok = false;
             let lastInfo = null;
       
@@ -459,13 +470,16 @@ jobs:
                 owner, repo, issue_number: prNum, per_page: 100
               });
       
+              // Optional peek at first few comments for debugging
+              core.info(`DEBUG → sample comments:`);
+              comments.slice(0,3).forEach((c,i) =>
+                core.info(`  [${i}] ${c.user?.login}: '${normalize(c.body).slice(0,80)}'`));
+      
               const { latestSignAt, successAt } = findSignals(comments, last.at);
       
               if (successAt) {
-                // Accept only if success is after last commit AND (if present) after latest sign
                 const afterCommit = successAt >= last.at;
                 const afterSign   = !latestSignAt || successAt >= latestSignAt;
-      
                 core.info(`DEBUG → afterCommit=${afterCommit} afterSign=${afterSign}`);
                 if (afterCommit && afterSign) { ok = true; break; }
               }
