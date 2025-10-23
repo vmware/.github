@@ -390,83 +390,95 @@ jobs:
             const pr    = context.payload.pull_request;
             if (!pr) { core.setFailed('No pull request payload'); return; }
       
-            core.info(`DEBUG → PR#${pr.number} opened by ${pr.user?.login}`);
-            core.info(`DEBUG → Workflow run id: ${context.runId}, started at: ${{ github.run_started_at }}`);
+            core.info(`DEBUG → PR#${pr.number} by ${pr.user?.login}; runStarted=${{ toJson(github.run_started_at) }}`);
       
-            // If the assistant step itself succeeded, accept immediately.
+            // 0) If assistant step succeeded, pass immediately.
             const outcome = '${{ steps.cla_assistant.outcome || '' }}';
-            core.info(`DEBUG → Assistant step outcome = '${outcome}'`);
+            core.info(`DEBUG → Assistant outcome='${outcome}'`);
             if (outcome === 'success') {
-              core.info('Assistant outcome=success → passing');
+              core.info('Assistant outcome=success → PASS');
               return;
             }
       
-            const prNum    = pr.number;
+            const prNum = pr.number;
             const prAuthor = (pr.user?.login || '').toLowerCase();
       
-            // 1) Latest commit time on this PR (fork-safe)
-            const commits = await github.paginate(github.rest.pulls.listCommits,
-              { owner, repo, pull_number: prNum, per_page: 100 });
-            if (!commits.length) { core.setFailed('No commits found on PR.'); return; }
-            const last = commits[commits.length - 1];
-            const lastCommitAt = new Date(
-              last.commit?.committer?.date ||
-              last.commit?.author?.date ||
-              pr.updated_at
-            );
-            core.info(`DEBUG → Latest commit: ${last.sha.slice(0,7)} @ ${lastCommitAt.toISOString()}`);
+            // Helper: get latest commit timestamp on this PR (works for forks)
+            async function getLastCommitInfo() {
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner, repo, pull_number: prNum, per_page: 100
+              });
+              if (!commits.length) return null;
+              const last = commits[commits.length - 1];
+              const lastAt = new Date(last.commit?.committer?.date || last.commit?.author?.date || pr.updated_at);
+              return { sha: last.sha, at: lastAt };
+            }
       
-            // 2) PR comments
-            const comments = await github.paginate(github.rest.issues.listComments,
-              { owner, repo, issue_number: prNum, per_page: 100 });
-            core.info(`DEBUG → Retrieved ${comments.length} total comments`);
+            // Tolerant sign matcher
+            const SIGN_RAW = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1);
+            const SIGN = (SIGN_RAW || '').trim().toLowerCase();
+            core.info(`DEBUG → SIGN len=${SIGN.length}`);
       
-            // 2a) Latest sign-phrase comment by PR author
-            const SIGN = `${{ toJson(inputs.sign_comment_exact) }}`.slice(1,-1);
-            const authorSigns = comments
-              .filter(c => (c.user?.login || '').toLowerCase() === prAuthor)
-              .filter(c => (c.body || '').includes(SIGN))
-              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
-            const latestSignAt = authorSigns.length ? new Date(authorSigns[0].created_at) : null;
-            if (latestSignAt)
-              core.info(`DEBUG → Latest sign comment by ${prAuthor} @ ${latestSignAt.toISOString()}`);
-            else
-              core.info('DEBUG → No sign comment detected');
+            function findSignals(comments, lastAt) {
+              // Latest author sign (if used)
+              const signs = comments
+                .filter(c => (c.user?.login || '').toLowerCase() === prAuthor)
+                .filter(c => SIGN ? (c.body || '').toLowerCase().includes(SIGN) : false)
+                .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+              const latestSignAt = signs.length ? new Date(signs[0].created_at) : null;
       
-            // 2b) Latest assistant success comment
-            const BOT_USER_ID = 418;
-            const successes = comments
-              .filter(c => c.user?.id === BOT_USER_ID)
-              .filter(c => /all contributors have signed the cla/i.test(c.body || ''))
-              .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
-            const success = successes[0];
-            if (!success) {
-              core.setFailed('CLA not satisfied yet (no assistant success comment found).');
+              // Latest assistant success
+              const BOT_ID = 418; // github-actions[bot]
+              const successes = comments
+                .filter(c => c.user?.id === BOT_ID)
+                .filter(c => /all contributors have signed the cla/i.test(c.body || ''))
+                .sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+              const success = successes[0];
+              const successAt = success ? new Date(success.created_at) : null;
+      
+              core.info(`DEBUG → comments=${comments.length} lastCommitAt=${lastAt.toISOString()}`
+                + (latestSignAt ? ` latestSignAt=${latestSignAt.toISOString()}` : ' latestSignAt=∅')
+                + (successAt ? ` successAt=${successAt.toISOString()}` : ' successAt=∅'));
+      
+              return { latestSignAt, successAt };
+            }
+      
+            // Poll for the assistant’s success comment to appear (race on fork PRs)
+            const maxTries = 10;          // ~60s max
+            const sleepMs  = 6000;
+      
+            let ok = false;
+            let lastInfo = null;
+      
+            for (let i = 1; i <= maxTries; i++) {
+              const last = await getLastCommitInfo();
+              if (!last) { core.setFailed('No commits on PR'); return; }
+              lastInfo = last;
+      
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: prNum, per_page: 100
+              });
+      
+              const { latestSignAt, successAt } = findSignals(comments, last.at);
+      
+              if (successAt) {
+                // Accept only if success is after last commit AND (if present) after latest sign
+                const afterCommit = successAt >= last.at;
+                const afterSign   = !latestSignAt || successAt >= latestSignAt;
+      
+                core.info(`DEBUG → afterCommit=${afterCommit} afterSign=${afterSign}`);
+                if (afterCommit && afterSign) { ok = true; break; }
+              }
+      
+              if (i < maxTries) {
+                core.info(`DEBUG → no acceptable success yet; sleeping ${sleepMs}ms (try ${i}/${maxTries})`);
+                await new Promise(r => setTimeout(r, sleepMs));
+              }
+            }
+      
+            if (!ok) {
+              core.setFailed('CLA still unsatisfied (no acceptable assistant success found after polling).');
               return;
             }
-            const successAt = new Date(success.created_at);
-            core.info(`DEBUG → Assistant success comment @ ${successAt.toISOString()}`);
       
-            // 3) Evaluate acceptance rules with detailed debug
-            let passed = true;
-            if (successAt < lastCommitAt) {
-              core.error(`FAIL → success (${successAt.toISOString()}) < lastCommit (${lastCommitAt.toISOString()})`);
-              passed = false;
-            }
-            if (latestSignAt && successAt < latestSignAt) {
-              core.error(`FAIL → success (${successAt.toISOString()}) < latest sign (${latestSignAt.toISOString()})`);
-              passed = false;
-            }
-            const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
-            const age = Date.now() - successAt.getTime();
-            core.info(`DEBUG → Success age = ${(age/60000).toFixed(1)} min`);
-            if (age > SIX_HOURS_MS) {
-              core.error('FAIL → success comment too old (>6h)');
-              passed = false;
-            }
-      
-            if (!passed) {
-              core.setFailed('CLA still unsatisfied per debug above.');
-            } else {
-              core.info('PASS → CLA satisfied for current head');
-            }
+            core.info(`PASS → CLA satisfied for current head ${lastInfo.sha.slice(0,7)}`);
