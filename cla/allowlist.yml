@@ -16,15 +16,14 @@ org_members: true
 dco_on_permissive: external_only
 
 # GitHub logins that always skip the gate (case-insensitive)
-# users:
-#   - alice-ext
+users:
+   - normansden
 #   - bob-consultant
 
 # Bot accounts that always skip the gate
 bots:
   - dependabot[bot]
   - github-actions[bot]
-  - normansden
 
 # Teams whose members always skip the gate.
 # Accepts "org/team" or bare "team" (interpreted as <current-org>/team).
