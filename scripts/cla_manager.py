@@ -18,7 +18,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 # ----------------------------- Config -----------------------------------------
-TARGET_STUB_VERSION = "12"
+TARGET_STUB_VERSION = "13"
 STUB_PATH = ".github/workflows/cla-check-trigger.yml"
 WORK_BRANCH = "automation/cla-stub"
 DEFAULT_EXCLUDES = [".github", ".github-*", "security", "security-*", "admin", "admin-*"]
@@ -261,19 +261,32 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
-# Keep the stub minimal; the reusable owns permissions & concurrency
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  statuses: write
-  actions: read
-
+≈
 jobs:
   cla:
     name: Call reusable CLA checker
+    # run on PRs, or when a signing comment *or* recheck is posted
+    if: >
+      ${{
+        github.event_name == 'pull_request_target' ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          (
+            contains(github.event.comment.body, {{ sign_comment_exact | tojson }}) ||
+            startsWith(github.event.comment.body, 'recheck') ||
+            startsWith(github.event.comment.body, '/recheck')
+          )
+        )
+      }}
+   permissions:
+        contents: read
+        pull-requests: write
+        issues: write
+        statuses: write
+        actions: read
     uses: {owner}/.github/.github/workflows/reusable-cla-check.yml@{reusable_ref}
     with:
       allowlist_branch: "{allowlist_branch}"
