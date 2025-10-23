@@ -60,9 +60,9 @@ license_overrides:
 
   # (Optional) Per-repo overrides. Keys can be "<owner>/<repo>" or just "<repo>".
   # Useful when the detector result needs correction or you want to force policy.
-#  repos:
-#    myorg/special-repo:
-#      require_cla: true           # force enforcement for this repo
+  repos:
+    vmware/.github:
+      require_cla: false           # force enforcement for this repo
       # force_spdx: "MIT"         # pretend this is the detected license (rarely needed)
 #    docs-site:
 #      require_cla: false          # force permissive for this repo
