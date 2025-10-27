@@ -268,17 +268,16 @@ jobs:
     name: Call reusable CLA checker
     # run on PRs, or when a signing comment *or* recheck is posted
     if: >
-      ${{
-        github.event_name == 'pull_request_target' ||
-        (
-          github.event_name == 'issue_comment' &&
-          github.event.issue.pull_request &&
+      ${{ github.event_name == 'pull_request_target' ||
           (
-            contains(github.event.comment.body, {{ sign_comment_exact | tojson }}) ||
-            startsWith(github.event.comment.body, 'recheck') ||
-            startsWith(github.event.comment.body, '/recheck')
+            github.event_name == 'issue_comment' &&
+            github.event.issue.pull_request &&
+            (
+              contains(github.event.comment.body, {{ sign_comment_exact | tojson }}) ||
+              startsWith(github.event.comment.body, 'recheck') ||
+              startsWith(github.event.comment.body, '/recheck')
+            )
           )
-        )
       }}
    permissions:
         contents: read
