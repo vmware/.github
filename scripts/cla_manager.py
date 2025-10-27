@@ -263,7 +263,6 @@ on:
   issue_comment:
     types: [created, edited]
 
-≈
 jobs:
   cla:
     name: Call reusable CLA checker
