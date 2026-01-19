@@ -1,0 +1,75 @@
+name: Legal Compliance Gate
+
+on:
+  pull_request:
+    # Trigger on Open, Re-open, and Sync (new commits)
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-policy:
+    name: Enforce CLA/DCO
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write       # To re-trigger if needed (rare)
+      contents: read       # To read repo contents
+      pull-requests: write # To post comments ("Please sign...")
+      statuses: write      # To set commit status
+      checks: write
+
+    steps:
+      # 1. Checkout the Organization's .github repo
+      # We need this to get the python scripts and to read/write signatures
+      - name: Checkout Org Tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/.github
+          path: .github-tools
+          sparse-checkout: |
+            scripts
+            signatures
+
+      # 2. Setup Python environment for your scripts
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install aiohttp rapidfuzz pyyaml
+        # These match the imports in requires_cla.py
+
+      # 3. Run Policy Selector (Membership Check + License Detection)
+      - name: Determine Policy & Check Membership
+        id: policy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Ensure Python finds your scripts
+          PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
+        run: python .github-tools/scripts/policy_selector.py
+
+      # 4. Enforce Policy (CLA Assistant Lite)
+      # SKIPS if user is an Org Member (bypass=true)
+      - name: Enforce ${{ steps.policy.outputs.mode }}
+        if: steps.policy.outputs.bypass != 'true'
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT required to write signatures to the central .github repo
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }}
+        with:
+          # Dynamic Inputs from Python Script
+          path-to-signatures: ${{ steps.policy.outputs.signature_path }}
+          path-to-document: ${{ steps.policy.outputs.document_url }}
+          
+          # Centralized Storage Config
+          remote-organization-name: ${{ github.repository_owner }}
+          remote-repository-name: '.github'
+          branch: 'main'
+          
+          # Custom Sign Message based on Mode (CLA vs DCO)
+          custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
+          
+          # Empty allowlist because we handled membership in Python
+          allowlist: 'dependabot[bot],github-actions[bot]'
