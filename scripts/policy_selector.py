@@ -7,44 +7,47 @@ import urllib.error
 # Add the directory containing your uploaded scripts to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import requires_cla  # Your uploaded library
+# Try importing the library, handle failure gracefully for debugging
+try:
+    import requires_cla
+except ImportError:
+    print("::error::Could not import requires_cla.py. Check PYTHONPATH.")
+    sys.exit(1)
 
 def check_org_membership(org, user, token):
     """
     Returns True if user is a member of the org.
-    Checks with PAT first (better visibility), falls back to GITHUB_TOKEN.
     """
     if not token:
-        print("::warning::No token available for membership check.")
+        print(f"DEBUG: No token provided for membership check of {user}.")
         return False
         
     url = f"https://api.github.com/orgs/{org}/members/{user}"
-    # Use the PAT if available, otherwise GITHUB_TOKEN
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "CLA-Policy-Check"
     }
     
-    print(f"DEBUG: Checking membership for {user} in {org}...")
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req) as response:
-            if response.getcode() == 204:
-                return True
+            code = response.getcode()
+            print(f"DEBUG: Membership API for {user} returned HTTP {code}")
+            return code == 204
     except urllib.error.HTTPError as e:
-        print(f"DEBUG: Membership API returned {e.code}")
-        # 404 means "Not a member" OR "Membership is private and token can't see it"
-        pass
+        print(f"DEBUG: Membership API for {user} returned HTTP {e.code}")
+        # 404 = Not a member (or private membership hidden from token)
+        # 403 = Token permission issue
+        return False
     except Exception as e:
         print(f"DEBUG: API Error: {e}")
-        
-    return False
+        return False
 
 def main():
     # INPUTS
     gh_token = os.environ.get("GITHUB_TOKEN")
-    pat_token = os.environ.get("PAT_TOKEN") # We will pass the PAT here
+    pat_token = os.environ.get("PAT_TOKEN") 
     repo_full = os.environ.get("GITHUB_REPOSITORY")
     pr_user = os.environ.get("PR_AUTHOR")
     
@@ -56,22 +59,25 @@ def main():
 
     print(f"::group::Analyzing Policy for {repo_full} (User: {pr_user})")
 
-    # 1. CHECK MEMBERSHIP (Use PAT if possible for visibility)
-    # If PAT is missing, fall back to GH Token (which might fail for private members)
+    # 1. CHECK MEMBERSHIP
+    # Critical: Use PAT if available because GITHUB_TOKEN cannot see private members
     token_to_use = pat_token if pat_token else gh_token
-    
+    token_type = "PAT" if pat_token else "GITHUB_TOKEN"
+    print(f"DEBUG: Checking membership using {token_type}...")
+
     if check_org_membership(org_name, pr_user, token_to_use):
         print(f"✅ User @{pr_user} is a member of {org_name}. Bypassing check.")
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
             fh.write("bypass=true\n")
         sys.exit(0)
     else:
-        print(f"User @{pr_user} is NOT a member (or membership is private/hidden). Enforcing policy.")
+        print(f"User @{pr_user} is NOT a member (or token lacked permission). Enforcing policy.")
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
             fh.write("bypass=false\n")
 
     # 2. DETERMINE LICENSE POLICY
     try:
+        print(f"DEBUG: Running requires_CLA for {repo_full}...")
         # requires_cla needs a token to read the repo license
         is_strict = requires_cla.requires_CLA(repo_full, token=gh_token)
         
@@ -93,10 +99,9 @@ def main():
             
     except Exception as e:
         print(f"::error::Policy detection failed: {str(e)}")
-        # Dump environment for debugging if needed
-        # print(json.dumps(dict(os.environ), indent=2))
         sys.exit(1)
     print("::endgroup::")
 
 if __name__ == "__main__":
     main()
+    
