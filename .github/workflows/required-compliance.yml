@@ -21,7 +21,7 @@ jobs:
           repository: ${{ github.repository_owner }}/.github
           path: .github-tools
           ref: main
-          # FIX 1: Explicitly download the 'data' folder
+          # CRITICAL FIX: Ensure 'data' is downloaded for license checks
           sparse-checkout: |
             scripts
             data
@@ -40,15 +40,12 @@ jobs:
         id: policy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # FIX 2: Pass PAT for better membership visibility
+          # CRITICAL FIX: Pass the PAT so we can see Private Memberships
           PAT_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }} 
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           
-          # FIX 3: Point Python imports to the correct location
+          # Fix paths for imports and data files
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
-          
-          # FIX 4: Explicitly tell library where the data files are
-          # (requires_cla.py / license_detector.py look for these env vars)
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
           PERMISSIVE_JSON: ${{ github.workspace }}/.github-tools/data/permissive_names.json
 
@@ -66,5 +63,8 @@ jobs:
           remote-organization-name: ${{ github.repository_owner }}
           remote-repository-name: '.github'
           branch: 'main'
+          # NOTE: Instructions updated to reflect Required Workflow limitations
           custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
+          custom-notsigned-prcomment: 'Please sign the ${{ steps.policy.outputs.mode }}. To sign, comment exactly: "I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}". NOTE: After commenting, you MUST click "Re-run jobs" on this check.'
           allowlist: 'dependabot[bot],github-actions[bot]'
+          
