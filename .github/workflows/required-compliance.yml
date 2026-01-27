@@ -5,27 +5,38 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  check-policy:
-    name: Enforce CLA/DCO
+  policy-enforcement:
+    name: Check CLA/DCO
     runs-on: ubuntu-latest
     permissions:
       actions: write
       contents: read
       pull-requests: write
       statuses: write
+      checks: write
 
     steps:
-      - name: Checkout Org Tools
+      # --- AUTH STEP FOR CHECKOUT ---
+      # Generates a token to clone the Private Mothership Repo
+      - name: Generate Mothership Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CLA_APP_ID }}
+          private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
+          owner: YOUR_MOTHERSHIP_ORG_NAME
+
+      - name: Checkout Mothership Tools
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/.github
+          repository: YOUR_MOTHERSHIP_ORG_NAME/.github
+          token: ${{ steps.app-token.outputs.token }} # Use the generated token
           path: .github-tools
           ref: main
-          # CRITICAL FIX: Ensure 'data' is downloaded for license checks
           sparse-checkout: |
-            scripts
-            data
-            signatures
+            .github/scripts
+            .github/data
+            .github/signatures
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,37 +45,38 @@ jobs:
           cache: 'pip'
 
       - name: Install Dependencies
-        run: pip install aiohttp rapidfuzz pyyaml
+        run: pip install aiohttp rapidfuzz pyyaml PyJWT cryptography
 
-      - name: Determine Policy & Check Membership
+      - name: Detect Policy & Verify Signatures
         id: policy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # CRITICAL FIX: Pass the PAT so we can see Private Memberships
-          PAT_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }} 
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # APP SECRETS
+          CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
+          CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           
-          # Fix paths for imports and data files
-          PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
-          LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
-          PERMISSIVE_JSON: ${{ github.workspace }}/.github-tools/data/permissive_names.json
-
-        run: python .github-tools/scripts/policy_selector.py
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
+          CENTRAL_ORG: YOUR_MOTHERSHIP_ORG_NAME
+          CONFIG_REPO: .github
+          PYTHONPATH: ${{ github.workspace }}/.github-tools/.github/scripts
+          LICENSES_JSON: ${{ github.workspace }}/.github-tools/.github/data/licenses_all.json
+        run: python .github-tools/.github/scripts/policy_selector.py
 
       - name: Enforce ${{ steps.policy.outputs.mode }}
         if: steps.policy.outputs.bypass != 'true'
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }}
+          # Pass the Generated App Token to the Action so it can read the Mothership file
+          PERSONAL_ACCESS_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           path-to-signatures: ${{ steps.policy.outputs.signature_path }}
           path-to-document: ${{ steps.policy.outputs.document_url }}
-          remote-organization-name: ${{ github.repository_owner }}
+          remote-organization-name: YOUR_MOTHERSHIP_ORG_NAME
           remote-repository-name: '.github'
           branch: 'main'
-          # NOTE: Instructions updated to reflect Required Workflow limitations
+          custom-notsigned-prcomment: 'Please sign the ${{ steps.policy.outputs.mode }}. Comment exactly: "I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}".' 
           custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
-          custom-notsigned-prcomment: 'Please sign the ${{ steps.policy.outputs.mode }}. To sign, comment exactly: "I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}". NOTE: After commenting, you MUST click "Re-run jobs" on this check.'
           allowlist: 'dependabot[bot],github-actions[bot]'
           
