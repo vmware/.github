@@ -40,7 +40,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          # Cache removed to prevent setup errors
+          # cache: 'pip' REMOVED (Safety)
+
+      # MANUAL CACHE (Speed Strategy)
+      - name: Cache Pip Packages
+        uses: actions/cache@v4
+        id: pip-cache
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-compliance-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-compliance-
 
       - name: Install Dependencies
         run: pip install aiohttp rapidfuzz pyyaml PyJWT cryptography
@@ -55,14 +65,8 @@ jobs:
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
           CONFIG_REPO: .github
-          
-          # --- PATH FIX 1: Removed /.github/ ---
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
-          
-          # --- PATH FIX 2: Removed /.github/ ---
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
-          
-        # --- PATH FIX 3: Removed /.github/ ---
         run: python .github-tools/scripts/policy_selector.py
 
       - name: Enforce ${{ steps.policy.outputs.mode }}
