@@ -33,7 +33,7 @@ jobs:
           path: .github-tools
           ref: main
           sparse-checkout: |
-            .github/scripts
+            scripts
 
       # 3. Setup Environment
       - name: Setup Python
@@ -57,8 +57,8 @@ jobs:
           CONFIG_REPO: .github
           
           # Python Path to find the scripts we checked out
-          PYTHONPATH: ${{ github.workspace }}/.github-tools/.github/scripts
+          PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
         
         # Note the path includes the checkout directory (.github-tools)
-        run: python .github-tools/.github/scripts/cla_sweeper.py
+        run: python .github-tools/scripts/cla_sweeper.py
         
