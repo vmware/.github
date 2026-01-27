@@ -8,7 +8,6 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 
-# Import JWT dependencies
 import jwt 
 
 WORKFLOW_NAME = "Legal Compliance Gate"
@@ -44,6 +43,21 @@ def github_api(url, token, method="GET", data=None):
         print(f"API Error {url}: {e}")
         return None
 
+def post_success_comment(comments_url, user, mode, token):
+    """Posts a comment to the PR confirming success."""
+    body = (
+        f"@{user} **Verification Successful!**\n\n"
+        f"I have recorded your {mode} signature and re-triggered the checks.\n"
+        f"🔄 *The status should update momentarily. If the Merge button remains disabled, please refresh this page.*"
+    )
+    # Check if we already posted (to avoid spamming if script runs twice)
+    comments = github_api(comments_url, token) or []
+    for c in comments:
+        if "Verification Successful!" in c.get("body", "") and c.get("user", {}).get("type") == "Bot":
+            return # Already commented
+            
+    github_api(comments_url, token, "POST", {"body": body})
+
 def update_central_signature(central_org, central_repo, user_data, mode, token):
     path = f"signatures/{mode.lower()}.json"
     url = f"https://api.github.com/repos/{central_org}/{central_repo}/contents/{path}"
@@ -51,7 +65,6 @@ def update_central_signature(central_org, central_repo, user_data, mode, token):
     
     if not data: return False
     
-    # Ensure Schema Integrity
     content = {"signedContributors": []}
     try:
         decoded = json.loads(base64.b64decode(data["content"]).decode())
@@ -61,11 +74,9 @@ def update_central_signature(central_org, central_repo, user_data, mode, token):
             content["signedContributors"] = decoded["signed"]
     except: pass
 
-    # Check if signed
     if any(u.get("name", "").lower() == user_data["login"].lower() for u in content["signedContributors"]):
         return True
 
-    # Add entry matching CLA Assistant Lite Schema
     new_entry = {
         "name": user_data["login"],
         "id": user_data["id"],
@@ -91,14 +102,12 @@ def main():
     central_org = os.environ.get("CENTRAL_ORG")
     central_repo = os.environ.get("CONFIG_REPO", ".github")
 
-    # 1. Generate Tokens
     local_token = get_app_token(current_org, app_id, private_key)
     mothership_token = get_app_token(central_org, app_id, private_key)
     
     if not local_token or not mothership_token: return
 
-    # 2. Scan Local Org
-    # Scans for comments in the last 15 minutes
+    # Scan last 15 mins
     since = (datetime.utcnow() - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S")
     query = f'org:{current_org} is:pr is:open updated:>{since} "I have read the"'
     results = github_api(f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}", local_token)
@@ -110,14 +119,13 @@ def main():
         pr_user_id = item["user"]["id"]
         repo_url = item["repository_url"]
         pr_number = item["number"]
+        comments_url = item["comments_url"]
 
-        # Fetch Repo ID (Required for schema, though optional for global checks)
-        # We try to get it from the PR object, if not, we default to 0
         repo_data = github_api(repo_url, local_token)
         repo_id = repo_data["id"] if repo_data else 0
         repo_full_name = repo_data["full_name"] if repo_data else "unknown/repo"
         
-        comments = github_api(item["comments_url"], local_token) or []
+        comments = github_api(comments_url, local_token) or []
         mode_signed = None
         found_comment_id = 0
 
@@ -141,13 +149,15 @@ def main():
             }
 
             if update_central_signature(central_org, central_repo, user_data, mode_signed, mothership_token):
-                # Trigger Re-run
+                # 1. Post Comment (Forces UI update + Informs user)
+                post_success_comment(comments_url, pr_user, mode_signed, local_token)
+                
+                # 2. Trigger Re-run
                 pr_head_sha = github_api(item["pull_request"]["url"], local_token)["head"]["sha"]
                 runs_url = f"{repo_url}/actions/runs?head_sha={pr_head_sha}"
                 runs = github_api(runs_url, local_token)
                 if runs:
                     for run in runs.get("workflow_runs", []):
-                        # Matches your specific workflow name
                         if run["name"] == WORKFLOW_NAME and run["conclusion"] == "failure":
                             print(f"Triggering re-run for {run['id']}...")
                             github_api(f"{repo_url}/actions/runs/{run['id']}/rerun", local_token, "POST", {})
