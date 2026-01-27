@@ -8,14 +8,14 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 
-# Import JWT dependencies (assumes pip install ran)
+# Import JWT dependencies
 import jwt 
 
 WORKFLOW_NAME = "Legal Compliance Gate"
 SIGN_REGEX = r"I have read the (CLA|DCO) Document and I hereby sign the (CLA|DCO)"
 
 def get_app_token(org_name, app_id, private_key):
-    # Same helper function as above
+    if not app_id or not private_key: return None
     now = int(time.time())
     payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": app_id}
     encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
@@ -44,24 +44,41 @@ def github_api(url, token, method="GET", data=None):
         print(f"API Error {url}: {e}")
         return None
 
-def update_central_signature(central_org, central_repo, user, mode, token):
+def update_central_signature(central_org, central_repo, user_data, mode, token):
     path = f"signatures/{mode.lower()}.json"
     url = f"https://api.github.com/repos/{central_org}/{central_repo}/contents/{path}"
     data = github_api(url, token)
-    if not data: return False
-    try:
-        content = json.loads(base64.b64decode(data["content"]).decode())
-    except: return False
     
-    if any(u["github"].lower() == user.lower() for u in content.get("signed", [])):
+    if not data: return False
+    
+    # Ensure Schema Integrity
+    content = {"signedContributors": []}
+    try:
+        decoded = json.loads(base64.b64decode(data["content"]).decode())
+        if "signedContributors" in decoded:
+            content = decoded
+        elif "signed" in decoded:
+            content["signedContributors"] = decoded["signed"]
+    except: pass
+
+    # Check if signed
+    if any(u.get("name", "").lower() == user_data["login"].lower() for u in content["signedContributors"]):
         return True
 
-    content["signed"].append({
-        "name": user, "github": user, "date": datetime.utcnow().isoformat() + "Z", 
-        "link": "https://github.com", "mode": mode, "org_origin": os.environ.get("ORG_NAME")
-    })
+    # Add entry matching CLA Assistant Lite Schema
+    new_entry = {
+        "name": user_data["login"],
+        "id": user_data["id"],
+        "comment_id": user_data.get("comment_id", 0),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "repoId": user_data.get("repo_id", 0),
+        "pullRequestNo": user_data.get("pr_number", 0)
+    }
+
+    content["signedContributors"].append(new_entry)
+    
     payload = {
-        "message": f"Sweeper App Sign {mode} for @{user}",
+        "message": f"Sweeper App Sign {mode} for @{user_data['login']}",
         "content": base64.b64encode(json.dumps(content, indent=2).encode()).decode(),
         "sha": data["sha"]
     }
@@ -81,6 +98,7 @@ def main():
     if not local_token or not mothership_token: return
 
     # 2. Scan Local Org
+    # Scans for comments in the last 15 minutes
     since = (datetime.utcnow() - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S")
     query = f'org:{current_org} is:pr is:open updated:>{since} "I have read the"'
     results = github_api(f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}", local_token)
@@ -89,29 +107,51 @@ def main():
 
     for item in results.get("items", []):
         pr_user = item["user"]["login"]
-        repo_full = item["repository_url"].replace("https://api.github.com/repos/", "")
+        pr_user_id = item["user"]["id"]
+        repo_url = item["repository_url"]
+        pr_number = item["number"]
+
+        # Fetch Repo ID (Required for schema, though optional for global checks)
+        # We try to get it from the PR object, if not, we default to 0
+        repo_data = github_api(repo_url, local_token)
+        repo_id = repo_data["id"] if repo_data else 0
+        repo_full_name = repo_data["full_name"] if repo_data else "unknown/repo"
         
         comments = github_api(item["comments_url"], local_token) or []
         mode_signed = None
+        found_comment_id = 0
+
         for c in comments:
             if c["user"]["login"] == pr_user:
                 m = re.search(SIGN_REGEX, c["body"], re.IGNORECASE)
                 if m:
                     mode_signed = m.group(2).upper()
+                    found_comment_id = c["id"]
                     break
         
         if mode_signed:
-            print(f"Signing {mode_signed} for {pr_user} in {repo_full}")
-            if update_central_signature(central_org, central_repo, pr_user, mode_signed, mothership_token):
-                # Re-run
-                pr_data = github_api(item["pull_request"]["url"], local_token)
-                if pr_data:
-                    runs_url = f"{item['repository_url']}/actions/runs?head_sha={pr_data['head']['sha']}"
-                    runs = github_api(runs_url, local_token)
+            print(f"Signing {mode_signed} for {pr_user} in {repo_full_name}")
+            
+            user_data = {
+                "login": pr_user,
+                "id": pr_user_id,
+                "comment_id": found_comment_id,
+                "repo_id": repo_id,
+                "pr_number": pr_number
+            }
+
+            if update_central_signature(central_org, central_repo, user_data, mode_signed, mothership_token):
+                # Trigger Re-run
+                pr_head_sha = github_api(item["pull_request"]["url"], local_token)["head"]["sha"]
+                runs_url = f"{repo_url}/actions/runs?head_sha={pr_head_sha}"
+                runs = github_api(runs_url, local_token)
+                if runs:
                     for run in runs.get("workflow_runs", []):
+                        # Matches your specific workflow name
                         if run["name"] == WORKFLOW_NAME and run["conclusion"] == "failure":
-                            github_api(f"{item['repository_url']}/actions/runs/{run['id']}/rerun", local_token, "POST", {})
+                            print(f"Triggering re-run for {run['id']}...")
+                            github_api(f"{repo_url}/actions/runs/{run['id']}/rerun", local_token, "POST", {})
 
 if __name__ == "__main__":
     main()
-  
+    
