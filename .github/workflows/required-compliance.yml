@@ -57,7 +57,7 @@ jobs:
           
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
-          CENTRAL_ORG: YOUR_MOTHERSHIP_ORG_NAME
+          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
           CONFIG_REPO: .github
           PYTHONPATH: ${{ github.workspace }}/.github-tools/.github/scripts
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/.github/data/licenses_all.json
