@@ -1,0 +1,59 @@
+name: Compliance Sweeper
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Runs every 5 minutes
+  workflow_dispatch:      # Allows manual triggering for testing
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      # --- AUTH STEP FOR CHECKOUT ---
+      # 1. Generate a token to clone the Private Mothership Repo
+      - name: Generate Mothership Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CLA_APP_ID }}
+          private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CENTRAL_ORG }}
+
+      # 2. Checkout the scripts from the Mothership
+      - name: Checkout Mothership Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CENTRAL_ORG }}/.github
+          token: ${{ steps.app-token.outputs.token }}
+          path: .github-tools
+          ref: main
+          sparse-checkout: |
+            .github/scripts
+
+      # 3. Setup Environment
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install aiohttp rapidfuzz pyyaml PyJWT cryptography
+
+      # 4. Run the Sweeper Logic
+      - name: Run Sweeper
+        env:
+          # APP SECRETS (Required for Auth)
+          CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
+          CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
+          
+          # CONTEXT VARIABLES
+          ORG_NAME: ${{ github.repository_owner }}
+          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
+          CONFIG_REPO: .github
+          
+          # Python Path to find the scripts we checked out
+          PYTHONPATH: ${{ github.workspace }}/.github-tools/.github/scripts
+        
+        # Note the path includes the checkout directory (.github-tools)
+        run: python .github-tools/.github/scripts/cla_sweeper.py
+        
