@@ -21,6 +21,9 @@ SIGN_REGEX = r"I have read the (CLA|DCO) Document and I hereby sign the (CLA|DCO
 
 def get_app_token(org_name, app_id, private_key):
     """Generates an Installation Access Token for a specific Org."""
+    if not app_id or not private_key:
+        return None
+        
     now = int(time.time())
     payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": app_id}
     encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
@@ -34,7 +37,7 @@ def get_app_token(org_name, app_id, private_key):
         with urllib.request.urlopen(req) as r:
             installation_id = json.loads(r.read().decode())["id"]
     except Exception as e:
-        print(f"::error::App not installed in {org_name}. Cannot generate token.")
+        print(f"::warning::App not installed in {org_name}. Cannot generate token.")
         return None
 
     # Get Access Token
@@ -67,23 +70,42 @@ def update_signature_file(central_org, central_repo, file_path, user, pr_url, mo
     contents_url = f"https://api.github.com/repos/{central_org}/{central_repo}/contents/{file_path}"
     file_data = github_request(contents_url, token)
     
-    signatures = {"signed": []}
+    # Initialize with correct schema
+    signatures = {"signedContributors": []}
     sha = None
     
     if file_data and "content" in file_data:
         sha = file_data["sha"]
         try:
-            signatures = json.loads(base64.b64decode(file_data["content"]).decode())
+            decoded = json.loads(base64.b64decode(file_data["content"]).decode())
+            # Merge if existing structure is valid
+            if "signedContributors" in decoded:
+                signatures = decoded
+            elif "signed" in decoded: # Migration support for old format
+                signatures["signedContributors"] = decoded["signed"]
         except: pass
 
-    if any(u.get("github", "").lower() == user.lower() for u in signatures.get("signed", [])):
+    # Check existence by Name
+    if any(u.get("name", "").lower() == user.lower() for u in signatures["signedContributors"]):
         print(f"DEBUG: User {user} found in Central {mode} database.")
         return True
 
-    signatures["signed"].append({
-        "name": user, "github": user, "date": datetime.utcnow().isoformat() + "Z",
-        "link": pr_url, "mode": mode, "org_origin": os.environ.get("GITHUB_REPOSITORY_OWNER")
-    })
+    # Add new entry matching CLA Assistant Lite Schema
+    new_entry = {
+        "name": user,
+        "id": 0, # Placeholder (Action checks name primarily)
+        "comment_id": 0,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "repoId": 0,
+        "pullRequestNo": 0,
+        "metadata": {
+            "mode": mode,
+            "origin": os.environ.get("GITHUB_REPOSITORY"),
+            "link": pr_url
+        }
+    }
+
+    signatures["signedContributors"].append(new_entry)
     
     put_data = {
         "message": f"Sign {mode} for @{user}",
@@ -95,7 +117,7 @@ def update_signature_file(central_org, central_repo, file_path, user, pr_url, mo
 def main():
     app_id = os.environ.get("CLA_APP_ID")
     private_key = os.environ.get("CLA_APP_PRIVATE_KEY")
-    gh_token = os.environ.get("GITHUB_TOKEN") # Local read-only context
+    gh_token = os.environ.get("GITHUB_TOKEN") 
     repo_full = os.environ.get("GITHUB_REPOSITORY")
     pr_user = os.environ.get("PR_AUTHOR")
     pr_comments_url = os.environ.get("PR_COMMENTS_URL")
@@ -108,16 +130,9 @@ def main():
 
     # 1. Auth Strategy
     current_org = repo_full.split("/")[0]
-    
-    # Token A: Local Org (For Membership Check)
     local_token = get_app_token(current_org, app_id, private_key)
-    
-    # Token B: Mothership (For Writing) - Reuse if same org
     mothership_token = local_token if current_org == central_org else get_app_token(central_org, app_id, private_key)
 
-    # Fork Detection: If we can't get a local token (no secrets), we are in a fork.
-    # Actually, for an App, 'local_token' generation relies on secrets. 
-    # If this runs in a fork, 'CLA_APP_ID' is missing, so app_id is None -> exit.
     is_fork_pr = (local_token is None)
 
     print(f"::group::App-Based Policy Check for {repo_full} (@{pr_user})")
@@ -125,7 +140,6 @@ def main():
     # 2. Membership Check
     is_member = False
     if not is_fork_pr:
-        # Check membership using App Token
         url = f"https://api.github.com/orgs/{current_org}/members/{pr_user}"
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {local_token}"})
