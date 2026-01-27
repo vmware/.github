@@ -16,8 +16,6 @@ jobs:
       checks: write
 
     steps:
-      # 1. Generate Token to Access Mothership
-      # This uses the variable 'CENTRAL_ORG' to find the App installation
       - name: Generate Mothership Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -26,8 +24,6 @@ jobs:
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           owner: ${{ vars.CENTRAL_ORG }}
 
-      # 2. Checkout Scripts
-      # Replaces 'YOUR_MOTHERSHIP_ORG_NAME/.github' with variable
       - name: Checkout Mothership Tools
         uses: actions/checkout@v4
         with:
@@ -36,20 +32,19 @@ jobs:
           path: .github-tools
           ref: main
           sparse-checkout: |
-            .github/scripts
-            .github/data
-            .github/signatures
+            scripts
+            data
+            signatures
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          # Cache removed to prevent setup errors
 
       - name: Install Dependencies
         run: pip install aiohttp rapidfuzz pyyaml PyJWT cryptography
 
-      # 3. Run Logic
-      # Passes the variable to the Python script env
       - name: Detect Policy & Verify Signatures
         id: policy
         env:
@@ -58,17 +53,18 @@ jobs:
           CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
-          
-          # REPLACED HERE:
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
-          
           CONFIG_REPO: .github
-          PYTHONPATH: ${{ github.workspace }}/.github-tools/.github/scripts
-          LICENSES_JSON: ${{ github.workspace }}/.github-tools/.github/data/licenses_all.json
-        run: python .github-tools/.github/scripts/policy_selector.py
+          
+          # --- PATH FIX 1: Removed /.github/ ---
+          PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
+          
+          # --- PATH FIX 2: Removed /.github/ ---
+          LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
+          
+        # --- PATH FIX 3: Removed /.github/ ---
+        run: python .github-tools/scripts/policy_selector.py
 
-      # 4. Enforce Result
-      # Tells the Action to look for the signature file in the Central Org
       - name: Enforce ${{ steps.policy.outputs.mode }}
         if: steps.policy.outputs.bypass != 'true'
         uses: contributor-assistant/github-action@v2.6.1
@@ -78,10 +74,7 @@ jobs:
         with:
           path-to-signatures: ${{ steps.policy.outputs.signature_path }}
           path-to-document: ${{ steps.policy.outputs.document_url }}
-          
-          # REPLACED HERE:
           remote-organization-name: ${{ vars.CENTRAL_ORG }}
-          
           remote-repository-name: '.github'
           branch: 'main'
           custom-notsigned-prcomment: 'Please sign the ${{ steps.policy.outputs.mode }}. Comment exactly: "I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}".' 
