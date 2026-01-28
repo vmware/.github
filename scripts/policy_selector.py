@@ -2,15 +2,16 @@ import os
 import sys
 import json
 import urllib.request
-import time
-import requires_cla
+import requires_cla 
 
 # --- CONFIGURATION ---
-STATUS_CONTEXT = "Check CLA/DCO" # This MUST match your Ruleset string exactly
+# This Context Name must match your Branch Rule EXACTLY
+STATUS_CONTEXT = "Check CLA/DCO" 
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
 
 def debug_log(message):
-    print(f"::warning::{message}") # Prints in yellow in GitHub Logs
+    """Prints a warning message so it stands out in GitHub Actions logs."""
+    print(f"::warning::{message}")
 
 def github_api(url, token, method="GET", data=None):
     headers = {
@@ -31,6 +32,10 @@ def github_api(url, token, method="GET", data=None):
         return None
 
 def set_commit_status(api_root, repo, sha, state, description, target_url, token):
+    """
+    Manually updates the status of a specific commit.
+    This bypasses the default behavior and ensures the PR UI gets the signal.
+    """
     url = f"{api_root}/repos/{repo}/statuses/{sha}"
     payload = {
         "state": state,
@@ -38,17 +43,19 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
         "description": description,
         "target_url": target_url
     }
-    debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}' context='{STATUS_CONTEXT}'...")
+    debug_log(f"⚡ FORCE UPDATE: Painting Commit {sha[:7]} as '{state}'...")
     response = github_api(url, token, "POST", payload)
     if response:
-        debug_log(f"✅ Successfully updated status for {sha[:7]}")
+        debug_log(f"✅ Status updated successfully for {sha[:7]}")
     else:
         debug_log(f"❌ Failed to update status for {sha[:7]}")
 
 def main():
     debug_log("--- STARTING DEBUG DIAGNOSTICS ---")
     
-    # 1. Load Event Data to find the REAL Commit SHA
+    # 1. IDENTIFY THE COMMITS
+    # We need to find the REAL commit the user pushed (PR Head),
+    # distinct from the 'safe' commit this workflow is running on.
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     pr_head_sha = ""
     repo_full_name = os.environ.get("GITHUB_REPOSITORY")
@@ -56,68 +63,69 @@ def main():
     if event_path and os.path.exists(event_path):
         with open(event_path, 'r') as f:
             event = json.load(f)
-            # For pull_request_target, we MUST get the head sha from the event
+            # This is the SHA the GitHub UI is waiting for:
             pr_head_sha = event.get("pull_request", {}).get("head", {}).get("sha", "")
-            debug_log(f"📌 PR Head SHA (Target): {pr_head_sha}")
+            debug_log(f"📌 TARGET SHA (PR Head): {pr_head_sha}")
     
+    # This is the SHA the runner is currently on:
     current_sha = os.environ.get("GITHUB_SHA", "")
-    debug_log(f"🏃 Running Context SHA: {current_sha}")
+    debug_log(f"🏃 RUNNING SHA (Context): {current_sha}")
     
     if pr_head_sha and current_sha != pr_head_sha:
-        debug_log("⚠️ MISMATCH DETECTED: Script is running on a different commit than the PR Head.")
-        debug_log("   -> This explains why the native check is green but the PR is gray.")
-        debug_log("   -> Attempting to manually fix status...")
+        debug_log("⚠️ SHA MISMATCH DETECTED: This is normal for pull_request_target.")
+        debug_log("   -> We will manually target the PR Head SHA to fix the 'Gray Button'.")
 
-    # 2. Setup Inputs
+    # 2. SETUP INPUTS
     pr_user = os.environ.get("PR_AUTHOR")
     gh_token = os.environ.get("GITHUB_TOKEN")
-    current_org = os.environ.get("CENTRAL_ORG")
     base_path = os.environ.get("TOOLS_PATH", ".github-tools")
     comments_url = os.environ.get("PR_COMMENTS_URL")
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-    
-    # 3. Bot Check
+
+    # 3. BOT BYPASS
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
         debug_log(f"🤖 User {pr_user} is a bot. Bypassing.")
         if pr_head_sha:
             set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Detected - Bypass", "", gh_token)
         sys.exit(0)
 
-    # 4. Policy Check
+    # 4. POLICY CHECK
+    # We use the token to check repo contents if needed by requires_cla
     is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
     mode = "CLA" if is_strict else "DCO"
     debug_log(f"ℹ️  Policy Determined: {mode}")
 
-    # 5. Signature Check
+    # 5. SIGNATURE CHECK
     sig_file_path = f"{base_path}/signatures/{mode.lower()}.json"
     has_signed = False
     try:
         with open(sig_file_path, 'r') as f:
             data = json.load(f)
             contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
+            # Case-insensitive comparison
             for c in contributors:
                 if c.get("name", "").lower() == pr_user.lower():
                     has_signed = True
                     break
-    except: 
-        debug_log(f"⚠️ Could not read signature file: {sig_file_path}")
+    except Exception as e:
+        debug_log(f"⚠️ Error reading signature file: {e}")
 
-    # 6. REPORT RESULTS
+    # 6. REPORT RESULTS & FORCE STATUS
     doc_url = os.environ.get("CLA_DOC_URL") if mode == "CLA" else os.environ.get("DCO_DOC_URL")
     
     if has_signed:
         debug_log(f"✅ User {pr_user} has signed.")
-        # FORCE STATUS UPDATE ON THE CORRECT SHA
+        # FORCE GREEN on the PR HEAD
         if pr_head_sha:
             set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{mode} Signed", "", gh_token)
         sys.exit(0)
     else:
         debug_log(f"❌ User {pr_user} has NOT signed.")
-        # Fail the status explicitly
+        # FORCE RED on the PR HEAD
         if pr_head_sha:
-            set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{mode} Missing", doc_url, gh_token)
+            set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{mode} Missing", doc_url or "", gh_token)
         
-        # (Comment posting logic remains the same...)
+        # (Optional) Post failure comment logic here if needed...
         sys.exit(1)
 
 if __name__ == "__main__":
