@@ -1,57 +1,16 @@
-#!/usr/bin/env python3
 import os
 import sys
 import json
-import re
-import base64
-import time
 import urllib.request
-import urllib.error
-from datetime import datetime
+import re
+import requires_cla # Your helper script
 
-# Dependency Check
-try:
-    import jwt  # pip install PyJWT cryptography
-    import requires_cla
-except ImportError:
-    print("::error::Missing dependencies. Ensure PyJWT, cryptography, and requires_cla.py are present.")
-    sys.exit(1)
+# --- CONFIGURATION ---
+BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
+# The specific text we look for to know if we already posted instructions
+INSTRUCTION_MARKER = "Compliance Check Failed" 
 
-SIGN_REGEX = r"I have read the (CLA|DCO) Document and I hereby sign the (CLA|DCO)"
-
-def get_app_token(org_name, app_id, private_key):
-    """Generates an Installation Access Token for a specific Org."""
-    if not app_id or not private_key:
-        return None
-        
-    now = int(time.time())
-    payload = {"iat": now - 60, "exp": now + (9 * 60), "iss": app_id}
-    encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
-
-    # Get Installation ID
-    url = f"https://api.github.com/orgs/{org_name}/installation"
-    headers = {"Authorization": f"Bearer {encoded_jwt}", "Accept": "application/vnd.github+json"}
-    
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req) as r:
-            installation_id = json.loads(r.read().decode())["id"]
-    except Exception as e:
-        print(f"::warning::App not installed in {org_name}. Cannot generate token.")
-        return None
-
-    # Get Access Token
-    token_url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
-    try:
-        req = urllib.request.Request(token_url, headers=headers, method="POST")
-        with urllib.request.urlopen(req) as r:
-            return json.loads(r.read().decode())["token"]
-    except Exception as e:
-        print(f"::error::Token generation failed for {org_name}: {e}")
-        return None
-
-def github_request(url, token, method="GET", data=None):
-    if not token: return None
+def github_api(url, token, method="GET", data=None):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     try:
         req = urllib.request.Request(url, headers=headers, method=method)
@@ -59,142 +18,110 @@ def github_request(url, token, method="GET", data=None):
         with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode()) if method != "PUT" else {}
     except urllib.error.HTTPError as e:
-        if e.code == 404: return None
-        print(f"::warning::API Error {e.code} ({url})")
+        print(f"⚠️ API Error {e.code} for {url}")
         return None
     except Exception as e:
-        print(f"::error::API Exception: {e}")
+        print(f"⚠️ Network Error: {e}")
         return None
 
-def update_signature_file(central_org, central_repo, file_path, user, pr_url, mode, token):
-    contents_url = f"https://api.github.com/repos/{central_org}/{central_repo}/contents/{file_path}"
-    file_data = github_request(contents_url, token)
-    
-    # Initialize with correct schema
-    signatures = {"signedContributors": []}
-    sha = None
-    
-    if file_data and "content" in file_data:
-        sha = file_data["sha"]
-        try:
-            decoded = json.loads(base64.b64decode(file_data["content"]).decode())
-            # Merge if existing structure is valid
-            if "signedContributors" in decoded:
-                signatures = decoded
-            elif "signed" in decoded: # Migration support for old format
-                signatures["signedContributors"] = decoded["signed"]
-        except: pass
+def post_failure_comment(comments_url, token, user, mode, doc_url):
+    """
+    Posts the 'Please Sign' instructions ONLY if they aren't already there.
+    """
+    # 1. Check existing comments to avoid spam
+    comments = github_api(comments_url, token) or []
+    for c in comments:
+        # If we (the bot) already posted the instructions, don't do it again
+        if INSTRUCTION_MARKER in c.get("body", "") and c.get("user", {}).get("type") == "Bot":
+            print("ℹ️  Instruction comment already exists. Skipping.")
+            return
 
-    # Check existence by Name
-    if any(u.get("name", "").lower() == user.lower() for u in signatures["signedContributors"]):
-        print(f"DEBUG: User {user} found in Central {mode} database.")
-        return True
+    # 2. Construct the comment
+    body = (
+        f"🔴 **{INSTRUCTION_MARKER}**\n\n"
+        f"@{user}, this repository requires you to sign a **{mode}**.\n\n"
+        f"📄 **[Read the {mode} Document Here]({doc_url})**\n\n"
+        f"To sign, please copy and paste the following comment exactly:\n"
+        f"```text\nI have read the {mode} Document and I hereby sign the {mode}\n```"
+    )
 
-    # Add new entry matching CLA Assistant Lite Schema
-    new_entry = {
-        "name": user,
-        "id": 0, # Placeholder (Action checks name primarily)
-        "comment_id": 0,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "repoId": 0,
-        "pullRequestNo": 0,
-        "metadata": {
-            "mode": mode,
-            "origin": os.environ.get("GITHUB_REPOSITORY"),
-            "link": pr_url
-        }
-    }
-
-    signatures["signedContributors"].append(new_entry)
-    
-    put_data = {
-        "message": f"Sign {mode} for @{user}",
-        "content": base64.b64encode(json.dumps(signatures, indent=2).encode()).decode(),
-        "sha": sha
-    }
-    return github_request(contents_url, token, method="PUT", data=put_data) is not None
+    # 3. Post it
+    print("📢 Posting instruction comment to PR...")
+    github_api(comments_url, token, "POST", {"body": body})
 
 def main():
-    app_id = os.environ.get("CLA_APP_ID")
-    private_key = os.environ.get("CLA_APP_PRIVATE_KEY")
-    gh_token = os.environ.get("GITHUB_TOKEN") 
-    repo_full = os.environ.get("GITHUB_REPOSITORY")
+    # 1. Capture Inputs
     pr_user = os.environ.get("PR_AUTHOR")
-    pr_comments_url = os.environ.get("PR_COMMENTS_URL")
-    central_org = os.environ.get("CENTRAL_ORG")
-    config_repo = os.environ.get("CONFIG_REPO", ".github")
-
-    if not all([app_id, private_key, central_org]):
-        print("::error::Missing App Configuration.")
-        sys.exit(1)
-
-    # 1. Auth Strategy
-    current_org = repo_full.split("/")[0]
-    local_token = get_app_token(current_org, app_id, private_key)
-    mothership_token = local_token if current_org == central_org else get_app_token(central_org, app_id, private_key)
-
-    is_fork_pr = (local_token is None)
-
-    print(f"::group::App-Based Policy Check for {repo_full} (@{pr_user})")
-
-    # 2. Membership Check
-    is_member = False
-    if not is_fork_pr:
-        url = f"https://api.github.com/orgs/{current_org}/members/{pr_user}"
-        try:
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {local_token}"})
-            with urllib.request.urlopen(req) as r:
-                if r.getcode() == 204: is_member = True
-        except: pass
-
-    if is_member:
-        print(f"✅ User @{pr_user} is Member. Bypassing.")
+    gh_token = os.environ.get("GITHUB_TOKEN")
+    current_org = os.environ.get("CENTRAL_ORG")
+    base_path = os.environ.get("TOOLS_PATH", ".github-tools")
+    comments_url = os.environ.get("PR_COMMENTS_URL")
+    
+    # --- FEATURE 1: BOT ALLOWLIST ---
+    if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
+        print(f"🤖 User @{pr_user} is a bot. Bypassing check.")
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh: fh.write("bypass=true\n")
         sys.exit(0)
-    
-    with open(os.environ['GITHUB_OUTPUT'], 'a') as fh: fh.write("bypass=false\n")
 
-    # 3. License Logic
+    # --- EXISTING: MEMBER CHECK ---
+    is_member = False
+    url = f"https://api.github.com/orgs/{current_org}/members/{pr_user}"
     try:
-        is_strict = requires_cla.requires_CLA(repo_full, token=gh_token)
-        mode = "CLA" if is_strict else "DCO"
-        sig_file = f"signatures/{mode.lower()}.json"
-        doc_url = f"https://github.com/{central_org}/{config_repo}/blob/main/{mode}.md"
-    except Exception as e:
-        print(f"::error::License check failed: {e}")
-        sys.exit(1)
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {gh_token}"})
+        with urllib.request.urlopen(req) as r:
+            if r.getcode() == 204: is_member = True
+    except: pass
 
-    # 4. Self-Healing (Write to Mothership)
-    if not is_fork_pr and pr_comments_url:
-        comments = github_request(pr_comments_url, gh_token) or []
-        for c in comments:
-            if c.get("user", {}).get("login") == pr_user:
-                if re.search(SIGN_REGEX, c.get("body", ""), re.IGNORECASE):
-                    if mode in c.get("body", ""):
-                        print(f"Found {mode} signature. Syncing to Mothership...")
-                        update_signature_file(central_org, config_repo, sig_file, pr_user, "", mode, mothership_token)
-                        break
+    if is_member:
+        print(f"✅ User @{pr_user} is an Org Member. Bypassing.")
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as fh: fh.write("bypass=true\n")
+        sys.exit(0)
 
-    with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-        fh.write(f"mode={mode}\n")
-        fh.write(f"signature_path={sig_file}\n")
-        fh.write(f"document_url={doc_url}\n")
-    
-    print("::endgroup::")
+    # --- EXISTING: DETECT POLICY ---
+    repo_full = os.environ.get("GITHUB_REPOSITORY", "")
+    is_strict = requires_cla.requires_CLA(repo_full, token=gh_token)
+    mode = "CLA" if is_strict else "DCO"
+    print(f"ℹ️  Policy Determined: {mode}")
 
-    # 5. Job Summary (UX Upgrade)
-    if "GITHUB_STEP_SUMMARY" in os.environ:
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-            status_emoji = "✅" if (is_member or mode in ["CLA", "DCO"]) else "❌"
-            f.write(f"### Legal Compliance Report\n")
-            f.write(f"| User | Status | Requirement |\n")
-            f.write(f"| :--- | :--- | :--- |\n")
-            f.write(f"| @{pr_user} | {status_emoji} | **{mode}** |\n\n")
-            
-            if not (is_member or mode in ["CLA", "DCO"]):
-                f.write(f"> ⚠️ **Action Required:** Please comment exactly: \n")
-                f.write(f"> `I have read the {mode} Document and I hereby sign the {mode}`")
-                
+    # Select the correct document URL based on mode
+    # You can customize these ENV vars in the YAML if needed
+    doc_url = os.environ.get("CLA_DOC_URL") if mode == "CLA" else os.environ.get("DCO_DOC_URL")
+    if not doc_url: doc_url = "#" # Fallback
+
+    # --- EXISTING: VERIFY SIGNATURE ---
+    sig_file_path = f"{base_path}/signatures/{mode.lower()}.json"
+    has_signed = False
+    try:
+        with open(sig_file_path, 'r') as f:
+            data = json.load(f)
+            contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
+            for c in contributors:
+                if c.get("name", "").lower() == pr_user.lower():
+                    has_signed = True
+                    break
+    except: pass
+
+    # --- RESULT HANDLER ---
+    if has_signed:
+        print(f"✅ Success: User @{pr_user} has signed the {mode}.")
+        sys.exit(0)
+    else:
+        print(f"❌ Failure: User @{pr_user} has NOT signed the {mode}.")
+        
+        # --- FEATURE 2: POST COMMENT ---
+        # We only post if we have the URL and Token
+        if comments_url and gh_token:
+            post_failure_comment(comments_url, gh_token, pr_user, mode, doc_url)
+        
+        # Job Summary (Backup visual)
+        if "GITHUB_STEP_SUMMARY" in os.environ:
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                f.write(f"### 🔴 Compliance Check Failed\n")
+                f.write(f"User @{pr_user} must sign the **[{mode}]({doc_url})**.\n")
+
+        sys.exit(1) # Fail the build
+
 if __name__ == "__main__":
     main()
+    
     
