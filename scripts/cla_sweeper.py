@@ -191,9 +191,12 @@ def main():
                 head_sha = pr_details["head"]["sha"]
                 force_green_status(repo_url, head_sha, local_token, target_url=item["html_url"])
                 
-                # 2. Wait for GitHub DB to propagate (Crucial for UI sync)
-                time.sleep(2)
-
+                # 2. INCREASED WAIT TIME (Fixes the "Gray Button" Glitch)
+                # GitHub's "Branch Protection" engine is slower than its "Status" API.
+                # We must wait 10 seconds for them to sync before notifying the user.
+                print("Waiting 10s for GitHub Branch Protection to sync...")
+                time.sleep(10)
+                
                 # 3. Post the Comment LAST
                 # This acts as the "Wake Up" signal for the user's browser. 
                 # When the browser fetches new data to show this comment, 
