@@ -1,7 +1,7 @@
 name: Legal Compliance Gate
 
 on:
-  # CHANGED: "pull_request_target" allows forks to access Secrets safeley
+  # "pull_request_target" allows forks to access Secrets safely
   pull_request_target:
     types: [opened, synchronize, reopened]
 
@@ -26,9 +26,6 @@ jobs:
           owner: ${{ vars.CENTRAL_ORG }}
 
       - name: Checkout Mothership Tools
-        # CRITICAL SECURITY STEP:
-        # We explicitly checkout the scripts from the TRUSTED Mothership repo.
-        # This prevents a malicious PR from modifying the script to steal secrets.
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.CENTRAL_ORG }}/.github
@@ -40,7 +37,6 @@ jobs:
             data
             signatures
 
-      # MANUAL CACHE (Speed Strategy)
       - name: Setup Python & Cache
         uses: actions/setup-python@v5
         with:
@@ -56,7 +52,8 @@ jobs:
             ${{ runner.os }}-pip-compliance-
 
       - name: Install Dependencies
-        run: pip install pyyaml PyJWT cryptography
+        # FIXED: Added 'rapidfuzz' and 'aiohttp' back because requires_cla.py needs them
+        run: pip install pyyaml PyJWT cryptography rapidfuzz aiohttp
 
       - name: Detect Policy & Verify Signatures
         id: policy
@@ -68,6 +65,7 @@ jobs:
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
           CONFIG_REPO: .github
+          # FIXED: Explicitly points to the scripts folder so Python finds requires_cla.py
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
         run: python .github-tools/scripts/policy_selector.py
@@ -84,7 +82,6 @@ jobs:
           remote-organization-name: ${{ vars.CENTRAL_ORG }}
           remote-repository-name: '.github'
           branch: 'main'
-          # Updated message with code block for easier copying
           custom-notsigned-prcomment: '🔴 **Compliance Check Failed**<br/>Please sign the **${{ steps.policy.outputs.mode }}**.<br/><br/>Copy and paste the following comment exactly:<br/>`I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}`'
           custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
           allowlist: 'dependabot[bot],github-actions[bot]'
