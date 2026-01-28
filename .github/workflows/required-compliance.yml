@@ -85,9 +85,10 @@ jobs:
           custom-notsigned-prcomment: '🔴 **Compliance Check Failed**<br/>Please sign the **${{ steps.policy.outputs.mode }}**.<br/><br/>Copy and paste the following comment exactly:<br/>`I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}`'
           custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
           allowlist: 'dependabot[bot],github-actions[bot]'
-          # --- FIX START ---
-          # Disable the "Recheck" logic that is causing the crash.
-          # We don't need it because the Sweeper handles updates, 
-          # and this workflow runs in real-time.
+          # --- CRITICAL FIX START ---
+          # Disable ALL "self-lookup" features.
+          # These features crash on 'pull_request_target' because they can't find the workflow ID.
           suggest-recheck: 'false'
-          # --- FIX END ---
+          lock-pullrequest-aftermerge: 'false'
+          # --- CRITICAL FIX END ---
+          
