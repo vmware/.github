@@ -1,7 +1,8 @@
 name: Legal Compliance Gate
 
+# We use 'pull_request_target' so Fork PRs can access the Secrets
+# needed to check the database in the Mothership.
 on:
-  # "pull_request_target" allows forks to access Secrets safely
   pull_request_target:
     types: [opened, synchronize, reopened]
 
@@ -12,11 +13,13 @@ jobs:
     permissions:
       actions: write
       contents: read
-      pull-requests: write
-      statuses: write
+      pull-requests: write # Needed to post comments
+      statuses: write      # Needed to set status checks
       checks: write
 
     steps:
+      # 1. GENERATE TOKEN
+      # We need this to authenticate with the Mothership repo to fetch signatures.
       - name: Generate Mothership Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -25,6 +28,8 @@ jobs:
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           owner: ${{ vars.CENTRAL_ORG }}
 
+      # 2. CHECKOUT TOOLS
+      # We download the scripts from your central .github repo.
       - name: Checkout Mothership Tools
         uses: actions/checkout@v4
         with:
@@ -37,6 +42,7 @@ jobs:
             data
             signatures
 
+      # 3. SETUP PYTHON
       - name: Setup Python & Cache
         uses: actions/setup-python@v5
         with:
@@ -51,44 +57,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-compliance-
 
+      # 4. INSTALL DEPENDENCIES
+      # We include rapidfuzz/aiohttp because your 'requires_cla.py' helper needs them.
       - name: Install Dependencies
-        # FIXED: Added 'rapidfuzz' and 'aiohttp' back because requires_cla.py needs them
         run: pip install pyyaml PyJWT cryptography rapidfuzz aiohttp
 
-      - name: Detect Policy & Verify Signatures
+      # 5. RUN COMPLIANCE CHECK
+      # This single step now handles everything: 
+      # - Detects Policy
+      # - Checks Signature
+      # - Posts Comment (if missing)
+      # - Fails Build (if missing)
+      - name: Verify Compliance
         id: policy
         env:
+          # Auth & Context
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
-          CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
-          CONFIG_REPO: .github
-          # FIXED: Explicitly points to the scripts folder so Python finds requires_cla.py
+          
+          # Paths for Python to find your scripts & data
+          TOOLS_PATH: ${{ github.workspace }}/.github-tools
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
+          
+          # Documentation Links (Used in the failure comment)
+          CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/CLA.md"
+          DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/DCO.md"
+          
+        # We run the UPDATED policy_selector.py which includes the validation logic
         run: python .github-tools/scripts/policy_selector.py
 
-      - name: Enforce ${{ steps.policy.outputs.mode }}
-        if: steps.policy.outputs.bypass != 'true'
-        uses: contributor-assistant/github-action@v2.6.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ steps.app-token.outputs.token }}
-        with:
-          path-to-signatures: ${{ steps.policy.outputs.signature_path }}
-          path-to-document: ${{ steps.policy.outputs.document_url }}
-          remote-organization-name: ${{ vars.CENTRAL_ORG }}
-          remote-repository-name: '.github'
-          branch: 'main'
-          custom-notsigned-prcomment: '🔴 **Compliance Check Failed**<br/>Please sign the **${{ steps.policy.outputs.mode }}**.<br/><br/>Copy and paste the following comment exactly:<br/>`I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}`'
-          custom-pr-sign-comment: 'I have read the ${{ steps.policy.outputs.mode }} Document and I hereby sign the ${{ steps.policy.outputs.mode }}'
-          allowlist: 'dependabot[bot],github-actions[bot]'
-          # --- CRITICAL FIX START ---
-          # Disable ALL "self-lookup" features.
-          # These features crash on 'pull_request_target' because they can't find the workflow ID.
-          suggest-recheck: 'false'
-          lock-pullrequest-aftermerge: 'false'
-          # --- CRITICAL FIX END ---
+        
           
