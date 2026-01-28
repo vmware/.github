@@ -66,6 +66,39 @@ def force_green_status(repo_url, head_sha, token, target_url=""):
     }
     github_api(status_url, token, "POST", payload)
 
+# --- NEW: SMART POLLING FUNCTION ---
+def wait_for_green_state(repo_url, sha, token, timeout=30):
+    """
+    Polls the Combined Status API until it reports 'success'.
+    This ensures the backend is synced before we notify the user.
+    """
+    print(f"Polling API for green status on {sha}...")
+    start_time = time.time()
+    status_url = f"{repo_url}/commits/{sha}/status"
+    
+    while time.time() - start_time < timeout:
+        data = github_api(status_url, token)
+        # We check if our specific context is green, or the whole commit is green
+        if data:
+            # 1. Check Combined State (Fastest)
+            if data.get("state") == "success":
+                print("✅ API confirmed: Combined status is SUCCESS.")
+                return True
+            
+            # 2. Check Specific Context (Deep Check)
+            # Sometimes combined is 'pending' because OTHER checks are running,
+            # but we only care if OUR check is green.
+            statuses = data.get("statuses", [])
+            for s in statuses:
+                if s.get("context") == REQUIRED_CONTEXT and s.get("state") == "success":
+                    print(f"✅ API confirmed: '{REQUIRED_CONTEXT}' is SUCCESS.")
+                    return True
+        
+        time.sleep(3) # Wait 3 seconds before next retry
+    
+    print("⚠️ Timeout waiting for API sync. Proceeding anyway.")
+    return False
+
 def get_signature_list(central_org, central_repo, mode, token):
     path = f"signatures/{mode.lower()}.json"
     url = f"https://api.github.com/repos/{central_org}/{central_repo}/contents/{path}"
@@ -118,11 +151,9 @@ def main():
     
     if not local_token or not mothership_token: return
 
-    # 1. Fetch Lists
     cla_list, cla_sha, cla_url = get_signature_list(central_org, central_repo, "CLA", mothership_token)
     dco_list, dco_sha, dco_url = get_signature_list(central_org, central_repo, "DCO", mothership_token)
     
-    # 2. Search Recent PRs
     since = (datetime.utcnow() - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S")
     query = f'org:{current_org} is:pr is:open updated:>{since}'
     results = github_api(f"https://api.github.com/search/issues?q={urllib.parse.quote(query)}", local_token)
@@ -131,14 +162,9 @@ def main():
 
     for item in results.get("items", []):
         pr_user = item["user"]["login"]
-        
-        # --- OPTIMIZATION START ---
-        # Skip Members/Owners immediately (Free check, no API call)
-        # They are already bypassed by the main workflow.
         assoc = item.get("author_association", "NONE")
         if assoc in ["MEMBER", "OWNER"]:
             continue 
-        # --- OPTIMIZATION END ---
 
         repo_url = item["repository_url"]
         pr_number = item["number"]
@@ -146,15 +172,13 @@ def main():
         is_cla_signed = any(u.get("name", "").lower() == pr_user.lower() for u in cla_list)
         is_dco_signed = any(u.get("name", "").lower() == pr_user.lower() for u in dco_list)
         
-        # SCENARIO A: Already Signed (Force Green)
         if is_cla_signed or is_dco_signed:
-            print(f"User @{pr_user} is already signed (Assoc: {assoc}). Forcing Green.")
+            print(f"User @{pr_user} is already signed. Forcing Green.")
             pr_details = github_api(item["pull_request"]["url"], local_token)
             head_sha = pr_details["head"]["sha"]
             force_green_status(repo_url, head_sha, local_token, target_url=item["html_url"])
             continue
 
-        # SCENARIO B: Not Signed (Check for Comment)
         comments_url = item["comments_url"]
         comments = github_api(comments_url, local_token) or []
         mode_signed = None
@@ -184,26 +208,17 @@ def main():
             target_url = cla_url if mode_signed == "CLA" else dco_url
 
             if update_central_signature(target_url, target_sha, target_list, user_data, mode_signed, mothership_token):
-                # --- FIX START ---
-                
-                # 1. Force the Status to Green FIRST
+                # 1. Force Green
                 pr_details = github_api(item["pull_request"]["url"], local_token)
                 head_sha = pr_details["head"]["sha"]
                 force_green_status(repo_url, head_sha, local_token, target_url=item["html_url"])
                 
-                # 2. INCREASED WAIT TIME (Fixes the "Gray Button" Glitch)
-                # GitHub's "Branch Protection" engine is slower than its "Status" API.
-                # We must wait 10 seconds for them to sync before notifying the user.
-                print("Waiting 10s for GitHub Branch Protection to sync...")
-                time.sleep(10)
-                
-                # 3. Post the Comment LAST
-                # This acts as the "Wake Up" signal for the user's browser. 
-                # When the browser fetches new data to show this comment, 
-                # it will now see the status is ALREADY green.
+                # 2. SMART POLL (The Real Fix)
+                # We wait until the API actually reports 'success' before notifying user
+                wait_for_green_state(repo_url, head_sha, local_token)
+
+                # 3. Post Comment (Wake up UI)
                 post_success_comment(comments_url, pr_user, mode_signed, local_token)
-                
-                # --- FIX END ---
 
 if __name__ == "__main__":
     main()
