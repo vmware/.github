@@ -67,6 +67,7 @@ jobs:
           CONFIG_REPO: .github
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
+          PERMISSIVE_NAMES_JSON: ${{ github.workspace }}/.github-tools/data/permissive_names.json
         run: python .github-tools/scripts/policy_selector.py
 
       - name: Enforce ${{ steps.policy.outputs.mode }}
