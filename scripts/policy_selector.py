@@ -182,6 +182,19 @@ def main():
     
     print("::endgroup::")
 
+    # 5. Job Summary (UX Upgrade)
+    if "GITHUB_STEP_SUMMARY" in os.environ:
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            status_emoji = "✅" if (is_member or mode in ["CLA", "DCO"]) else "❌"
+            f.write(f"### Legal Compliance Report\n")
+            f.write(f"| User | Status | Requirement |\n")
+            f.write(f"| :--- | :--- | :--- |\n")
+            f.write(f"| @{pr_user} | {status_emoji} | **{mode}** |\n\n")
+            
+            if not (is_member or mode in ["CLA", "DCO"]):
+                f.write(f"> ⚠️ **Action Required:** Please comment exactly: \n")
+                f.write(f"> `I have read the {mode} Document and I hereby sign the {mode}`")
+                
 if __name__ == "__main__":
     main()
     
