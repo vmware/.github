@@ -184,11 +184,23 @@ def main():
             target_url = cla_url if mode_signed == "CLA" else dco_url
 
             if update_central_signature(target_url, target_sha, target_list, user_data, mode_signed, mothership_token):
-                post_success_comment(comments_url, pr_user, mode_signed, local_token)
+                # --- FIX START ---
                 
+                # 1. Force the Status to Green FIRST
                 pr_details = github_api(item["pull_request"]["url"], local_token)
                 head_sha = pr_details["head"]["sha"]
                 force_green_status(repo_url, head_sha, local_token, target_url=item["html_url"])
+                
+                # 2. Wait for GitHub DB to propagate (Crucial for UI sync)
+                time.sleep(2)
+
+                # 3. Post the Comment LAST
+                # This acts as the "Wake Up" signal for the user's browser. 
+                # When the browser fetches new data to show this comment, 
+                # it will now see the status is ALREADY green.
+                post_success_comment(comments_url, pr_user, mode_signed, local_token)
+                
+                # --- FIX END ---
 
 if __name__ == "__main__":
     main()
