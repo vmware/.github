@@ -1,9 +1,8 @@
 import os
 import json
 import urllib.request
-import urllib.parse
-from datetime import datetime, timedelta
 import policy_selector
+from datetime import datetime, timedelta
 
 def debug_log(message):
     print(f"::warning::{message}")
@@ -19,68 +18,86 @@ def github_api(url, token):
         with urllib.request.urlopen(req) as r:
             return json.loads(r.read().decode())
     except Exception as e:
-        debug_log(f"API Error: {e}")
+        debug_log(f"API Error for {url}: {e}")
         return {}
 
 def main():
-    debug_log("--- STARTING PRODUCTION SWEEPER (OPTIMIZED) ---")
+    debug_log("--- STARTING DIRECT INSTALLATION SWEEPER (WITH DATE FILTER) ---")
     
     gh_token = os.environ.get("GITHUB_TOKEN")
-    org_name = os.environ.get("CENTRAL_ORG") 
     base_path = os.environ.get("TOOLS_PATH", ".github-tools")
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 
-    if not org_name:
-        debug_log("❌ Error: CENTRAL_ORG environment variable is missing.")
+    # --- CONFIGURATION: DATE FILTER ---
+    # We only care about PRs updated in the last 24 hours.
+    # If a user comments "I sign", the PR 'updated_at' timestamp updates instantly.
+    HOURS_BACK = 24
+    cutoff_time = datetime.utcnow() - timedelta(hours=HOURS_BACK)
+    debug_log(f"🕒 Filtering: Ignoring PRs not updated since {cutoff_time.isoformat()}")
+
+    # 1. Get All Repositories this App is Installed On
+    install_url = f"{api_root}/installation/repositories?per_page=100"
+    repo_data = github_api(install_url, gh_token)
+    repos = repo_data.get("repositories", []) if isinstance(repo_data, dict) else []
+
+    if not repos:
+        debug_log("❌ No repositories found. Verify the GitHub App is installed.")
         return
 
-    # --- FILTER STRATEGY ---
-    # 1. Recency: Only check PRs updated in the last 24 hours.
-    #    This catches any new "I sign" comments without scanning stale PRs.
-    since_time = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S')
-    
-    # 2. Construction:
-    #    is:pr              -> Must be a Pull Request
-    #    is:open            -> Must be Open
-    #    is:public          -> Only Public Repos (Ignores internal private work)
-    #    archived:false     -> No archived repos
-    #    org:{org}          -> Your Organization
-    #    updated:>{time}    -> Only active PRs
-    query = f"is:pr is:open is:public archived:false org:{org_name} updated:>{since_time}"
-    
-    encoded_query = urllib.parse.quote(query)
-    url = f"{api_root}/search/issues?q={encoded_query}&per_page=100"
-    
-    debug_log(f"🔎 Scanning active Public PRs in '{org_name}' (updated since {since_time})...")
-    result = github_api(url, gh_token)
-    items = result.get("items", [])
-    
-    if not items:
-        debug_log("No active public PRs found (in the last 24h).")
-        return
+    debug_log(f"✅ App is installed on {len(repos)} repositories.")
 
-    debug_log(f"Found {len(items)} active PRs. Processing...")
+    total_prs_checked = 0
+    total_prs_skipped = 0
 
-    for item in items:
-        try:
-            repo_url = item.get("repository_url", "")
-            repo_full_name = repo_url.replace(f"{api_root}/repos/", "")
-            pr_number = item.get("number")
-            pr_user = item.get("user", {}).get("login")
-            
-            # Fetch details to get Head SHA
-            pr_details = github_api(item.get("url"), gh_token)
-            pr_head_sha = pr_details.get("head", {}).get("sha")
+    # 2. Iterate through each Repository
+    for repo in repos:
+        full_name = repo.get("full_name")
+        
+        # Sort by 'updated' desc so we see active ones first
+        pr_url = f"{api_root}/repos/{full_name}/pulls?state=open&sort=updated&direction=desc&per_page=100"
+        open_prs = github_api(pr_url, gh_token)
+        
+        if not open_prs or isinstance(open_prs, dict): 
+            continue
 
-            if not pr_head_sha: continue
+        # 3. Process the PRs
+        for pr in open_prs:
+            try:
+                pr_number = pr.get("number")
+                pr_updated_str = pr.get("updated_at") # Format: 2023-10-27T10:00:00Z
+                
+                # DATE CHECK
+                if pr_updated_str:
+                    # Robust parsing for ISO format (replacing Z with +00:00 for python < 3.11 safety, though we use 3.11)
+                    pr_date = datetime.fromisoformat(pr_updated_str.replace('Z', '+00:00'))
+                    # Remove timezone info for comparison if cutoff is naive, or ensure both aware.
+                    # Simplest approach: compare timestamps directly if possible or strip tz
+                    pr_date_naive = pr_date.replace(tzinfo=None)
+                    
+                    if pr_date_naive < cutoff_time:
+                        # Optimization: Since we sorted by updated desc, once we hit an old PR,
+                        # all subsequent PRs in this list are also old. We can break the loop early!
+                        total_prs_skipped += (len(open_prs) - open_prs.index(pr))
+                        break 
+                
+                # If we are here, the PR is active. Process it.
+                pr_head_sha = pr.get("head", {}).get("sha")
+                pr_user = pr.get("user", {}).get("login")
+                
+                if pr.get("draft") is True: continue
 
-            # Run Logic
-            policy_selector.process_single_pr(
-                pr_number, pr_head_sha, pr_user, 
-                repo_full_name, gh_token, base_path, api_root
-            )
-        except Exception as e:
-            debug_log(f"Failed to process PR {item.get('number')}: {e}")
+                debug_log(f"👉 Checking active PR {full_name}#{pr_number} (@{pr_user})")
+                
+                policy_selector.process_single_pr(
+                    pr_number, pr_head_sha, pr_user, 
+                    full_name, gh_token, base_path, api_root
+                )
+                total_prs_checked += 1
+                
+            except Exception as e:
+                debug_log(f"Failed to process PR {pr.get('number')}: {e}")
+
+    debug_log(f"--- SWEEP COMPLETE. Checked {total_prs_checked} active PRs. Skipped {total_prs_skipped} stale PRs. ---")
 
 if __name__ == "__main__":
     main()
