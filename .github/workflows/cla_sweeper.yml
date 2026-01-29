@@ -5,6 +5,11 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+# PREVENTS OVERLAPPING RUNS (Concurrency Safety)
+concurrency: 
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   statuses: write
@@ -57,7 +62,10 @@ jobs:
           CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
           CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           ORG_NAME: ${{ github.repository_owner }}
-          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}  # <--- CRITICAL FOR NEW SCRIPT
+          
+          # CRITICAL: This variable drives the Org Search
+          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
+          
           CONFIG_REPO: .github
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           TOOLS_PATH: .github-tools
@@ -70,5 +78,4 @@ jobs:
           else
             python .github-tools/scripts/policy_selector.py
           fi
-
           
