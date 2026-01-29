@@ -8,9 +8,9 @@ import requires_cla
 # --- CONFIGURATION ---
 STATUS_CONTEXT = "Check CLA/DCO" 
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
+SIGNATURE_PHRASE = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
 
 # --- USER FACING MESSAGE ---
-# This unified message works for both CLA and DCO scenarios.
 INSTRUCTION_MESSAGE_LINES = [
     "### 🛑 Legal Compliance Check Failed",
     "Hi @{user}, thank you for your contribution!",
@@ -49,7 +49,6 @@ def github_api(url, token, method="GET", data=None):
         if data: req.data = json.dumps(data).encode("utf-8")
         with urllib.request.urlopen(req) as r:
             if method == "DELETE": return {}
-            # Handle 204 No Content (often returned by Reactions API)
             if r.status == 204: return {} 
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
@@ -59,47 +58,53 @@ def github_api(url, token, method="GET", data=None):
         debug_log(f"Network Error: {e}")
         return None
 
+def get_open_prs(api_root, repo, token):
+    """Fetch all open PRs for the Sweeper Loop."""
+    url = f"{api_root}/repos/{repo}/pulls?state=open&per_page=100"
+    return github_api(url, token) or []
+
+def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
+    """Scans PR comments for the magic signature phrase."""
+    if not pr_number: return False
+    
+    url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
+    comments = github_api(url, token)
+    if not comments: return False
+
+    target_phrase = SIGNATURE_PHRASE.format(doc_type=doc_type)
+    
+    for c in comments:
+        body = c.get("body", "").strip()
+        comment_user = c.get("user", {}).get("login")
+        
+        # Verify User AND Phrase match
+        if comment_user == user and target_phrase in body:
+            # Found it! Now let's react to it to confirm receipt
+            comment_id = c.get("id")
+            add_reaction_to_comment(api_root, repo, comment_id, token)
+            return True
+            
+    return False
+
+def add_reaction_to_comment(api_root, repo, comment_id, token):
+    """Adds a Rocket emoji to the signature comment."""
+    reaction_url = f"{api_root}/repos/{repo}/issues/comments/{comment_id}/reactions"
+    # Check if already reacted? (Simplified: Just try to post, API handles dupes gracefully usually)
+    github_api(reaction_url, token, "POST", {"content": "rocket"})
+
 def post_pr_comment(api_root, repo, pr_number, message, token):
     if not pr_number: return
     comments_url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
     existing_comments = github_api(comments_url, token)
-    
-    # Avoid spam
     if existing_comments:
         for c in existing_comments:
             if "I have read the" in c.get("body", "") and "Sign via Comment" in c.get("body", ""):
-                debug_log("⚠️ Instruction comment already exists. Skipping.")
-                return
-
+                return # Skip duplicate instructions
     payload = {"body": message}
-    debug_log(f"💬 Posting instruction comment to PR #{pr_number}...")
     github_api(comments_url, token, "POST", payload)
 
-def add_reaction_to_comment(api_root, repo, pr_number, user, token):
-    """
-    Finds the user's signing comment and adds a Rocket emoji to confirm receipt.
-    This runs when the check passes (usually via Sweeper).
-    """
-    if not pr_number: return
-    comments_url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
-    comments = github_api(comments_url, token)
-    
-    if not comments: return
-
-    for c in comments:
-        # Look for the user's signature comment
-        if c.get("user", {}).get("login") == user and "I hereby sign" in c.get("body", ""):
-            comment_id = c.get("id")
-            reaction_url = f"{api_root}/repos/{repo}/issues/comments/{comment_id}/reactions"
-            # Add Rocket 🚀
-            debug_log(f"🚀 Adding reaction to comment {comment_id}...")
-            github_api(reaction_url, token, "POST", {"content": "rocket"})
-            return
-
 def force_merge_check_refresh(api_root, repo, pr_number, token):
-    """
-    Forces GitHub to recalculate mergeability to fix the infinite spinner.
-    """
+    """Fixes the UI Infinite Spinner."""
     url = f"{api_root}/repos/{repo}/pulls/{pr_number}"
     github_api(url, token)
 
@@ -114,87 +119,96 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}'...")
     github_api(url, token, "POST", payload)
 
-def main():
-    debug_log("--- STARTING COMPLIANCE CHECK ---")
+def process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root):
+    """Core Logic: Processes a single PR (used by both Main and Sweeper)."""
     
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    pr_head_sha = ""
-    pr_number = ""
-    repo_full_name = os.environ.get("GITHUB_REPOSITORY")
+    pr_number = pr_data.get("number")
+    pr_head_sha = pr_data.get("head", {}).get("sha")
+    pr_user = pr_data.get("user", {}).get("login") # Note: 'user' object in PR, 'author' in event
     
-    if event_path and os.path.exists(event_path):
-        with open(event_path, 'r') as f:
-            event = json.load(f)
-            pr_data = event.get("pull_request", {})
-            pr_head_sha = pr_data.get("head", {}).get("sha", "")
-            pr_number = pr_data.get("number")
-    
-    current_sha = os.environ.get("GITHUB_SHA", "")
-    pr_user = os.environ.get("PR_AUTHOR")
-    gh_token = os.environ.get("GITHUB_TOKEN")
-    base_path = os.environ.get("TOOLS_PATH", ".github-tools")
-    api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    if not pr_user: 
+        # Fallback for different event structures
+        pr_user = pr_data.get("head", {}).get("user", {}).get("login")
+
+    debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
     # Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
-        if pr_head_sha: 
-            set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Bypass", "", gh_token)
-        sys.exit(0)
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Bypass", "", gh_token)
+        return
 
-    # Policy Check
+    # Policy & Doc Type
     is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
     doc_type = "CLA" if is_strict else "DCO"
     
-    # Signature Check
+    # 1. Check JSON File (Official List)
     sig_file_path = f"{base_path}/signatures/{doc_type.lower()}.json"
-    has_signed = False
+    has_signed_json = False
     try:
         with open(sig_file_path, 'r') as f:
             data = json.load(f)
             contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
             for c in contributors:
                 if c.get("name", "").lower() == pr_user.lower():
-                    has_signed = True
+                    has_signed_json = True
                     break
-    except Exception as e:
-        debug_log(f"⚠️ Error reading signature file: {e}")
+    except Exception:
+        pass # File might be missing or empty
 
-    # Results
+    # 2. Check Comments (The "Sweeper" Check)
+    has_signed_comment = False
+    if not has_signed_json:
+        has_signed_comment = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
-    
-    if has_signed:
-        debug_log(f"✅ User {pr_user} has signed.")
-        if pr_head_sha:
-            set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
-        if current_sha and current_sha != pr_head_sha:
-            set_commit_status(api_root, repo_full_name, current_sha, "success", f"{doc_type} Signed", "", gh_token)
-        
-        # UX Polish: Refresh Spinner AND React to Comment
-        if pr_number:
-            time.sleep(1)
-            force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
-            # Try to react to their comment (if it exists) to close the loop
-            try:
-                add_reaction_to_comment(api_root, repo_full_name, pr_number, pr_user, gh_token)
-            except Exception:
-                pass # Non-critical failure
 
-        sys.exit(0)
-    else:
-        debug_log(f"❌ User {pr_user} has NOT signed.")
-        if pr_head_sha:
-            set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
+    # DECISION TIME
+    if has_signed_json or has_signed_comment:
+        debug_log(f"✅ User {pr_user} is COMPLIANT.")
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         
-        # Post Unified Instructions
-        if pr_number:
-            formatted_message = INSTRUCTION_MESSAGE.format(
-                user=pr_user, 
-                doc_type=doc_type, 
-                url=doc_url or "#"
-            )
-            post_pr_comment(api_root, repo_full_name, pr_number, formatted_message, gh_token)
-            
-        sys.exit(1)
+        # Apply UI Fixes
+        time.sleep(1)
+        force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
+    else:
+        debug_log(f"❌ User {pr_user} is NOT compliant.")
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
+        
+        # Post Instructions
+        formatted_message = INSTRUCTION_MESSAGE.format(user=pr_user, doc_type=doc_type, url=doc_url or "#")
+        post_pr_comment(api_root, repo_full_name, pr_number, formatted_message, gh_token)
+
+def main():
+    debug_log("--- STARTING COMPLIANCE ENGINE ---")
+    
+    repo_full_name = os.environ.get("GITHUB_REPOSITORY")
+    gh_token = os.environ.get("GITHUB_TOKEN")
+    base_path = os.environ.get("TOOLS_PATH", ".github-tools")
+    api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+
+    # MODE 1: Scheduled Sweeper (Batch Mode)
+    if event_name == "schedule":
+        debug_log("⏰ Running in SWEEPER MODE (Schedule)...")
+        open_prs = get_open_prs(api_root, repo_full_name, gh_token)
+        debug_log(f"found {len(open_prs)} open PRs.")
+        for pr in open_prs:
+            try:
+                process_single_pr(pr, repo_full_name, gh_token, base_path, api_root)
+            except Exception as e:
+                debug_log(f"Failed to process PR {pr.get('number')}: {e}")
+
+    # MODE 2: Event Trigger (Single PR Mode)
+    elif event_path and os.path.exists(event_path):
+        debug_log("⚡ Running in TRIGGER MODE (Event)...")
+        with open(event_path, 'r') as f:
+            event = json.load(f)
+            pr_data = event.get("pull_request")
+            if pr_data:
+                process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root)
+            else:
+                debug_log("No Pull Request data found in event. Exiting.")
 
 if __name__ == "__main__":
     main()
