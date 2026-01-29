@@ -1,7 +1,8 @@
 import os
 import json
 import urllib.request
-import policy_selector 
+import urllib.parse
+import policy_selector  # Imports the shared logic
 
 def debug_log(message):
     print(f"::warning::{message}")
@@ -24,7 +25,7 @@ def main():
     debug_log("--- STARTING CENTRALIZED ORGANIZATION SWEEPER ---")
     
     gh_token = os.environ.get("GITHUB_TOKEN")
-    org_name = os.environ.get("CENTRAL_ORG") # Need this to scan the Org
+    org_name = os.environ.get("CENTRAL_ORG") 
     base_path = os.environ.get("TOOLS_PATH", ".github-tools")
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 
@@ -32,36 +33,35 @@ def main():
         debug_log("❌ Error: CENTRAL_ORG environment variable is missing.")
         return
 
-    # 1. SEARCH for Open PRs across the ENTIRE Organization
-    # Query: is:pr is:open org:YourOrg archived:false
+    # 1. SEARCH for Open PRs
+    # Reliance on App Scope: This query asks for everything, but the Token
+    # limits the results to ONLY the repos where the App is installed.
     query = f"is:pr is:open org:{org_name} archived:false"
     encoded_query = urllib.parse.quote(query)
     url = f"{api_root}/search/issues?q={encoded_query}&per_page=100"
     
-    debug_log(f"🔎 Scanning Organization '{org_name}' for open PRs...")
+    debug_log(f"🔎 Scanning Organization '{org_name}' for open PRs (Scoped by App Installation)...")
     result = github_api(url, gh_token)
     items = result.get("items", [])
     
     if not items:
-        debug_log("No open PRs found in the Organization.")
+        debug_log("No open PRs found in the allowed repositories.")
         return
 
-    debug_log(f"Found {len(items)} open PRs across the Org. Processing...")
+    debug_log(f"Found {len(items)} open PRs. Processing...")
 
     # 2. Loop through found PRs
     for item in items:
         try:
-            # Extract Repo details from the 'repository_url' field
-            # Format: https://api.github.com/repos/ORG/REPO
+            # Extract Repo details
+            # item['repository_url'] format: https://api.github.com/repos/ORG/REPO
             repo_url = item.get("repository_url", "")
             repo_full_name = repo_url.replace(f"{api_root}/repos/", "")
             
             pr_number = item.get("number")
             pr_user = item.get("user", {}).get("login")
             
-            # Note: Search API results don't include the SHA. We need to fetch the PR details.
-            # Optimization: We could skip this fetch if we passed SHA logic differently, 
-            # but to reuse policy_selector safely, let's just fetch the PR.
+            # Optimization: Fetch PR details to get the Head SHA (Search API omits it)
             pr_details = github_api(item.get("url"), gh_token)
             pr_head_sha = pr_details.get("head", {}).get("sha")
 
@@ -69,7 +69,7 @@ def main():
                 continue
 
             # Call the shared logic
-            debug_log(f"👉 Checking {repo_full_name}#{pr_number} (@{pr_user})")
+            # This will use requires_cla logic to decide strictness
             policy_selector.process_single_pr(
                 pr_number, pr_head_sha, pr_user, 
                 repo_full_name, gh_token, base_path, api_root
@@ -78,6 +78,5 @@ def main():
             debug_log(f"Failed to process PR {item.get('number')}: {e}")
 
 if __name__ == "__main__":
-    import urllib.parse
     main()
     
