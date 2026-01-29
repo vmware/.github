@@ -9,14 +9,15 @@ import requires_cla
 STATUS_CONTEXT = "Check CLA/DCO" 
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
 
-# --- USER FACING MESSAGES ---
-
-# Message 1: The Instruction (Posted when they fail)
+# --- USER FACING MESSAGE ---
+# This unified message works for both CLA and DCO scenarios.
 INSTRUCTION_MESSAGE_LINES = [
     "### 🛑 Legal Compliance Check Failed",
     "Hi @{user}, thank you for your contribution!",
     "",
     "To merge this Pull Request, you must sign our **{doc_type}**.",
+    "",
+    "**Note:** Even if you signed off your commits locally (using `git commit -s`), you must post the comment below to register your signature with our automated system.",
     "",
     "**1. Read the Document:** [Click here to read the {doc_type}]({url})",
     "**2. Sign via Comment:** Copy and paste the exact line below into a new comment on this Pull Request:",
@@ -33,8 +34,6 @@ INSTRUCTION_MESSAGE_LINES = [
 ]
 INSTRUCTION_MESSAGE = "\n".join(INSTRUCTION_MESSAGE_LINES)
 
-# Message 2: The Receipt (Posted/Reacted when they pass via Sweeper)
-# Note: This runs silently in the background, but good to have the logic ready.
 
 def debug_log(message):
     print(f"::warning::{message}")
@@ -79,6 +78,7 @@ def post_pr_comment(api_root, repo, pr_number, message, token):
 def add_reaction_to_comment(api_root, repo, pr_number, user, token):
     """
     Finds the user's signing comment and adds a Rocket emoji to confirm receipt.
+    This runs when the check passes (usually via Sweeper).
     """
     if not pr_number: return
     comments_url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
@@ -97,6 +97,9 @@ def add_reaction_to_comment(api_root, repo, pr_number, user, token):
             return
 
 def force_merge_check_refresh(api_root, repo, pr_number, token):
+    """
+    Forces GitHub to recalculate mergeability to fix the infinite spinner.
+    """
     url = f"{api_root}/repos/{repo}/pulls/{pr_number}"
     github_api(url, token)
 
@@ -182,6 +185,7 @@ def main():
         if pr_head_sha:
             set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
         
+        # Post Unified Instructions
         if pr_number:
             formatted_message = INSTRUCTION_MESSAGE.format(
                 user=pr_user, 
