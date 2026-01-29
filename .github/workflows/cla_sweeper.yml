@@ -1,8 +1,6 @@
 name: Compliance Sweeper
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
@@ -41,7 +39,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # YOUR MANUAL CACHE STRATEGY
       - name: Cache Pip Packages
         uses: actions/cache@v4
         id: pip-cache
@@ -56,31 +53,22 @@ jobs:
 
       - name: Run Engine
         env:
-          # PASS APP TOKEN TO SCRIPT
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          
-          # Your Vars
           CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
           CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           ORG_NAME: ${{ github.repository_owner }}
-          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
+          CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}  # <--- CRITICAL FOR NEW SCRIPT
           CONFIG_REPO: .github
-          
-          # Ensure imports work
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           TOOLS_PATH: .github-tools
-          
-          # Documentation
           CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/CLA.md"
           DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/DCO.md"
         
-        # LOGIC SWITCH: 
-        # If triggered by 'schedule', run the Sweeper (Loop).
-        # If triggered by 'pull_request', run the Policy Selector (Single).
         run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
+          if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             python .github-tools/scripts/cla_sweeper.py
           else
             python .github-tools/scripts/policy_selector.py
           fi
+
           
