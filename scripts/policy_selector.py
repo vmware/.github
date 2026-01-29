@@ -63,6 +63,12 @@ def get_open_prs(api_root, repo, token):
     url = f"{api_root}/repos/{repo}/pulls?state=open&per_page=100"
     return github_api(url, token) or []
 
+def add_reaction_to_comment(api_root, repo, comment_id, token):
+    """Adds a Rocket emoji to the signature comment."""
+    if not comment_id: return
+    reaction_url = f"{api_root}/repos/{repo}/issues/comments/{comment_id}/reactions"
+    github_api(reaction_url, token, "POST", {"content": "rocket"})
+
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
     """Scans PR comments for the magic signature phrase."""
     if not pr_number: return False
@@ -77,20 +83,14 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
         body = c.get("body", "").strip()
         comment_user = c.get("user", {}).get("login")
         
-        # Verify User AND Phrase match
-        if comment_user == user and target_phrase in body:
-            # Found it! Now let's react to it to confirm receipt
-            comment_id = c.get("id")
-            add_reaction_to_comment(api_root, repo, comment_id, token)
-            return True
+        # FIX: Case-insensitive comparison for robustness
+        if comment_user and user and comment_user.lower() == user.lower():
+            if target_phrase in body:
+                comment_id = c.get("id")
+                add_reaction_to_comment(api_root, repo, comment_id, token)
+                return True
             
     return False
-
-def add_reaction_to_comment(api_root, repo, comment_id, token):
-    """Adds a Rocket emoji to the signature comment."""
-    reaction_url = f"{api_root}/repos/{repo}/issues/comments/{comment_id}/reactions"
-    # Check if already reacted? (Simplified: Just try to post, API handles dupes gracefully usually)
-    github_api(reaction_url, token, "POST", {"content": "rocket"})
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
     if not pr_number: return
@@ -124,10 +124,9 @@ def process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root):
     
     pr_number = pr_data.get("number")
     pr_head_sha = pr_data.get("head", {}).get("sha")
-    pr_user = pr_data.get("user", {}).get("login") # Note: 'user' object in PR, 'author' in event
-    
+    # Robust user extraction
+    pr_user = pr_data.get("user", {}).get("login") 
     if not pr_user: 
-        # Fallback for different event structures
         pr_user = pr_data.get("head", {}).get("user", {}).get("login")
 
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
@@ -153,7 +152,7 @@ def process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root):
                     has_signed_json = True
                     break
     except Exception:
-        pass # File might be missing or empty
+        pass 
 
     # 2. Check Comments (The "Sweeper" Check)
     has_signed_comment = False
@@ -174,7 +173,6 @@ def process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root):
         debug_log(f"❌ User {pr_user} is NOT compliant.")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
         
-        # Post Instructions
         formatted_message = INSTRUCTION_MESSAGE.format(user=pr_user, doc_type=doc_type, url=doc_url or "#")
         post_pr_comment(api_root, repo_full_name, pr_number, formatted_message, gh_token)
 
@@ -207,8 +205,6 @@ def main():
             pr_data = event.get("pull_request")
             if pr_data:
                 process_single_pr(pr_data, repo_full_name, gh_token, base_path, api_root)
-            else:
-                debug_log("No Pull Request data found in event. Exiting.")
 
 if __name__ == "__main__":
     main()
