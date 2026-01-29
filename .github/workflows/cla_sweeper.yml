@@ -1,13 +1,20 @@
 name: Compliance Sweeper
 
 on:
+  # 1. IMMEDIATE GATE (Runs when user interacts with PR)
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  
+  # 2. BATCH SWEEPER (Runs every 5 minutes)
   schedule:
     - cron: '*/5 * * * *'
+  
+  # 3. MANUAL TEST (Allows you to click "Run Now")
   workflow_dispatch:
 
-# PREVENTS OVERLAPPING RUNS (Concurrency Safety)
+# PREVENTS OVERLAPPING RUNS (Safety Mechanism)
 concurrency: 
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -17,7 +24,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  sweep:
+  compliance:
     runs-on: ubuntu-latest
     steps:
       - name: Generate Mothership Token
@@ -44,6 +51,7 @@ jobs:
         with:
           python-version: '3.11'
 
+      # YOUR MANUAL CACHE STRATEGY
       - name: Cache Pip Packages
         uses: actions/cache@v4
         id: pip-cache
@@ -58,20 +66,29 @@ jobs:
 
       - name: Run Engine
         env:
+          # TOKEN STRATEGY:
+          # We pass the App Token as GITHUB_TOKEN so the script has "Write" access
+          # to post comments and update status checks on the child repo.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          
+          # APP CONFIG:
           CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
           CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           ORG_NAME: ${{ github.repository_owner }}
-          
-          # CRITICAL: This variable drives the Org Search
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
           
+          # PATHS:
           CONFIG_REPO: .github
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           TOOLS_PATH: .github-tools
+          
+          # DOC LINKS:
           CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/CLA.md"
           DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/DCO.md"
         
+        # LOGIC SWITCH:
+        # If triggered by a Schedule (Cron) or Manual Dispatch -> Run the "Sweeper" (scans all PRs)
+        # If triggered by a PR Event -> Run the "Selector" (checks just that PR immediately)
         run: |
           if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             python .github-tools/scripts/cla_sweeper.py
