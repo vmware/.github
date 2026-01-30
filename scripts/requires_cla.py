@@ -77,10 +77,20 @@ def _override_requires_cla(norm_license: str, allowlist: dict) -> None | bool:
     section = allowlist.get("license_overrides") or {}
     req = {_norm_license_name(x) for x in (section.get("require_cla") or [])}
     dco = {_norm_license_name(x) for x in (section.get("allow_dco") or [])}
+
+  # --- DEBUG INSTRUMENTATION START ---
+    print(f"::warning::[DEBUG OVERRIDE] Checking Normalized License: '{norm_license}'")
+    print(f"::warning::   -> Looking inside 'require_cla' set: {sorted(list(req))}")
+    # -----------------------------------
+  
     if norm_license in req:
+        print(f"::warning::   -> ✅ MATCH FOUND: forcing require_cla=True")
         return True
     if norm_license in dco:
+        print(f"::warning::   -> MATCH FOUND: forcing require_cla=False (Allow DCO)")
         return False
+      
+     print(f"::warning::   -> ❌ NO MATCH in overrides. Using default policy.") 
     return None
 # --- end: license override helpers -------------------------------------------
 
