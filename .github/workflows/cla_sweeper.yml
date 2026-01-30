@@ -45,6 +45,7 @@ jobs:
           sparse-checkout: |
             scripts
             signatures
+            data
 
       - name: Setup Python
         uses: actions/setup-python@v5
