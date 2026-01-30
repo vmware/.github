@@ -75,22 +75,24 @@ def _override_requires_cla(norm_license: str, allowlist: dict) -> None | bool:
     Return True (force CLA), False (force DCO), or None (no override).
     """
     section = allowlist.get("license_overrides") or {}
+    # Use list comprehension for clearer debugging of the set contents
     req = {_norm_license_name(x) for x in (section.get("require_cla") or [])}
     dco = {_norm_license_name(x) for x in (section.get("allow_dco") or [])}
 
-  # --- DEBUG INSTRUMENTATION START ---
+    # --- DEBUG INSTRUMENTATION START ---
     print(f"::warning::[DEBUG OVERRIDE] Checking Normalized License: '{norm_license}'")
-    print(f"::warning::   -> Looking inside 'require_cla' set: {sorted(list(req))}")
+    # Convert set to sorted list for printing to avoid set string representation issues
+    print(f"::warning::   -> 'require_cla' list contains: {sorted(list(req))}")
     # -----------------------------------
-  
+
     if norm_license in req:
-        print(f"::warning::   -> ✅ MATCH FOUND: forcing require_cla=True")
+        print(f"::warning::   -> ✅ MATCH FOUND in require_cla! Forcing True.")
         return True
     if norm_license in dco:
-        print(f"::warning::   -> MATCH FOUND: forcing require_cla=False (Allow DCO)")
+        print(f"::warning::   -> MATCH FOUND in allow_dco! Forcing False.")
         return False
-      
-     print(f"::warning::   -> ❌ NO MATCH in overrides. Using default policy.") 
+    
+    print(f"::warning::   -> ❌ NO MATCH in overrides. Returning None.")
     return None
 # --- end: license override helpers -------------------------------------------
 
