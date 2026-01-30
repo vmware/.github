@@ -608,14 +608,30 @@ def detect_from_text(text: str) -> Dict[str, Any]:
                 best_f_id, best_f = key, sc
 
     picked_name, picked_sig = None, ""
-    if HAVE_RAPID and best_f >= FUZZY_STRONG:
-        picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
-    elif best_j >= JACCARD_ACCEPT or (HAVE_RAPID and best_f >= FUZZY_ACCEPT):
-        if HAVE_RAPID and (best_f - FUZZY_ACCEPT) > (best_j - JACCARD_ACCEPT):
-            picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
-        else:
-            picked_name, picked_sig = best_j_id, f"jaccard:{best_j:.3f}"
 
+    # --- REPLACE THE DECISION BLOCK ABOVE WITH THIS SAFE VERSION ---
+
+    picked_name, picked_sig = None, ""
+
+    # 1. TRUST STRUCTURE FIRST (The Fix)
+    # If Jaccard is > 0.85, the structure is nearly identical. 
+    # This correctly disqualifies "Subsets" (like MIT inside Broadcom).
+    if best_j >= 0.85:
+        picked_name, picked_sig = best_j_id, f"jaccard:{best_j:.3f}"
+
+    # 2. FALLBACK TO FUZZY (The Safety Net)
+    # Only if structure was poor (e.g. massive header text, weird formatting),
+    # we let Fuzzy take over to find the "best partial match".
+    elif HAVE_RAPID and best_f >= FUZZY_STRONG:
+        picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
+        
+    elif best_j >= JACCARD_ACCEPT: # Lower threshold (0.80)
+        picked_name, picked_sig = best_j_id, f"jaccard:{best_j:.3f}"
+        
+    elif HAVE_RAPID and best_f >= FUZZY_ACCEPT:
+        picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
+    # -----------------------------------------------------------
+      
     if picked_name:
         rec = _load_catalog_with_cache(LICENSES_JSON)[picked_name]
         return {"matched": True, "name": picked_name, "id": rec["spdx_id"], "match": picked_sig, "notes": notes}
