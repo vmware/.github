@@ -92,7 +92,12 @@ ANCHORS = [
     r"redistribution and use in source and binary forms",
     r"creative commons (attribution|zero|by|cc0)",
     r"this is free and unencumbered software released into the public domain",
-    r"the software is provided [\"'“”]?as is[\"'“”]?"
+    r"the software is provided [\"'“”]?as is[\"'“”]?",
+    # --- ADD THESE NEW ANCHORS ---
+    r"software license agreement",       # Capture custom headers like Broadcom's
+    r"copyright \(c\) ca, inc",          # Capture the specific vendor copyright
+    r"broadcom_source_available",        # Capture the ID if it appears in text
+    # -----------------------------
 ]
 SPDX_LINE_RE = re.compile(r"^spdx-license-identifier:\s*(?P<expr>.+)$", re.I | re.M)
 
