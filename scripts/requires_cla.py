@@ -59,15 +59,24 @@ def _norm_license_name(name: str) -> str:
 def _load_allowlist() -> dict:
     """Load .github/cla/allowlist.yml if present; return {} if missing or invalid."""
     if not _YAML_AVAILABLE:
+        print("::warning::[DEBUG] PyYAML not available.")
         return {}  
+
+    # print where we are looking
+    print(f"::warning::[DEBUG] Looking for allowlist at: {_ALLOWLIST_PATH}")
+
     try:
         with open(_ALLOWLIST_PATH, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
+            # Confirm we loaded keys
+            keys = list(data.get("license_overrides", {}).keys())
+            print(f"::warning::[DEBUG] Successfully loaded allowlist. Found override keys: {keys}")
             return data if isinstance(data, dict) else {}
     except FileNotFoundError:
+        print(f"::warning::[DEBUG] ❌ Allowlist NOT FOUND at: {_ALLOWLIST_PATH}")
         return {}
-    except Exception:
-        # Fail-closed (ignore if unreadable)
+    except Exception as e:
+        print(f"::warning::[DEBUG] ❌ Error loading allowlist: {e}")
         return {}
 
 def _override_requires_cla(norm_license: str, allowlist: dict) -> None | bool:
