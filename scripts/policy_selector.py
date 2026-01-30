@@ -67,22 +67,37 @@ def add_reaction_to_comment(api_root, repo, comment_id, token):
 
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
     if not pr_number: return False
-    url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
+    
+    # FIX 1: Fetch up to 100 comments (in case the PR is noisy)
+    url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
     comments = github_api(url, token)
     if not comments: return False
 
     target_phrase = SIGNATURE_PHRASE.format(doc_type=doc_type)
     
+    debug_log(f"🔎 Looking for signature: '{target_phrase}'")
+
     for c in comments:
-        body = c.get("body", "").strip()
+        # Raw body
+        body = c.get("body", "")
         comment_user = c.get("user", {}).get("login")
         
-        # FIX: Case-insensitive comparison
         if comment_user and user and comment_user.lower() == user.lower():
-            if target_phrase in body:
+            # FIX 2: Sanitize Invisible Characters (NBSP)
+            # We replace non-breaking spaces (\xa0) with normal spaces
+            normalized_body = body.replace("\xa0", " ").strip()
+            
+            if target_phrase in normalized_body:
                 comment_id = c.get("id")
+                debug_log(f"✅ Found matching signature from {user}!")
                 add_reaction_to_comment(api_root, repo, comment_id, token)
                 return True
+            else:
+                # Optional: Debug log to see close calls (Helpful for troubleshooting)
+                if "I hereby sign" in normalized_body:
+                    debug_log(f"⚠️ Close match found but failed exact check: '{normalized_body}'")
+
+    debug_log(f"❌ No matching signature found in {len(comments)} comments.")
     return False
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
