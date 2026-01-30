@@ -132,6 +132,76 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}'...")
     github_api(url, token, "POST", payload)
 
+import base64
+from datetime import datetime
+
+def record_signature(api_root, org_name, doc_type, user, token):
+    """
+    Fetches the signature JSON from the .github repo, adds the user, and commits it back.
+    """
+    # 1. Configuration
+    target_repo = f"{org_name}/.github"
+    file_path = f"signatures/{doc_type}.json"
+    url = f"{api_root}/repos/{target_repo}/contents/{file_path}"
+    
+    debug_log(f"💾 Attempting to record signature for @{user} in {target_repo}/{file_path}...")
+
+    # 2. Get current file content (we need the SHA to update it)
+    data = github_api(url, token)
+    if not data or "content" not in data:
+        debug_log(f"❌ Failed to fetch signature file. Check permissions for {target_repo}.")
+        return False
+
+    try:
+        # 3. Decode & Parse
+        file_content = base64.b64decode(data["content"]).decode("utf-8")
+        json_data = json.loads(file_content)
+        
+        # Handle 'signedContributors' list (CLA Assistant format)
+        if "signedContributors" not in json_data:
+            json_data["signedContributors"] = []
+            
+        contributors = json_data["signedContributors"]
+
+        # 4. Check if already exists (race condition check)
+        for c in contributors:
+            if isinstance(c, dict) and c.get("name", "").lower() == user.lower():
+                debug_log(f"ℹ️ User @{user} is already in the file.")
+                return True
+            elif isinstance(c, str) and c.lower() == user.lower():
+                 return True
+
+        # 5. Add User
+        new_entry = {
+            "name": user,
+            "signedAt": datetime.utcnow().isoformat() + "Z",
+            "org": org_name,
+            "repo": "detected-by-sweeper"
+        }
+        contributors.append(new_entry)
+        
+        # 6. Commit Changes (PUT Request)
+        updated_content = json.dumps(json_data, indent=2)
+        commit_message = f"Sign {doc_type} for @{user}"
+        
+        put_payload = {
+            "message": commit_message,
+            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+            "sha": data["sha"]
+        }
+        
+        response = github_api(url, token, "PUT", put_payload)
+        if response:
+            debug_log(f"✅ Successfully recorded signature for @{user}!")
+            return True
+        else:
+            debug_log(f"❌ Failed to write signature file.")
+            return False
+
+    except Exception as e:
+        debug_log(f"❌ Error updating signature file: {e}")
+        return False
+        
 def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token, base_path, api_root):
     """
     Reusable Logic for checking a single PR. 
@@ -175,13 +245,29 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
 
     # Result
-    if has_signed_json or has_signed_comment:
-        debug_log(f"✅ User {pr_user} is COMPLIANT.")
+    if has_signed_json:
+        # Case A: User is ALREADY in the JSON file. No write needed.
+        debug_log(f"✅ User {pr_user} is COMPLIANT (Found in JSON).")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
-        # UI Fixes
+        
+    elif has_signed_comment:
+        # Case B: User just signed via comment. We MUST write to disk.
+        debug_log(f"✅ User {pr_user} is COMPLIANT (Signature comment found).")
+        
+        # --- WRITE LOGIC START ---
+        # Derive org name from "org/repo" string
+        org_name = repo_full_name.split("/")[0]
+        record_signature(api_root, org_name, doc_type, pr_user, gh_token)
+        # --- WRITE LOGIC END ---
+        
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
+        
+        # UI Refresh
         time.sleep(1)
         force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
+        
     else:
+        # Case C: Not compliant
         debug_log(f"❌ User {pr_user} is NOT compliant.")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
         formatted_message = INSTRUCTION_MESSAGE.format(user=pr_user, doc_type=doc_type, url=doc_url or "#")
