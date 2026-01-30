@@ -227,7 +227,7 @@ def _hash_file_bytes(path: Path) -> str:
 # ---------- Catalog cache ----------
 def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     src_hash = _hash_file_bytes(licenses_path)
-    cache_file = CACHE_DIR / "licenses_all.cache.json"
+    cache_file = CACHE_DIR / "licenses_all.v2.cache.json"
 
     if cache_file.exists():
         try:
@@ -552,8 +552,29 @@ def detect_from_text(text: str) -> Dict[str, Any]:
 
     notes = None
     m = SPDX_LINE_RE.search(text or "")
+
+    # --- START PATCH: Trust the SPDX Header ---
     if m:
-        notes = f"spdx_hint={m.group('expr').strip()}"
+        spdx_hint = m.group('expr').strip()
+        notes = f"spdx_hint={spdx_hint}"
+
+        # Load catalog immediately to verify the hint
+        catalog = _load_catalog_with_cache(LICENSES_JSON)
+        
+        # Look up the ID from the header (e.g., "LicenseRef-Broadcom-...")
+        found_name = _catalog_find_by_spdx(spdx_hint, catalog)
+        
+        # If the header ID exists in our DB, trust it 100% and return immediately
+        if found_name:
+            rec = catalog[found_name]
+            return {
+                "matched": True,
+                "name": found_name,
+                "id": rec["spdx_id"],
+                "match": "spdx_header_hint",
+                "notes": notes
+            }
+    # --- END PATCH ---
 
     catalog = _load_catalog_with_cache(LICENSES_JSON)
 
