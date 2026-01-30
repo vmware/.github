@@ -140,6 +140,13 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
 
     # Policy & Doc Type
     is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
+
+    # --- ADDED DEBUG LOGGING ---
+    debug_log(f"🧐 POLICY DECISION for {repo_full_name}:")
+    debug_log(f"   requires_CLA() returned: {is_strict}")
+    debug_log(f"   Resulting doc_type: {'CLA' if is_strict else 'DCO'}")
+    # ---------------------------
+    
     doc_type = "CLA" if is_strict else "DCO"
     
     # 1. Check JSON File
