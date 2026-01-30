@@ -64,7 +64,13 @@ jobs:
 
       - name: Install Dependencies
         run: pip install requests aiohttp rapidfuzz pyyaml PyJWT cryptography
-
+        
+      - name: Fix Data Path
+        run: |
+          echo "Moving data folder to root..."
+          cp -r .github-tools/data .
+          ls -R data  # Optional: Verifies the file is there in the logs
+          
       - name: Run Engine
         env:
           # TOKEN STRATEGY:
