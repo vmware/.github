@@ -628,11 +628,22 @@ def detect_from_text(text: str) -> Dict[str, Any]:
             if sc > best_f:
                 best_f_id, best_f = key, sc
 
+    # --- DEBUG INSTRUMENTATION START ---
+    print(f"::warning::[DEBUG DETECTOR] Text Length: {len(body)}")
+    print(f"::warning::   -> Jaccard Score: {best_j:.3f} | Candidate: {best_j_id}")
+    if HAVE_RAPID:
+        print(f"::warning::   -> Fuzzy Score:   {best_f:.1f}  | Candidate: {best_f_id}")
+    else:
+        print(f"::warning::   -> RapidFuzz NOT installed.")
+        
+    if m:
+        print(f"::warning::   -> SPDX Header Found: {m.group('expr').strip()}")
+    # -----------------------------------
+  
     picked_name, picked_sig = None, ""
 
     # --- REPLACE THE DECISION BLOCK ABOVE WITH THIS SAFE VERSION ---
 
-    picked_name, picked_sig = None, ""
 
     # 1. TRUST STRUCTURE FIRST (The Fix)
     # If Jaccard is > 0.85, the structure is nearly identical. 
