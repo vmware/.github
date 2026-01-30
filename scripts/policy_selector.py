@@ -66,38 +66,44 @@ def add_reaction_to_comment(api_root, repo, comment_id, token):
         pass
 
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
+    """
+    Scans comments for a matching signature.
+    Includes 'Universal Acceptor' logic: matches EITHER CLA or DCO signatures
+    to prevent policy mismatches.
+    """
     if not pr_number: return False
     
-    # FIX 1: Fetch up to 100 comments (in case the PR is noisy)
+    # Pagination: Ensure we see all comments
     url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
     comments = github_api(url, token)
     if not comments: return False
 
-    target_phrase = SIGNATURE_PHRASE.format(doc_type=doc_type)
+    # FIX: Check for BOTH types of signatures.
+    possible_types = ["CLA", "DCO"]
     
-    debug_log(f"🔎 Looking for signature: '{target_phrase}'")
-
     for c in comments:
-        # Raw body
         body = c.get("body", "")
         comment_user = c.get("user", {}).get("login")
         
+        # Verify Author
         if comment_user and user and comment_user.lower() == user.lower():
-            # FIX 2: Sanitize Invisible Characters (NBSP)
-            # We replace non-breaking spaces (\xa0) with normal spaces
+            # Sanitize invisible characters (NBSP fix)
             normalized_body = body.replace("\xa0", " ").strip()
             
-            if target_phrase in normalized_body:
-                comment_id = c.get("id")
-                debug_log(f"✅ Found matching signature from {user}!")
-                add_reaction_to_comment(api_root, repo, comment_id, token)
-                return True
-            else:
-                # Optional: Debug log to see close calls (Helpful for troubleshooting)
-                if "I hereby sign" in normalized_body:
-                    debug_log(f"⚠️ Close match found but failed exact check: '{normalized_body}'")
+            # Check against BOTH CLA and DCO phrases
+            for current_type in possible_types:
+                target_phrase = SIGNATURE_PHRASE.format(doc_type=current_type)
+                
+                if target_phrase in normalized_body:
+                    debug_log(f"✅ Found matching {current_type} signature from {user}!")
+                    add_reaction_to_comment(api_root, repo, c.get("id"), token)
+                    return True
+            
+            # Debugging Help for Close Matches
+            if "I hereby sign" in normalized_body:
+                debug_log(f"⚠️ Close match found but failed exact check: '{normalized_body}'")
 
-    debug_log(f"❌ No matching signature found in {len(comments)} comments.")
+    debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
     return False
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
@@ -140,16 +146,14 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
 
     # Policy & Doc Type
     is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
-
-    # --- ADDED DEBUG LOGGING ---
+    
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}:")
     debug_log(f"   requires_CLA() returned: {is_strict}")
     debug_log(f"   Resulting doc_type: {'CLA' if is_strict else 'DCO'}")
-    # ---------------------------
-    
+
     doc_type = "CLA" if is_strict else "DCO"
     
-    # 1. Check JSON File
+    # 1. Check JSON File (Legacy/Manual)
     sig_file_path = f"{base_path}/signatures/{doc_type.lower()}.json"
     has_signed_json = False
     try:
@@ -163,7 +167,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     except Exception:
         pass 
 
-    # 2. Check Comments (The Logic Fix)
+    # 2. Check Comments (Universal Acceptor)
     has_signed_comment = False
     if not has_signed_json:
         has_signed_comment = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
