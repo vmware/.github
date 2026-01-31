@@ -141,7 +141,7 @@ def record_signature(api_root, org_name, doc_type, user, token):
     """
     # 1. Configuration
     target_repo = f"{org_name}/.github"
-    file_path = f"signatures/{doc_type}.json"
+    file_path = f"signatures/{doc_type.lower()}.json"
     url = f"{api_root}/repos/{target_repo}/contents/{file_path}"
     
     debug_log(f"💾 Attempting to record signature for @{user} in {target_repo}/{file_path}...")
