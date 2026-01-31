@@ -1,3 +1,11 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "rexracer23",
+      "id": 239053532,
+      "signedAt": "2026-01-31T09:59:17.345973Z",
+      "org": "vmware",
+      "repo": "vmware/test-cla-apache2"
+    }
+  ]
 }
