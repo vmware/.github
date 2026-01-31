@@ -1,3 +1,10 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "rexracer23",
+      "signedAt": "2026-01-31T05:01:08.646900Z",
+      "org": "vmware",
+      "repo": "detected-by-sweeper"
+    }
+  ]
 }
