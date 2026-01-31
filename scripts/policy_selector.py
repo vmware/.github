@@ -18,6 +18,7 @@ INSTRUCTION_MESSAGE_LINES = [
     "To merge this Pull Request, you must sign our **{doc_type}**.",
     "",
     "**Note:** Even if you signed off your commits locally (using `git commit -s`), you must post the comment below to register your signature with our automated system.",
+    "**Note:** This is a one-time process. Once signed, future pull requests will be verified automatically.",
     "",
     "**1. Read the Document:** [Click here to read the {doc_type}]({url})",
     "**2. Sign via Comment:** Copy and paste the exact line below into a new comment on this Pull Request:",
@@ -135,52 +136,55 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
 import base64
 from datetime import datetime
 
-def record_signature(api_root, org_name, doc_type, user, token):
+def record_signature(api_root, org_name, doc_type, user, repo_name, token):
     """
-    Fetches the signature JSON from the .github repo, adds the user, and commits it back.
+    Fetches the signature JSON, adds the user (with ID and real Repo), and commits it.
     """
-    # 1. Configuration
     target_repo = f"{org_name}/.github"
-    file_path = f"signatures/{doc_type.lower()}.json"
+    file_path = f"signatures/{doc_type.lower()}.json" # Enforce lowercase filename
     url = f"{api_root}/repos/{target_repo}/contents/{file_path}"
     
     debug_log(f"💾 Attempting to record signature for @{user} in {target_repo}/{file_path}...")
 
-    # 2. Get current file content (we need the SHA to update it)
+    # 1. Fetch User ID (Required for CLA Assistant Lite compatibility)
+    user_details = github_api(f"{api_root}/users/{user}", token)
+    user_id = user_details.get("id") if user_details else None
+
+    # 2. Get current file content
     data = github_api(url, token)
     if not data or "content" not in data:
         debug_log(f"❌ Failed to fetch signature file. Check permissions for {target_repo}.")
         return False
 
     try:
-        # 3. Decode & Parse
         file_content = base64.b64decode(data["content"]).decode("utf-8")
         json_data = json.loads(file_content)
         
-        # Handle 'signedContributors' list (CLA Assistant format)
         if "signedContributors" not in json_data:
             json_data["signedContributors"] = []
-            
+        
         contributors = json_data["signedContributors"]
 
-        # 4. Check if already exists (race condition check)
+        # 3. Check for duplicates
         for c in contributors:
-            if isinstance(c, dict) and c.get("name", "").lower() == user.lower():
-                debug_log(f"ℹ️ User @{user} is already in the file.")
-                return True
+            # Check by Name OR ID
+            if isinstance(c, dict):
+                if c.get("name", "").lower() == user.lower(): return True
+                if user_id and c.get("id") == user_id: return True
             elif isinstance(c, str) and c.lower() == user.lower():
                  return True
 
-        # 5. Add User
+        # 4. Add User (Standard Format)
         new_entry = {
             "name": user,
+            "id": user_id,  # Added ID for compatibility
             "signedAt": datetime.utcnow().isoformat() + "Z",
             "org": org_name,
-            "repo": "detected-by-sweeper"
+            "repo": repo_name # Use the REAL repo name
         }
         contributors.append(new_entry)
         
-        # 6. Commit Changes (PUT Request)
+        # 5. Commit
         updated_content = json.dumps(json_data, indent=2)
         commit_message = f"Sign {doc_type} for @{user}"
         
@@ -191,12 +195,7 @@ def record_signature(api_root, org_name, doc_type, user, token):
         }
         
         response = github_api(url, token, "PUT", put_payload)
-        if response:
-            debug_log(f"✅ Successfully recorded signature for @{user}!")
-            return True
-        else:
-            debug_log(f"❌ Failed to write signature file.")
-            return False
+        return True if response else False
 
     except Exception as e:
         debug_log(f"❌ Error updating signature file: {e}")
@@ -257,7 +256,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         # --- WRITE LOGIC START ---
         # Derive org name from "org/repo" string
         org_name = repo_full_name.split("/")[0]
-        record_signature(api_root, org_name, doc_type, pr_user, gh_token)
+        record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token)
         # --- WRITE LOGIC END ---
         
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
