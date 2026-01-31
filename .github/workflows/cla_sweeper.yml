@@ -46,6 +46,7 @@ jobs:
             scripts
             signatures
             data
+            cla
 
       - name: Setup Python
         uses: actions/setup-python@v5
