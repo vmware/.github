@@ -38,6 +38,41 @@ INSTRUCTION_MESSAGE = "\n".join(INSTRUCTION_MESSAGE_LINES)
 def debug_log(message):
     print(f"::warning::{message}")
 
+def is_org_member(api_root, org_name, user, token):
+    """
+    Checks if a user is a public or private member of the organization.
+    Endpoint: GET /orgs/{org}/members/{username}
+    Returns 204 (True) or 404 (False).
+    """
+    url = f"{api_root}/orgs/{org_name}/members/{user}"
+    
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "CLA-Sweeper"
+        })
+        with urllib.request.urlopen(req) as response:
+            # 204 No Content = User is a member
+            return response.getcode() == 204
+            
+    except urllib.error.HTTPError as e:
+        # 404 Not Found = User is NOT a member
+        if e.code == 404:
+            return False
+        # 302 Found = Requester is not a member of the org (shouldn't happen with App token)
+        if e.code == 302:
+            debug_log(f"⚠️ Membership check returned 302. Token might lack scope.")
+            return False
+        debug_log(f"⚠️ Error checking membership for {user}: {e}")
+        return False
+    except Exception as e:
+        debug_log(f"⚠️ Unexpected error checking membership: {e}")
+        return False
+        
 def github_api(url, token, method="GET", data=None):
     headers = {
         "Authorization": f"Bearer {token}", 
@@ -208,12 +243,20 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     """
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
-    # Bot Check
+    # 1. Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Bypass", "", gh_token)
         return
 
-    # Policy & Doc Type
+    # 2. Org Member/Owner Check (THE FIX)
+    org_name = repo_full_name.split("/")[0]
+    if is_org_member(api_root, org_name, pr_user, gh_token):
+        debug_log(f"🛡️ User @{pr_user} is an Organization Member. Skipping check.")
+        # We paint a generic 'Member Bypass' status so the PR goes Green
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Member Bypass", "", gh_token)
+        return
+        
+    # 3. Policy & Doc Type
     is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
     
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}:")
