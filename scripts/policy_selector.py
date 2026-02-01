@@ -56,7 +56,6 @@ def is_org_member(api_root, org_name, user, token):
             "User-Agent": "CLA-Sweeper"
         })
         with urllib.request.urlopen(req) as response:
-            with urllib.request.urlopen(req) as response:
             # --- DEBUG: WHAT PERMISSIONS DOES THIS TOKEN HAVE? ---
             accepted_scopes = response.headers.get('X-Accepted-OAuth-Scopes', 'none')
             actual_scopes = response.headers.get('X-OAuth-Scopes', 'none')
