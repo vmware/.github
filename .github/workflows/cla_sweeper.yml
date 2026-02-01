@@ -99,6 +99,28 @@ jobs:
         # If triggered by a Schedule (Cron) or Manual Dispatch -> Run the "Sweeper" (scans all PRs)
         # If triggered by a PR Event -> Run the "Selector" (checks just that PR immediately)
         run: |
+          # --- DEBUG STEP: VERIFY TOKENS IN SHELL ---
+          echo "::warning::[YAML DEBUG] Checking Shell Variables..."
+          
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::[YAML DEBUG] GH_TOKEN is EMPTY or MISSING in the shell!"
+          else
+            echo "::warning::[YAML DEBUG] GH_TOKEN is set (Length: ${#GH_TOKEN})"
+          fi
+
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::[YAML DEBUG] GITHUB_TOKEN is EMPTY or MISSING in the shell!"
+          else
+            echo "::warning::[YAML DEBUG] GITHUB_TOKEN is set (Length: ${#GITHUB_TOKEN})"
+          fi
+          # -------------------------------------------
+
+          if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            python .github-tools/scripts/cla_sweeper.py
+          else
+            python .github-tools/scripts/policy_selector.py
+          fi
+          
           if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             python .github-tools/scripts/cla_sweeper.py
           else
