@@ -35,6 +35,30 @@ INSTRUCTION_MESSAGE_LINES = [
 ]
 INSTRUCTION_MESSAGE = "\n".join(INSTRUCTION_MESSAGE_LINES)
 
+# --- TOKEN DEBUG BLOCK ---
+def debug_token_availability():
+    print("::warning::[PYTHON DEBUG] Inspecting Environment Variables inside Python...")
+    
+    # Check GH_TOKEN
+    gh_token = os.environ.get("GH_TOKEN")
+    if gh_token:
+        # Print first 4 chars to verify it's the App Token (usually starts with 'ghs_' or 'ghu_')
+        # DO NOT print the whole token.
+        print(f"::warning::[PYTHON DEBUG] ✅ GH_TOKEN found! Prefix: {gh_token[:4]}...")
+    else:
+        print("::error::[PYTHON DEBUG] ❌ GH_TOKEN is MISSING or None.")
+
+    # Check GITHUB_TOKEN
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if github_token:
+        print(f"::warning::[PYTHON DEBUG] ✅ GITHUB_TOKEN found! Prefix: {github_token[:4]}...")
+    else:
+        print("::warning::[PYTHON DEBUG] ⚠️ GITHUB_TOKEN is MISSING or None.")
+
+# Run the check immediately
+debug_token_availability()
+# -------------------------
+
 def debug_log(message):
     print(f"::warning::{message}")
 
