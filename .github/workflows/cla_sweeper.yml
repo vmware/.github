@@ -34,6 +34,10 @@ jobs:
           app-id: ${{ secrets.CLA_APP_ID }}
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           owner: ${{ vars.CENTRAL_ORG }}
+          # --- ADD THIS BLOCK TO FORCE PERMISSIONS ---
+          permissions: |
+            members: read
+            contents: read
 
       - name: Checkout Mothership Scripts
         uses: actions/checkout@v4
