@@ -74,6 +74,7 @@ jobs:
           
       - name: Run Engine
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # TOKEN STRATEGY:
           # We pass the App Token as GITHUB_TOKEN so the script has "Write" access
           # to post comments and update status checks on the child repo.
