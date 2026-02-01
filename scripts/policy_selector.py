@@ -39,14 +39,10 @@ def debug_log(message):
     print(f"::warning::{message}")
 
 def is_org_member(api_root, org_name, user, token):
-    """
-    Checks if a user is a public or private member of the organization.
-    """
     url = f"{api_root}/orgs/{org_name}/members/{user}"
-    
     import urllib.request
     import urllib.error
-
+    
     debug_log(f"🕵️ Checking membership for @{user} in {org_name}...")
 
     try:
@@ -55,29 +51,28 @@ def is_org_member(api_root, org_name, user, token):
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "CLA-Sweeper"
         })
+        # If this succeeds (204), we print scopes and return True
         with urllib.request.urlopen(req) as response:
-            # --- DEBUG: WHAT PERMISSIONS DOES THIS TOKEN HAVE? ---
-            accepted_scopes = response.headers.get('X-Accepted-OAuth-Scopes', 'none')
-            actual_scopes = response.headers.get('X-OAuth-Scopes', 'none')
-            print(f"::warning::[DEBUG SCOPE] Endpoint requires: {accepted_scopes}")
-            print(f"::warning::[DEBUG SCOPE] Token actually has: {actual_scopes}")
-            # -----------------------------------------------------
+            debug_log(f"::warning::[DEBUG SCOPE] Token has: {response.headers.get('X-OAuth-Scopes', 'none')}")
             if response.getcode() == 204:
-                debug_log(f"   -> ✅ GitHub API says: 204 (User IS a member)")
                 return True
-            return False
-            
+
     except urllib.error.HTTPError as e:
-        debug_log(f"   -> ❌ GitHub API error: {e.code} - {e.reason}")
+        # --- THE FIX: Print scopes from the ERROR object ---
+        # The headers are hidden inside 'e.headers' when it fails
+        actual_scopes = e.headers.get('X-OAuth-Scopes', 'none')
+        debug_log(f"::warning::[DEBUG SCOPE] Token actually has: {actual_scopes}")
+        debug_log(f"❌ GitHub API error: {e.code} - {e.reason}")
         
         if e.code == 404:
-            debug_log("   -> NOTE: 404 means 'Not Found'. If you ARE a member, the App lacks 'Organization > Members > Read' permission.")
-            return False
-            
+             debug_log("-> NOTE: 404 means 'Not Found'. If you ARE a member, check the scopes above!")
         return False
+        
     except Exception as e:
-        debug_log(f"   -> ⚠️ Unexpected error: {e}")
+        debug_log(f"⚠️ Unexpected error: {e}")
         return False
+    
+    return False
         
 def github_api(url, token, method="GET", data=None):
     headers = {
