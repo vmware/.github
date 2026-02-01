@@ -56,6 +56,13 @@ def is_org_member(api_root, org_name, user, token):
             "User-Agent": "CLA-Sweeper"
         })
         with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req) as response:
+            # --- DEBUG: WHAT PERMISSIONS DOES THIS TOKEN HAVE? ---
+            accepted_scopes = response.headers.get('X-Accepted-OAuth-Scopes', 'none')
+            actual_scopes = response.headers.get('X-OAuth-Scopes', 'none')
+            print(f"::warning::[DEBUG SCOPE] Endpoint requires: {accepted_scopes}")
+            print(f"::warning::[DEBUG SCOPE] Token actually has: {actual_scopes}")
+            # -----------------------------------------------------
             if response.getcode() == 204:
                 debug_log(f"   -> ✅ GitHub API says: 204 (User IS a member)")
                 return True
