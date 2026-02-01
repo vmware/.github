@@ -2,7 +2,7 @@ name: Compliance Sweeper
 
 on:
   # 1. IMMEDIATE GATE (Runs when user interacts with PR)
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
   
   # 2. BATCH SWEEPER (Runs every 5 minutes)
