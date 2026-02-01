@@ -40,7 +40,7 @@ def debug_token_availability():
     print("::warning::[PYTHON DEBUG] Inspecting Environment Variables inside Python...")
     
     # Check GH_TOKEN
-    gh_token = os.environ.get("GH_TOKEN")
+    gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if gh_token:
         # Print first 4 chars to verify it's the App Token (usually starts with 'ghs_' or 'ghu_')
         # DO NOT print the whole token.
