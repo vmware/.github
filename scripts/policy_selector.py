@@ -41,13 +41,13 @@ def debug_log(message):
 def is_org_member(api_root, org_name, user, token):
     """
     Checks if a user is a public or private member of the organization.
-    Endpoint: GET /orgs/{org}/members/{username}
-    Returns 204 (True) or 404 (False).
     """
     url = f"{api_root}/orgs/{org_name}/members/{user}"
     
     import urllib.request
     import urllib.error
+
+    debug_log(f"🕵️ Checking membership for @{user} in {org_name}...")
 
     try:
         req = urllib.request.Request(url, headers={
@@ -56,21 +56,21 @@ def is_org_member(api_root, org_name, user, token):
             "User-Agent": "CLA-Sweeper"
         })
         with urllib.request.urlopen(req) as response:
-            # 204 No Content = User is a member
-            return response.getcode() == 204
+            if response.getcode() == 204:
+                debug_log(f"   -> ✅ GitHub API says: 204 (User IS a member)")
+                return True
+            return False
             
     except urllib.error.HTTPError as e:
-        # 404 Not Found = User is NOT a member
+        debug_log(f"   -> ❌ GitHub API error: {e.code} - {e.reason}")
+        
         if e.code == 404:
+            debug_log("   -> NOTE: 404 means 'Not Found'. If you ARE a member, the App lacks 'Organization > Members > Read' permission.")
             return False
-        # 302 Found = Requester is not a member of the org (shouldn't happen with App token)
-        if e.code == 302:
-            debug_log(f"⚠️ Membership check returned 302. Token might lack scope.")
-            return False
-        debug_log(f"⚠️ Error checking membership for {user}: {e}")
+            
         return False
     except Exception as e:
-        debug_log(f"⚠️ Unexpected error checking membership: {e}")
+        debug_log(f"   -> ⚠️ Unexpected error: {e}")
         return False
         
 def github_api(url, token, method="GET", data=None):
