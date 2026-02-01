@@ -120,10 +120,4 @@ jobs:
           else
             python .github-tools/scripts/policy_selector.py
           fi
-          
-          if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            python .github-tools/scripts/cla_sweeper.py
-          else
-            python .github-tools/scripts/policy_selector.py
-          fi
-          
+
