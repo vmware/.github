@@ -99,7 +99,7 @@ jobs:
         # If triggered by a Schedule (Cron) or Manual Dispatch -> Run the "Sweeper" (scans all PRs)
         # If triggered by a PR Event -> Run the "Selector" (checks just that PR immediately)
         run: |
-          echo "::warning:: [SANITY CHECK] I AM RUNNING THE NEW YAML VER 1.0"  <-- Add this
+          echo "::warning:: [SANITY CHECK] I AM RUNNING THE NEW YAML VER 1.0"
           # --- DEBUG STEP: VERIFY TOKENS IN SHELL ---
           echo "::warning::[YAML DEBUG] Checking Shell Variables..."
           
