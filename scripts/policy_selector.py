@@ -2,8 +2,28 @@ import os
 import sys
 import json
 import urllib.request
+import urllib.error
 import time
-import requires_cla 
+
+# --- [INTEGRATION START] IMPORT CLA AUTHENTICATION MODULE ---
+# This module is responsible for auto-installing dependencies (PyJWT, Cryptography)
+# and generating a "Super Token" to bypass stale YAML configurations.
+try:
+    import cla_auth
+except ImportError:
+    # This acts as a fallback or warning if the file is missing in local testing
+    print("::warning::[SETUP] 'cla_auth.py' module not found. Token upgrade checks may fail.")
+
+try:
+    import requires_cla
+except ImportError:
+    # Fallback for local testing if requires_cla is missing
+    print("::warning::[SETUP] 'requires_cla' module not found. Assuming strict CLA policy.")
+    class requires_cla_stub:
+        @staticmethod
+        def requires_CLA(repo, token=None): return True
+    requires_cla = requires_cla_stub
+# --- [INTEGRATION END] -------------------------------------
 
 # --- CONFIGURATION ---
 STATUS_CONTEXT = "Check CLA/DCO" 
@@ -35,6 +55,52 @@ INSTRUCTION_MESSAGE_LINES = [
 ]
 INSTRUCTION_MESSAGE = "\n".join(INSTRUCTION_MESSAGE_LINES)
 
+# --- [INTEGRATION START] TOKEN UPGRADE LOGIC ---
+def ensure_valid_token():
+    """
+    Checks if the current environment has valid credentials.
+    If 'CLA_APP_ID' and 'CLA_APP_PRIVATE_KEY' are present, it uses cla_auth
+    to generate a fresh token with 'members:read' and 'statuses:write' permissions.
+    This fixes the '404 Not Found' errors caused by stale YAML in child repos.
+    """
+    # Check if we've already done this to avoid spamming logs
+    if os.environ.get("CLA_TOKEN_UPGRADED") == "true":
+        return
+
+    print("::warning::[AUTH] Checking for available credentials to upgrade token...")
+    
+    app_id = os.environ.get("CLA_APP_ID")
+    private_key = os.environ.get("CLA_APP_PRIVATE_KEY")
+    org_name = os.environ.get("CENTRAL_ORG") or "vmware"
+
+    # If we don't have the App secrets, we can't upgrade.
+    if not app_id or not private_key:
+        print("::warning::[AUTH] CLA_APP_ID or CLA_APP_PRIVATE_KEY missing. Cannot perform token upgrade.")
+        return
+
+    try:
+        # Generate the Super Token using the new cla_auth module
+        # print(f"::warning::[AUTH] Attempting to generate FRESH token for org: {org_name}...")
+        fresh_token = cla_auth.get_installation_access_token(app_id, private_key, org_name)
+        
+        if fresh_token:
+            # OVERWRITE the environment variables so all subsequent functions use the new token
+            os.environ["GH_TOKEN"] = fresh_token
+            os.environ["GITHUB_TOKEN"] = fresh_token
+            os.environ["CLA_TOKEN_UPGRADED"] = "true" # Mark as done
+            print("::warning::[AUTH] ✅ Token Upgrade Successful! (Permissions: members:read, statuses:write enforced)")
+        else:
+            print("::error::[AUTH] Token Upgrade Failed. The script will proceed with the default token (which may fail).")
+            
+    except Exception as e:
+        print(f"::error::[AUTH CRASH] Unexpected error during token upgrade: {e}")
+
+# --- EXECUTE TOKEN UPGRADE IMMEDIATELY ON IMPORT ---
+# This ensures that both 'policy_selector.py' (Event) AND 'cla_sweeper.py' (Schedule)
+# benefit from the fix without changing any other files.
+ensure_valid_token()
+# ---------------------------------------------------
+
 # --- TOKEN DEBUG BLOCK ---
 def debug_token_availability():
     print("::warning::[PYTHON DEBUG] Inspecting Environment Variables inside Python...")
@@ -43,7 +109,6 @@ def debug_token_availability():
     gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if gh_token:
         # Print first 4 chars to verify it's the App Token (usually starts with 'ghs_' or 'ghu_')
-        # DO NOT print the whole token.
         print(f"::warning::[PYTHON DEBUG] ✅ GH_TOKEN found! Prefix: {gh_token[:4]}...")
     else:
         print("::error::[PYTHON DEBUG] ❌ GH_TOKEN is MISSING or None.")
@@ -55,7 +120,7 @@ def debug_token_availability():
     else:
         print("::warning::[PYTHON DEBUG] ⚠️ GITHUB_TOKEN is MISSING or None.")
 
-# Run the check immediately
+# Run the debug check immediately (restored to global scope)
 debug_token_availability()
 # -------------------------
 
@@ -64,8 +129,6 @@ def debug_log(message):
 
 def is_org_member(api_root, org_name, user, token):
     url = f"{api_root}/orgs/{org_name}/members/{user}"
-    import urllib.request
-    import urllib.error
     
     debug_log(f"🕵️ Checking membership for @{user} in {org_name}...")
 
@@ -82,7 +145,6 @@ def is_org_member(api_root, org_name, user, token):
                 return True
 
     except urllib.error.HTTPError as e:
-        # --- THE FIX: Print scopes from the ERROR object ---
         # The headers are hidden inside 'e.headers' when it fails
         actual_scopes = e.headers.get('X-OAuth-Scopes', 'none')
         debug_log(f"::warning::[DEBUG SCOPE] Token actually has: {actual_scopes}")
@@ -266,6 +328,11 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     Reusable Logic for checking a single PR. 
     Called by main() (Event) OR by cla_sweeper.py (Schedule).
     """
+    
+    # [INTEGRATION] Ensure we grab the upgraded token if it exists
+    # This protects us if the caller (cla_sweeper.py) passed a stale token.
+    gh_token = os.environ.get("GH_TOKEN") or gh_token
+
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
     # 1. Bot Check
