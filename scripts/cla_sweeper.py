@@ -24,24 +24,36 @@ def github_api(url, token):
 def main():
     debug_log("--- STARTING DIRECT INSTALLATION SWEEPER (WITH DATE FILTER) ---")
     
-    gh_token = os.environ.get("GITHUB_TOKEN")
+    # 1. AUTHENTICATION HANDOFF
+    # Ensure the token logic in policy_selector has run.
+    # We grab GH_TOKEN first because cla_auth sets that one explicitly.
+    if hasattr(policy_selector, "ensure_valid_token"):
+        policy_selector.ensure_valid_token()
+        
+    gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    
+    if gh_token:
+        debug_log(f"[SWEEPER AUTH] Using Token with prefix: {gh_token[:4]}...")
+    else:
+        debug_log("❌ [SWEEPER AUTH] No Token found! Logic will likely fail.")
+
     base_path = os.environ.get("TOOLS_PATH", ".github-tools")
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 
     # --- CONFIGURATION: DATE FILTER ---
     # We only care about PRs updated in the last 24 hours.
-    # If a user comments "I sign", the PR 'updated_at' timestamp updates instantly.
     HOURS_BACK = 24
     cutoff_time = datetime.utcnow() - timedelta(hours=HOURS_BACK)
     debug_log(f"🕒 Filtering: Ignoring PRs not updated since {cutoff_time.isoformat()}")
 
-    # 1. Get All Repositories this App is Installed On
+    # 2. Get All Repositories this App is Installed On
+    # This call REQUIRES the App Token (ghs_). A standard GITHUB_TOKEN will fail here.
     install_url = f"{api_root}/installation/repositories?per_page=100"
     repo_data = github_api(install_url, gh_token)
     repos = repo_data.get("repositories", []) if isinstance(repo_data, dict) else []
 
     if not repos:
-        debug_log("❌ No repositories found. Verify the GitHub App is installed.")
+        debug_log("❌ No repositories found. Verify the GitHub App is installed and the Token is valid.")
         return
 
     debug_log(f"✅ App is installed on {len(repos)} repositories.")
@@ -49,7 +61,7 @@ def main():
     total_prs_checked = 0
     total_prs_skipped = 0
 
-    # 2. Iterate through each Repository
+    # 3. Iterate through each Repository
     for repo in repos:
         full_name = repo.get("full_name")
         
@@ -60,23 +72,20 @@ def main():
         if not open_prs or isinstance(open_prs, dict): 
             continue
 
-        # 3. Process the PRs
+        # 4. Process the PRs
         for pr in open_prs:
             try:
                 pr_number = pr.get("number")
-                pr_updated_str = pr.get("updated_at") # Format: 2023-10-27T10:00:00Z
+                pr_updated_str = pr.get("updated_at") 
                 
                 # DATE CHECK
                 if pr_updated_str:
-                    # Robust parsing for ISO format (replacing Z with +00:00 for python < 3.11 safety, though we use 3.11)
+                    # Robust parsing for ISO format
                     pr_date = datetime.fromisoformat(pr_updated_str.replace('Z', '+00:00'))
-                    # Remove timezone info for comparison if cutoff is naive, or ensure both aware.
-                    # Simplest approach: compare timestamps directly if possible or strip tz
                     pr_date_naive = pr_date.replace(tzinfo=None)
                     
                     if pr_date_naive < cutoff_time:
-                        # Optimization: Since we sorted by updated desc, once we hit an old PR,
-                        # all subsequent PRs in this list are also old. We can break the loop early!
+                        # Optimization: Break early if we hit old PRs
                         total_prs_skipped += (len(open_prs) - open_prs.index(pr))
                         break 
                 
@@ -88,6 +97,7 @@ def main():
 
                 debug_log(f"👉 Checking active PR {full_name}#{pr_number} (@{pr_user})")
                 
+                # Delegate to the shared logic
                 policy_selector.process_single_pr(
                     pr_number, pr_head_sha, pr_user, 
                     full_name, gh_token, base_path, api_root
