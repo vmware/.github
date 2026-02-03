@@ -145,8 +145,6 @@ def is_org_member(api_root, org_name, user, token):
 
     except urllib.error.HTTPError as e:
         # The headers are hidden inside 'e.headers' when it fails
-        actual_scopes = e.headers.get('X-OAuth-Scopes', 'none')
-        debug_log(f"::warning::[DEBUG SCOPE] Token actually has: {actual_scopes}")
         debug_log(f"❌ GitHub API error: {e.code} - {e.reason}")
         
         if e.code == 404:
