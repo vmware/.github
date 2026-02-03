@@ -140,7 +140,6 @@ def is_org_member(api_root, org_name, user, token):
         })
         # If this succeeds (204), we print scopes and return True
         with urllib.request.urlopen(req) as response:
-            debug_log(f"::warning::[DEBUG SCOPE] Token has: {response.headers.get('X-OAuth-Scopes', 'none')}")
             if response.getcode() == 204:
                 return True
 
