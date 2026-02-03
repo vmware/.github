@@ -60,7 +60,7 @@ jobs:
       # 4. INSTALL DEPENDENCIES
       # We include rapidfuzz/aiohttp because your 'requires_cla.py' helper needs them.
       - name: Install Dependencies
-        run: pip install pyyaml PyJWT cryptography rapidfuzz aiohttp
+        run: pip install pyyaml PyJWT cryptography rapidfuzz aiohttp requests
 
       # 5. RUN COMPLIANCE CHECK
       # This single step now handles everything: 
@@ -71,6 +71,9 @@ jobs:
       - name: Verify Compliance
         id: policy
         env:
+          CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
+          CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
+          
           # Auth & Context
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
