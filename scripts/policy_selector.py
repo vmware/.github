@@ -6,6 +6,8 @@ import urllib.error
 import time
 import yaml
 import base64
+import gzip
+import io
 
 # --- [INTEGRATION START] IMPORT CLA AUTHENTICATION MODULE ---
 try:
@@ -116,7 +118,9 @@ def github_api(url, token, method="GET", data=None):
             if r.status == 204: return {} 
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        debug_log(f"API Error {e.code} for {url}: {e.read().decode()}")
+        # Don't log 404s noisily, the caller handles fallbacks
+        if e.code != 404:
+            debug_log(f"API Error {e.code} for {url}: {e.read().decode()}")
         return None
     except Exception as e:
         debug_log(f"Network Error: {e}")
@@ -125,40 +129,84 @@ def github_api(url, token, method="GET", data=None):
 # --- UNIFIED RESOURCE LOADER ---
 def fetch_mothership_file(api_root, file_path, token):
     """
-    Fetches raw file content (string) from the central repo via API.
+    Fetches raw file content from the central repo via API.
+    Handles:
+      1. Normal files
+      2. Large files (>1MB) via Blob API
+      3. Gzip compressed files (.gz) via implicit decompression
     """
     central_org = os.environ.get("CENTRAL_ORG") or "vmware"
     mothership_repo = f"{central_org}/.github"
+    
+    # 1. Request File Metadata
     url = f"{api_root}/repos/{mothership_repo}/contents/{file_path}"
     debug_log(f"📥 API Fetch: {mothership_repo}/{file_path}")
     
     data = github_api(url, token)
-    if data and "content" in data:
+    
+    content_b64 = None
+    
+    if data:
+        # CASE A: Standard file (<1MB), content is included
+        if "content" in data and data["content"]:
+            content_b64 = data["content"]
+            
+        # CASE B: Large file (>1MB), content is missing, use Blob SHA
+        elif "sha" in data:
+            debug_log(f"📦 Large file detected ({data.get('size')} bytes). Fetching blob {data['sha']}...")
+            blob_url = f"{api_root}/repos/{mothership_repo}/git/blobs/{data['sha']}"
+            blob_data = github_api(blob_url, token)
+            if blob_data and "content" in blob_data:
+                content_b64 = blob_data["content"]
+    
+    if content_b64:
         try:
-            return base64.b64decode(data["content"]).decode("utf-8")
+            # Decode Base64
+            decoded_bytes = base64.b64decode(content_b64)
+            
+            # Decompress if it's GZIP
+            if file_path.endswith(".gz"):
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(decoded_bytes)) as gz:
+                        return gz.read().decode("utf-8")
+                except Exception as gz_e:
+                    debug_log(f"❌ Gzip Decompression Failed: {gz_e}")
+                    return None
+            
+            # Normal String
+            return decoded_bytes.decode("utf-8")
+            
         except Exception as e:
-            debug_log(f"❌ Failed to decode file {file_path}: {e}")
+            debug_log(f"❌ Failed to decode/read file {file_path}: {e}")
             return None
+            
     return None
 
 def fetch_json_with_fallback(api_root, primary_path, secondary_path, token):
     """
-    Fetches and PARSES a JSON file from the API (Try primary, then fallback).
-    Returns the Python object (list/dict) or None.
+    Fetches JSON. Tries:
+      1. primary_path
+      2. primary_path + .gz
+      3. secondary_path
+      4. secondary_path + .gz
     """
-    # 1. Try Primary
-    raw = fetch_mothership_file(api_root, primary_path, token)
-    if not raw:
-        # 2. Try Fallback
-        debug_log(f"⚠️ Primary path {primary_path} failed. Trying fallback: {secondary_path}")
-        raw = fetch_mothership_file(api_root, secondary_path, token)
+    candidates = [
+        primary_path, 
+        f"{primary_path}.gz", 
+        secondary_path, 
+        f"{secondary_path}.gz"
+    ]
     
-    if raw:
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            debug_log(f"❌ JSON Parse Error for {primary_path}/{secondary_path}: {e}")
-            return None
+    for path in candidates:
+        raw = fetch_mothership_file(api_root, path, token)
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                debug_log(f"❌ JSON Parse Error for {path}: {e}")
+                continue # Try next candidate
+    
+    debug_log(f"⚠️ Failed to load JSON from any candidate: {candidates[0]}...")
     return None
 
 def add_reaction_to_comment(api_root, repo, comment_id, token):
@@ -287,7 +335,6 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     # --- 1. FETCH CONFIGURATION (API -> MEMORY) ---
     
     # A. Allowlist (Try cla/ -> data/)
-    # We fetch raw string because it's YAML
     raw_allowlist = fetch_mothership_file(api_root, "cla/allowlist.yml", gh_token)
     if not raw_allowlist:
         raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
@@ -301,13 +348,17 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
 
-    # B. Licenses (Try data/ -> cla/) - Returns List of Dicts
+    # B. Licenses (Robust Fetch)
+    # Tries: data/.json -> data/.json.gz -> cla/.json -> cla/.json.gz
     licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token)
+    
     if not licenses_data:
-        debug_log("⚠️ Licenses not found in API. Defaulting to empty list.")
+        debug_log("⚠️ Licenses not found in API (Checked .json and .gz in data/ and cla/). Defaulting to empty list.")
         licenses_data = []
+    else:
+        debug_log(f"✅ Licenses loaded via API. Count: {len(licenses_data)}")
 
-    # C. Permissive Names (Try data/ -> cla/) - Returns List of Strings
+    # C. Permissive Names (Robust Fetch)
     permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token)
     if not permissive_data:
          debug_log("⚠️ Permissive Names not found in API. Defaulting to empty list.")
