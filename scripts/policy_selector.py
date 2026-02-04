@@ -6,7 +6,6 @@ import urllib.error
 import time
 import yaml
 import base64
-import tempfile 
 
 # --- [INTEGRATION START] IMPORT CLA AUTHENTICATION MODULE ---
 try:
@@ -20,7 +19,7 @@ except ImportError:
     print("::warning::[SETUP] 'requires_cla' module not found. Assuming strict CLA policy.")
     class requires_cla_stub:
         @staticmethod
-        def requires_CLA(repo, token=None): return True
+        def requires_CLA(repo, token=None, licenses_data=None, permissive_data=None): return True
     requires_cla = requires_cla_stub
 # --- [INTEGRATION END] -------------------------------------
 
@@ -123,15 +122,14 @@ def github_api(url, token, method="GET", data=None):
         debug_log(f"Network Error: {e}")
         return None
 
-# --- UNIFIED RESOURCE LOADER (WITH FALLBACKS) ---
+# --- UNIFIED RESOURCE LOADER ---
 def fetch_mothership_file(api_root, file_path, token):
     """
-    Fetches a file from the central repo via API.
+    Fetches raw file content (string) from the central repo via API.
     """
     central_org = os.environ.get("CENTRAL_ORG") or "vmware"
     mothership_repo = f"{central_org}/.github"
     url = f"{api_root}/repos/{mothership_repo}/contents/{file_path}"
-    
     debug_log(f"📥 API Fetch: {mothership_repo}/{file_path}")
     
     data = github_api(url, token)
@@ -143,17 +141,25 @@ def fetch_mothership_file(api_root, file_path, token):
             return None
     return None
 
-def fetch_file_with_fallback(api_root, primary_path, secondary_path, token):
+def fetch_json_with_fallback(api_root, primary_path, secondary_path, token):
     """
-    Tries to fetch the file from the primary path.
-    If that fails, tries the secondary path.
+    Fetches and PARSES a JSON file from the API (Try primary, then fallback).
+    Returns the Python object (list/dict) or None.
     """
-    content = fetch_mothership_file(api_root, primary_path, token)
-    if content:
-        return content
+    # 1. Try Primary
+    raw = fetch_mothership_file(api_root, primary_path, token)
+    if not raw:
+        # 2. Try Fallback
+        debug_log(f"⚠️ Primary path {primary_path} failed. Trying fallback: {secondary_path}")
+        raw = fetch_mothership_file(api_root, secondary_path, token)
     
-    debug_log(f"⚠️ Primary path {primary_path} failed. Trying fallback: {secondary_path}")
-    return fetch_mothership_file(api_root, secondary_path, token)
+    if raw:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            debug_log(f"❌ JSON Parse Error for {primary_path}/{secondary_path}: {e}")
+            return None
+    return None
 
 def add_reaction_to_comment(api_root, repo, comment_id, token):
     if not comment_id: return
@@ -278,11 +284,15 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Member Bypass", "", gh_token)
         return
         
-    # --- [SECURE] LOAD ALLOWLIST (API) ---
-    # UPDATED: Try 'cla/' first as requested, then 'data/'
-    raw_allowlist = fetch_file_with_fallback(api_root, "cla/allowlist.yml", "data/allowlist.yml", gh_token)
-    allowlist_repos = []
+    # --- 1. FETCH CONFIGURATION (API -> MEMORY) ---
     
+    # A. Allowlist (Try cla/ -> data/)
+    # We fetch raw string because it's YAML
+    raw_allowlist = fetch_mothership_file(api_root, "cla/allowlist.yml", gh_token)
+    if not raw_allowlist:
+        raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
+        
+    allowlist_repos = []
     if raw_allowlist:
         try:
             allowlist_data = yaml.safe_load(raw_allowlist)
@@ -290,32 +300,34 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
             debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} repos.")
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
-    else:
-        debug_log("⚠️ Allowlist not found in 'cla/' or 'data/'. Proceeding with empty list.")
 
-    # --- [SECURE] LOAD LICENSES (API + TEMP FILE) ---
-    # UPDATED: Try 'cla/' first as requested, then 'data/'
-    raw_licenses = fetch_file_with_fallback(api_root, "cla/licenses_all.json", "data/licenses_all.json", gh_token)
-    
-    # SAFETY: If API fails completely, use an empty JSON array to prevent FileNotFound crash
-    if not raw_licenses:
-        debug_log("❌ CRITICAL: Could not load licenses from API. Using empty fallback.")
-        raw_licenses = "[]"
-    
-    # Context manager ensures file is DELETED after use
-    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=True) as temp_license_file:
-        temp_license_file.write(raw_licenses)
-        temp_license_file.flush()
-        
-        # Point env var to the temp file so requires_cla finds it
-        os.environ["LICENSES_JSON"] = temp_license_file.name
-        debug_log(f"✅ Licenses loaded into temp file: {temp_license_file.name}")
+    # B. Licenses (Try data/ -> cla/) - Returns List of Dicts
+    licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token)
+    if not licenses_data:
+        debug_log("⚠️ Licenses not found in API. Defaulting to empty list.")
+        licenses_data = []
 
-        # 3. Policy & Doc Type
-        is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
+    # C. Permissive Names (Try data/ -> cla/) - Returns List of Strings
+    permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token)
+    if not permissive_data:
+         debug_log("⚠️ Permissive Names not found in API. Defaulting to empty list.")
+         permissive_data = []
+
+    # --- 2. DETERMINE POLICY (IN-MEMORY) ---
+    # We pass the data lists directly. No files created. No paths needed.
+    is_strict = True
+    try:
+        is_strict = requires_cla.requires_CLA(
+            repo_full_name, 
+            token=gh_token, 
+            licenses_data=licenses_data,      # Injected Memory Data
+            permissive_data=permissive_data   # Injected Memory Data
+        )
+    except Exception as e:
+        debug_log(f"⚠️ Logic Module Error: {e}. Defaulting to STRICT mode.")
+        is_strict = True
         
-    # NOTE: temp_license_file is auto-deleted here.
-    
+    # Allowlist Override
     if repo_full_name in allowlist_repos:
         debug_log(f"ℹ️ Repo {repo_full_name} is in Allowlist. Enforcing DCO only.")
         is_strict = False
@@ -323,7 +335,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}: {'CLA' if is_strict else 'DCO'}")
     doc_type = "CLA" if is_strict else "DCO"
     
-    # --- [SECURE] LOAD SIGNATURES (API) ---
+    # --- 3. CHECK SIGNATURES (API) ---
     has_signed_json = False
     sig_file_path = f"signatures/{doc_type.lower()}.json"
     raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
@@ -340,7 +352,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         except Exception as e:
             debug_log(f"⚠️ Failed to parse Signatures JSON: {e}")
             
-    # 2. Check Comments (Universal Acceptor)
+    # 4. Check Comments (Universal Acceptor)
     has_signed_comment = False
     if not has_signed_json:
         has_signed_comment = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
