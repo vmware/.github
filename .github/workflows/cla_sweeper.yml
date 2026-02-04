@@ -105,7 +105,9 @@ jobs:
           # DOC LINKS:
           CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/CLA.md"
           DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/DCO.md"
-        
+
+          HOURS_BACK: ${{ github.event.inputs.hours_back || '24' }}
+          
         # LOGIC SWITCH:
         # If triggered by a Schedule (Cron) or Manual Dispatch -> Run the "Sweeper" (scans all PRs)
         # If triggered by a PR Event -> Run the "Selector" (checks just that PR immediately)
