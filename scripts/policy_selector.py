@@ -4,7 +4,9 @@ import json
 import urllib.request
 import urllib.error
 import time
-import yaml # [ADDED] Required for reading allowlist.yml
+import yaml
+import base64
+import tempfile # [ADDED] For secure, invisible file handling
 
 # --- [INTEGRATION START] IMPORT CLA AUTHENTICATION MODULE ---
 try:
@@ -51,7 +53,7 @@ INSTRUCTION_MESSAGE_LINES = [
 ]
 INSTRUCTION_MESSAGE = "\n".join(INSTRUCTION_MESSAGE_LINES)
 
-# --- [INTEGRATION START] TOKEN UPGRADE LOGIC ---
+# --- TOKEN UPGRADE LOGIC ---
 def ensure_valid_token():
     if os.environ.get("CLA_TOKEN_UPGRADED") == "true": return
     print("::warning::[AUTH] Checking for available credentials to upgrade token...")
@@ -75,9 +77,8 @@ def ensure_valid_token():
     except Exception as e:
         print(f"::error::[AUTH CRASH] Unexpected error during token upgrade: {e}")
 
-# --- EXECUTE TOKEN UPGRADE IMMEDIATELY ON IMPORT ---
+# Run upgrade immediately
 ensure_valid_token()
-# ---------------------------------------------------
 
 def debug_log(message):
     print(f"::warning::{message}")
@@ -121,6 +122,26 @@ def github_api(url, token, method="GET", data=None):
     except Exception as e:
         debug_log(f"Network Error: {e}")
         return None
+
+# --- UNIFIED RESOURCE LOADER ---
+def fetch_mothership_file(api_root, file_path, token):
+    """
+    Fetches a file from the central repo via API (No local checkout needed).
+    """
+    central_org = os.environ.get("CENTRAL_ORG") or "vmware"
+    mothership_repo = f"{central_org}/.github"
+    url = f"{api_root}/repos/{mothership_repo}/contents/{file_path}"
+    
+    debug_log(f"📥 API Fetch: {mothership_repo}/{file_path}")
+    
+    data = github_api(url, token)
+    if data and "content" in data:
+        try:
+            return base64.b64decode(data["content"]).decode("utf-8")
+        except Exception as e:
+            debug_log(f"❌ Failed to decode file {file_path}: {e}")
+            return None
+    return None
 
 def add_reaction_to_comment(api_root, repo, comment_id, token):
     if not comment_id: return
@@ -177,7 +198,6 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}'...")
     github_api(url, token, "POST", payload)
 
-import base64
 from datetime import datetime
 
 def record_signature(api_root, org_name, doc_type, user, repo_name, token):
@@ -185,7 +205,7 @@ def record_signature(api_root, org_name, doc_type, user, repo_name, token):
     file_path = f"signatures/{doc_type.lower()}.json"
     url = f"{api_root}/repos/{target_repo}/contents/{file_path}"
     
-    debug_log(f"💾 Attempting to record signature for @{user} in {target_repo}/{file_path}...")
+    debug_log(f"💾 Attempting to record signature via API...")
 
     user_details = github_api(f"{api_root}/users/{user}", token)
     user_id = user_details.get("id") if user_details else None
@@ -246,21 +266,39 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Member Bypass", "", gh_token)
         return
         
-    # --- [NEW] LOAD ALLOWLIST USING base_path ---
-    # We now look for allowlist.yml relative to the scripts folder
-    allowlist_path = os.path.join(base_path, "cla", "allowlist.yml")
+    # --- [SECURE] LOAD ALLOWLIST (API) ---
     allowlist_repos = []
-    try:
-        with open(allowlist_path, 'r') as f:
-            allowlist_data = yaml.safe_load(f)
+    # Fetch from 'data/allowlist.yml' remotely. No local checkout.
+    raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
+    if raw_allowlist:
+        try:
+            allowlist_data = yaml.safe_load(raw_allowlist)
             allowlist_repos = allowlist_data.get("repositories", [])
-            debug_log(f"✅ Allowlist loaded from {allowlist_path}. Found {len(allowlist_repos)} repos.")
-    except Exception as e:
-        debug_log(f"⚠️ Could not load allowlist at {allowlist_path}: {e}")
-    # --------------------------------------
+            debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} repos.")
+        except Exception as e:
+            debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
 
-    # 3. Policy & Doc Type
-    is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
+    # --- [SECURE] LOAD LICENSES (API + TEMP FILE) ---
+    # Since requires_cla needs a FILE PATH, we create an invisible temp file.
+    # We fetch 'data/licenses_all.json' from Mothership.
+    raw_licenses = fetch_mothership_file(api_root, "data/licenses_all.json", gh_token)
+    
+    # Context manager ensures file is DELETED after use
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=True) as temp_license_file:
+        if raw_licenses:
+            temp_license_file.write(raw_licenses)
+            temp_license_file.flush()
+            # Point env var to the temp file
+            os.environ["LICENSES_JSON"] = temp_license_file.name
+            debug_log(f"✅ Licenses loaded via API into secure temp file: {temp_license_file.name}")
+        else:
+            debug_log("⚠️ Failed to load Licenses via API. Checks may fail.")
+
+        # 3. Policy & Doc Type
+        # requires_cla will read the env var pointing to our temp file
+        is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
+        
+        # NOTE: When this 'with' block ends, temp_license_file is auto-deleted from disk.
     
     if repo_full_name in allowlist_repos:
         debug_log(f"ℹ️ Repo {repo_full_name} is in Allowlist. Enforcing DCO only.")
@@ -269,22 +307,24 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}: {'CLA' if is_strict else 'DCO'}")
     doc_type = "CLA" if is_strict else "DCO"
     
-    # 1. Check JSON File (Legacy/Manual)
-    # Using base_path here ensures we look in the right place
-    sig_file_path = os.path.join(base_path, "signatures", f"{doc_type.lower()}.json")
+    # --- [SECURE] LOAD SIGNATURES (API) ---
+    # Fetch JSON directly into memory.
     has_signed_json = False
-    try:
-        with open(sig_file_path, 'r') as f:
-            data = json.load(f)
+    sig_file_path = f"signatures/{doc_type.lower()}.json"
+    raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
+    
+    if raw_signatures:
+        try:
+            data = json.loads(raw_signatures)
             contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
             for c in contributors:
                 if isinstance(c, dict):
                     if c.get("name", "").lower() == pr_user.lower(): has_signed_json = True; break
                 elif isinstance(c, str):
                     if c.lower() == pr_user.lower(): has_signed_json = True; break
-    except Exception:
-        pass 
-
+        except Exception as e:
+            debug_log(f"⚠️ Failed to parse Signatures JSON: {e}")
+            
     # 2. Check Comments (Universal Acceptor)
     has_signed_comment = False
     if not has_signed_json:
@@ -312,15 +352,10 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
 def main():
     debug_log("--- STARTING COMPLIANCE ENGINE (EVENT MODE) ---")
     
-    # --- [NEW] ROBUST PATH CALCULATION ---
-    # Find the absolute root of the tools folder relative to this script.
-    # Script is in: .../.github-tools/scripts/policy_selector.py
-    # We want:      .../.github-tools
+    # We still calculate this for legacy compatibility, but we rely on API for data.
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_path = os.path.dirname(script_dir) # Go up one level
-    debug_log(f"📂 Resolved Tools Root to: {base_path}")
-    # -------------------------------
-
+    base_path = os.path.dirname(script_dir)
+    
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     repo_full_name = os.environ.get("GITHUB_REPOSITORY")
     gh_token = os.environ.get("GITHUB_TOKEN")
@@ -340,3 +375,4 @@ def main():
 if __name__ == "__main__":
     ensure_valid_token()
     main()
+    
