@@ -343,11 +343,21 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     if raw_allowlist:
         try:
             allowlist_data = yaml.safe_load(raw_allowlist)
-            allowlist_repos = allowlist_data.get("repositories", [])
-            debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} repos.")
+            # FIX: Handle the 'repos' dict structure instead of a flat list
+            repos_config = allowlist_data.get("repos", {})
+            if isinstance(repos_config, dict):
+                # Add repo to allowlist ONLY if 'require_cla' is explicitly False
+                for r_name, r_config in repos_config.items():
+                    if r_config.get("require_cla") is False:
+                        allowlist_repos.append(r_name)
+            
+            # Fallback for legacy format (if it exists)
+            allowlist_repos.extend(allowlist_data.get("repositories", []))
+            
+            debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
-
+            
     # B. Licenses (Robust Fetch)
     # Tries: data/.json -> data/.json.gz -> cla/.json -> cla/.json.gz
     licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token)
