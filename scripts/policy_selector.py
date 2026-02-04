@@ -6,7 +6,7 @@ import urllib.error
 import time
 import yaml
 import base64
-import tempfile # [ADDED] For secure, invisible file handling
+import tempfile 
 
 # --- [INTEGRATION START] IMPORT CLA AUTHENTICATION MODULE ---
 try:
@@ -123,10 +123,10 @@ def github_api(url, token, method="GET", data=None):
         debug_log(f"Network Error: {e}")
         return None
 
-# --- UNIFIED RESOURCE LOADER ---
+# --- UNIFIED RESOURCE LOADER (WITH FALLBACKS) ---
 def fetch_mothership_file(api_root, file_path, token):
     """
-    Fetches a file from the central repo via API (No local checkout needed).
+    Fetches a file from the central repo via API.
     """
     central_org = os.environ.get("CENTRAL_ORG") or "vmware"
     mothership_repo = f"{central_org}/.github"
@@ -142,6 +142,18 @@ def fetch_mothership_file(api_root, file_path, token):
             debug_log(f"❌ Failed to decode file {file_path}: {e}")
             return None
     return None
+
+def fetch_file_with_fallback(api_root, primary_path, secondary_path, token):
+    """
+    Tries to fetch the file from the primary path.
+    If that fails, tries the secondary path.
+    """
+    content = fetch_mothership_file(api_root, primary_path, token)
+    if content:
+        return content
+    
+    debug_log(f"⚠️ Primary path {primary_path} failed. Trying fallback: {secondary_path}")
+    return fetch_mothership_file(api_root, secondary_path, token)
 
 def add_reaction_to_comment(api_root, repo, comment_id, token):
     if not comment_id: return
@@ -267,9 +279,10 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         return
         
     # --- [SECURE] LOAD ALLOWLIST (API) ---
+    # UPDATED: Try 'cla/' first as requested, then 'data/'
+    raw_allowlist = fetch_file_with_fallback(api_root, "cla/allowlist.yml", "data/allowlist.yml", gh_token)
     allowlist_repos = []
-    # Fetch from 'data/allowlist.yml' remotely. No local checkout.
-    raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
+    
     if raw_allowlist:
         try:
             allowlist_data = yaml.safe_load(raw_allowlist)
@@ -277,28 +290,31 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
             debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} repos.")
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
+    else:
+        debug_log("⚠️ Allowlist not found in 'cla/' or 'data/'. Proceeding with empty list.")
 
     # --- [SECURE] LOAD LICENSES (API + TEMP FILE) ---
-    # Since requires_cla needs a FILE PATH, we create an invisible temp file.
-    # We fetch 'data/licenses_all.json' from Mothership.
-    raw_licenses = fetch_mothership_file(api_root, "data/licenses_all.json", gh_token)
+    # UPDATED: Try 'cla/' first as requested, then 'data/'
+    raw_licenses = fetch_file_with_fallback(api_root, "cla/licenses_all.json", "data/licenses_all.json", gh_token)
+    
+    # SAFETY: If API fails completely, use an empty JSON array to prevent FileNotFound crash
+    if not raw_licenses:
+        debug_log("❌ CRITICAL: Could not load licenses from API. Using empty fallback.")
+        raw_licenses = "[]"
     
     # Context manager ensures file is DELETED after use
     with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=True) as temp_license_file:
-        if raw_licenses:
-            temp_license_file.write(raw_licenses)
-            temp_license_file.flush()
-            # Point env var to the temp file
-            os.environ["LICENSES_JSON"] = temp_license_file.name
-            debug_log(f"✅ Licenses loaded via API into secure temp file: {temp_license_file.name}")
-        else:
-            debug_log("⚠️ Failed to load Licenses via API. Checks may fail.")
+        temp_license_file.write(raw_licenses)
+        temp_license_file.flush()
+        
+        # Point env var to the temp file so requires_cla finds it
+        os.environ["LICENSES_JSON"] = temp_license_file.name
+        debug_log(f"✅ Licenses loaded into temp file: {temp_license_file.name}")
 
         # 3. Policy & Doc Type
-        # requires_cla will read the env var pointing to our temp file
         is_strict = requires_cla.requires_CLA(repo_full_name, token=gh_token)
         
-        # NOTE: When this 'with' block ends, temp_license_file is auto-deleted from disk.
+    # NOTE: temp_license_file is auto-deleted here.
     
     if repo_full_name in allowlist_repos:
         debug_log(f"ℹ️ Repo {repo_full_name} is in Allowlist. Enforcing DCO only.")
@@ -308,7 +324,6 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     doc_type = "CLA" if is_strict else "DCO"
     
     # --- [SECURE] LOAD SIGNATURES (API) ---
-    # Fetch JSON directly into memory.
     has_signed_json = False
     sig_file_path = f"signatures/{doc_type.lower()}.json"
     raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
@@ -352,7 +367,6 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
 def main():
     debug_log("--- STARTING COMPLIANCE ENGINE (EVENT MODE) ---")
     
-    # We still calculate this for legacy compatibility, but we rely on API for data.
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_path = os.path.dirname(script_dir)
     
