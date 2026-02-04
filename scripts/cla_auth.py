@@ -80,7 +80,7 @@ def get_installation_access_token(app_id, private_key_pem, org_name):
     # We ask for these explicitly to override the "None" scope from Stale YAML.
     needed_permissions = {
         "members": "read",          # To fix the 404 error
-        "contents": "read",         # To read the repo code
+        "contents": "write",        # To write the repo code
         "metadata": "read",         # Basic info
         "statuses": "write",        # To "Paint" commits (Green/Red)
         "checks": "write",          # To create check runs
