@@ -8,8 +8,8 @@ Thin wrapper around the already-working modules:
   - license_detector.py          (matching + permissive policy + SPDX expressions + LicenseRef)
 
 Public API:
-  - requires_CLA(repo_full, token=None, api_base_url="https://api.github.com", timeout_s=20) -> bool
-  - get_license_decision(repo_full, ...) -> dict with diagnostics
+  - requires_CLA(repo_full, token=None, api_base_url="https://api.github.com", timeout_s=20, licenses_data=None, permissive_data=None) -> bool
+  - get_license_decision(repo_full, ..., licenses_data=None, permissive_data=None) -> dict with diagnostics
 
 Keep this file alongside your existing scripts so imports work:
   <org>/.github/scripts/license_detector.py
@@ -20,7 +20,7 @@ Keep this file alongside your existing scripts so imports work:
 from __future__ import annotations
 import asyncio
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import aiohttp
 from aiohttp import ClientTimeout
@@ -131,6 +131,8 @@ async def get_license_decision_async(
     token: Optional[str] = None,
     api_base_url: str = "https://api.github.com",
     timeout_s: int = 20,
+    licenses_data: Optional[List[Dict[str, Any]]] = None,
+    permissive_data: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
     Detailed decision for a single repo (async).
@@ -155,9 +157,9 @@ async def get_license_decision_async(
                 spdx_id = (data.get("license") or {}).get("spdx_id")
                 if spdx_id and spdx_id != "NOASSERTION":
                     # Map SPDX → canonical catalog name (exactly like your job)
-                    _, id_to_name = ld.catalog_maps()
+                    _, id_to_name = ld.catalog_maps(licenses_data)
                     canonical_name = id_to_name.get(spdx_id) or (data.get("license") or {}).get("name") or spdx_id
-                    perm, why = ld.is_permissive_with_reason(canonical_name, spdx_id)
+                    perm, why = ld.is_permissive_with_reason(canonical_name, spdx_id, permissive_data, licenses_data)
                   
                     # --- begin: check license overrides (API path) ---------------------
                     try:
@@ -175,8 +177,8 @@ async def get_license_decision_async(
                                 "error": None,
                             }
                         # DEBUG: log when an override triggers
-                        print(f"[DEBUG] Override applied for '{license_name or license_id}' "
-                              f"-> requires_CLA={ov} (source: allowlist.yml)")
+                        # print(f"[DEBUG] Override applied for '{canonical_name or spdx_id}' "
+                        #       f"-> requires_CLA={ov} (source: allowlist.yml)")
                                           
                     except Exception:
                         # On any override error, fall back to default behavior
@@ -202,9 +204,9 @@ async def get_license_decision_async(
         default_branch = await _get_repo_default_branch(session, owner, repo, session._api_base)
         text = await dorl.fetch_root_license_text(session, owner, repo, default_branch or "")  # type: ignore[attr-defined]
         if text:
-            det = ld.detect_from_text(text)
+            det = ld.detect_from_text(text, licenses_data)
             if det.get("matched"):
-                perm, why = ld.is_permissive_with_reason(det.get("name"), det.get("id"))
+                perm, why = ld.is_permissive_with_reason(det.get("name"), det.get("id"), permissive_data, licenses_data)
               
                 # --- begin: check license overrides (text path) -----------------------
                 try:
@@ -222,8 +224,8 @@ async def get_license_decision_async(
                             "error": None,
                         }
                     # DEBUG: log when an override triggers
-                    print(f"[DEBUG] Override applied for '{license_name or license_id}' "
-                          f"-> requires_CLA={ov} (source: allowlist.yml)")
+                    # print(f"[DEBUG] Override applied for '{det.get('name') or det.get('id')}' "
+                    #       f"-> requires_CLA={ov} (source: allowlist.yml)")
                       
                 except Exception:
                     # On any override error, fall back to default behavior
@@ -268,18 +270,36 @@ async def get_license_decision_async(
 def get_license_decision(repo_full: str,
                          token: Optional[str] = None,
                          api_base_url: str = "https://api.github.com",
-                         timeout_s: int = 20) -> Dict[str, Any]:
+                         timeout_s: int = 20,
+                         licenses_data: Optional[List[Dict[str, Any]]] = None,
+                         permissive_data: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Synchronous wrapper (runs the async function)."""
-    return asyncio.run(get_license_decision_async(repo_full, token=token, api_base_url=api_base_url, timeout_s=timeout_s))
+    return asyncio.run(get_license_decision_async(
+        repo_full, 
+        token=token, 
+        api_base_url=api_base_url, 
+        timeout_s=timeout_s,
+        licenses_data=licenses_data,
+        permissive_data=permissive_data
+    ))
 
 def requires_CLA(repo_full: str,
                  token: Optional[str] = None,
                  api_base_url: str = "https://api.github.com",
-                 timeout_s: int = 20) -> bool:
+                 timeout_s: int = 20,
+                 licenses_data: Optional[List[Dict[str, Any]]] = None,
+                 permissive_data: Optional[List[Any]] = None) -> bool:
     """
     Convenience bool: True if CLA required (non-permissive/unknown), False otherwise.
     """
-    res = get_license_decision(repo_full, token=token, api_base_url=api_base_url, timeout_s=timeout_s)
+    res = get_license_decision(
+        repo_full, 
+        token=token, 
+        api_base_url=api_base_url, 
+        timeout_s=timeout_s,
+        licenses_data=licenses_data,
+        permissive_data=permissive_data
+    )
     # Unknown (None) => conservative True
     return bool(res.get("requires_CLA", True))
 
@@ -292,3 +312,4 @@ if __name__ == "__main__":
     token = os.getenv("ORG_LICENSE_REPORT_TOKEN") or os.getenv("GITHUB_TOKEN")
     info = get_license_decision(sys.argv[1], token=token)
     print(json.dumps(info, indent=2, ensure_ascii=False))
+  
