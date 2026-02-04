@@ -39,9 +39,8 @@ jobs:
           ref: main
           sparse-checkout: |
             scripts
-            data
-            signatures
 
+            
       # 3. SETUP PYTHON
       - name: Setup Python & Cache
         uses: actions/setup-python@v5
