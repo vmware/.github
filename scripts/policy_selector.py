@@ -342,7 +342,8 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
             repo_full_name, 
             token=gh_token, 
             licenses_data=licenses_data,
-            permissive_data=permissive_data
+            permissive_data=permissive_data,
+            allowlist_data=allowlist_data
         )
     except Exception as e:
         debug_log(f"⚠️ Logic Module Error: {e}. Defaulting to STRICT mode.")
