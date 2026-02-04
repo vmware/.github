@@ -118,7 +118,6 @@ def github_api(url, token, method="GET", data=None):
             if r.status == 204: return {} 
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        # Don't log 404s noisily, the caller handles fallbacks
         if e.code != 404:
             debug_log(f"API Error {e.code} for {url}: {e.read().decode()}")
         return None
@@ -128,30 +127,17 @@ def github_api(url, token, method="GET", data=None):
 
 # --- UNIFIED RESOURCE LOADER ---
 def fetch_mothership_file(api_root, file_path, token):
-    """
-    Fetches raw file content from the central repo via API.
-    Handles:
-      1. Normal files
-      2. Large files (>1MB) via Blob API
-      3. Gzip compressed files (.gz) via implicit decompression
-    """
     central_org = os.environ.get("CENTRAL_ORG") or "vmware"
     mothership_repo = f"{central_org}/.github"
-    
-    # 1. Request File Metadata
     url = f"{api_root}/repos/{mothership_repo}/contents/{file_path}"
     debug_log(f"📥 API Fetch: {mothership_repo}/{file_path}")
     
     data = github_api(url, token)
-    
     content_b64 = None
     
     if data:
-        # CASE A: Standard file (<1MB), content is included
         if "content" in data and data["content"]:
             content_b64 = data["content"]
-            
-        # CASE B: Large file (>1MB), content is missing, use Blob SHA
         elif "sha" in data:
             debug_log(f"📦 Large file detected ({data.get('size')} bytes). Fetching blob {data['sha']}...")
             blob_url = f"{api_root}/repos/{mothership_repo}/git/blobs/{data['sha']}"
@@ -161,10 +147,7 @@ def fetch_mothership_file(api_root, file_path, token):
     
     if content_b64:
         try:
-            # Decode Base64
             decoded_bytes = base64.b64decode(content_b64)
-            
-            # Decompress if it's GZIP
             if file_path.endswith(".gz"):
                 try:
                     with gzip.GzipFile(fileobj=io.BytesIO(decoded_bytes)) as gz:
@@ -172,31 +155,14 @@ def fetch_mothership_file(api_root, file_path, token):
                 except Exception as gz_e:
                     debug_log(f"❌ Gzip Decompression Failed: {gz_e}")
                     return None
-            
-            # Normal String
             return decoded_bytes.decode("utf-8")
-            
         except Exception as e:
             debug_log(f"❌ Failed to decode/read file {file_path}: {e}")
             return None
-            
     return None
 
 def fetch_json_with_fallback(api_root, primary_path, secondary_path, token):
-    """
-    Fetches JSON. Tries:
-      1. primary_path
-      2. primary_path + .gz
-      3. secondary_path
-      4. secondary_path + .gz
-    """
-    candidates = [
-        primary_path, 
-        f"{primary_path}.gz", 
-        secondary_path, 
-        f"{secondary_path}.gz"
-    ]
-    
+    candidates = [primary_path, f"{primary_path}.gz", secondary_path, f"{secondary_path}.gz"]
     for path in candidates:
         raw = fetch_mothership_file(api_root, path, token)
         if raw:
@@ -204,9 +170,7 @@ def fetch_json_with_fallback(api_root, primary_path, secondary_path, token):
                 return json.loads(raw)
             except json.JSONDecodeError as e:
                 debug_log(f"❌ JSON Parse Error for {path}: {e}")
-                continue # Try next candidate
-    
-    debug_log(f"⚠️ Failed to load JSON from any candidate: {candidates[0]}...")
+                continue
     return None
 
 def add_reaction_to_comment(api_root, repo, comment_id, token):
@@ -320,19 +284,17 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     gh_token = os.environ.get("GH_TOKEN") or gh_token
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
-    # 1. Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Bypass", "", gh_token)
         return
 
-    # 2. Org Member/Owner Check
     org_name = repo_full_name.split("/")[0]
     if is_org_member(api_root, org_name, pr_user, gh_token):
         debug_log(f"🛡️ User @{pr_user} is an Organization Member. Skipping check.")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Member Bypass", "", gh_token)
         return
         
-    # --- 1. FETCH CONFIGURATION (API -> MEMORY) ---
+    # --- 1. FETCH CONFIGURATION ---
     
     # A. Allowlist (Try cla/ -> data/)
     raw_allowlist = fetch_mothership_file(api_root, "cla/allowlist.yml", gh_token)
@@ -343,46 +305,44 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     if raw_allowlist:
         try:
             allowlist_data = yaml.safe_load(raw_allowlist)
-            # FIX: Handle the 'repos' dict structure instead of a flat list
-            repos_config = allowlist_data.get("repos", {})
+            # FIX: Updated path to handle nesting under 'license_overrides' -> 'repos'
+            repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
+            if not repos_config:
+                 repos_config = allowlist_data.get("repos", {})
+            
             if isinstance(repos_config, dict):
-                # Add repo to allowlist ONLY if 'require_cla' is explicitly False
                 for r_name, r_config in repos_config.items():
                     if r_config.get("require_cla") is False:
                         allowlist_repos.append(r_name)
             
-            # Fallback for legacy format (if it exists)
             allowlist_repos.extend(allowlist_data.get("repositories", []))
             
             debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
-            
-    # B. Licenses (Robust Fetch)
-    # Tries: data/.json -> data/.json.gz -> cla/.json -> cla/.json.gz
+
+    # B. Licenses
     licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token)
-    
     if not licenses_data:
-        debug_log("⚠️ Licenses not found in API (Checked .json and .gz in data/ and cla/). Defaulting to empty list.")
+        debug_log("⚠️ Licenses not found in API. Defaulting to empty list.")
         licenses_data = []
     else:
+        # CLEANUP: Removed the conversion patch. license_detector handles Dicts now.
         debug_log(f"✅ Licenses loaded via API. Count: {len(licenses_data)}")
 
-    # C. Permissive Names (Robust Fetch)
+    # C. Permissive Names
     permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token)
     if not permissive_data:
-         debug_log("⚠️ Permissive Names not found in API. Defaulting to empty list.")
          permissive_data = []
 
-    # --- 2. DETERMINE POLICY (IN-MEMORY) ---
-    # We pass the data lists directly. No files created. No paths needed.
+    # --- 2. DETERMINE POLICY ---
     is_strict = True
     try:
         is_strict = requires_cla.requires_CLA(
             repo_full_name, 
             token=gh_token, 
-            licenses_data=licenses_data,      # Injected Memory Data
-            permissive_data=permissive_data   # Injected Memory Data
+            licenses_data=licenses_data,
+            permissive_data=permissive_data
         )
     except Exception as e:
         debug_log(f"⚠️ Logic Module Error: {e}. Defaulting to STRICT mode.")
@@ -396,7 +356,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}: {'CLA' if is_strict else 'DCO'}")
     doc_type = "CLA" if is_strict else "DCO"
     
-    # --- 3. CHECK SIGNATURES (API) ---
+    # --- 3. CHECK SIGNATURES ---
     has_signed_json = False
     sig_file_path = f"signatures/{doc_type.lower()}.json"
     raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
@@ -413,7 +373,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         except Exception as e:
             debug_log(f"⚠️ Failed to parse Signatures JSON: {e}")
             
-    # 4. Check Comments (Universal Acceptor)
+    # 4. Check Comments
     has_signed_comment = False
     if not has_signed_json:
         has_signed_comment = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
