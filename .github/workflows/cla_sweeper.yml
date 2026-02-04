@@ -11,6 +11,11 @@ on:
   
   # 3. MANUAL TEST (Allows you to click "Run Now")
   workflow_dispatch:
+    inputs:
+      hours_back:
+        description: 'Hours to look back (Default: 24)'
+        required: true
+        default: '24'
 
 # PREVENTS OVERLAPPING RUNS (Safety Mechanism)
 concurrency: 
