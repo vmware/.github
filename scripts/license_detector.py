@@ -20,48 +20,11 @@ Key features:
     
 Inputs (files):
   - data/licenses_all.json   (or data/licenses_all.json.gz)
-      Structure (per license):
-        {
-          "name": "<canonical license name>",
-          "spdx_id": "<SPDX or LicenseRef-...>",
-          "text_varies": <bool>,
-          "base_text": "<canonical license body text>"
-          ... (other fields are ignored by this script)
-        }
-      NOTE: This file is generated elsewhere; we do not modify it.
-
   - data/permissive_names.json
-      Either:
-        { "permissive_names": ["MIT License", "Apache License 2.0", ...] }
-      OR:
-        ["MIT License", "Apache License 2.0", ...]
-      This is your policy: licenses named here are treated as PERMISSIVE.
 
 Outputs (APIs):
-  - detect_from_text(text) -> dict
-      {
-        "matched": bool,
-        "name": <canonical catalog name or None>,
-        "id": <spdx_id or None>,
-        "match": "hash" | "jaccard:<score>" | "fuzzy:<score>" | None,
-        "notes": optional string (e.g., "spdx_hint=...")
-      }
-
-  - is_permissive(name: Optional[str], spdx_id: Optional[str]) -> Optional[bool]
-      - Returns True/False when we can resolve to a canonical catalog name
-        and check it against permissive_names.json. Returns None if inputs
-        are insufficient and we cannot decide.
-  - Permissive policy checking now supports BOTH canonical *names* and *SPDX IDs* from permissive_names.json (or a mix of both), with robust normalization.
-
-Design notes:
-  - First try an exact hash of the normalized license *body* (after preamble strip).
-  - If no exact match, narrow candidates by anchor phrases + length ratio,
-    then compare using:
-      * Jaccard on 5-word n-grams (structure-aware)
-      * RapidFuzz token_set_ratio (robust to wrapping & punctuation), if available.
-  - We keep a tiny on-disk cache of the catalog (normalized text, hashes, etc.)
-    at .github/tools/.cache/licenses_all.cache.json, invalidated when the
-    source JSON/.gz changes (SHA256 check).
+  - detect_from_text(text, catalog_data=None) -> dict
+  - is_permissive(name, spdx_id, permissive_data=None, catalog_data=None) -> bool
 """
 
 from __future__ import annotations
@@ -224,6 +187,39 @@ def _hash_file_bytes(path: Path) -> str:
         data = path.read_bytes()
     return hashlib.sha256(data).hexdigest()
 
+# ---------- Catalog Processing ----------
+def _process_catalog_data(raw_list: List[Dict]) -> Dict[str, Dict]:
+    """
+    Process raw license data (list of dicts) into the internal dict format.
+    Normalized text and hashes are computed on the fly.
+    """
+    raw_dict = {item["name"]: item for item in raw_list}
+    items: Dict[str, Dict] = {}
+    for name, rec in raw_dict.items():
+        base_text = rec.get("base_text") or ""
+        base_norm = _normalize(base_text)
+        items[name] = {
+            "name": rec.get("name", name),
+            "spdx_id": rec.get("spdx_id"),
+            "text_varies": bool(rec.get("text_varies", False)),
+            "base_norm": base_norm,
+            "base_hash": _sha256(base_norm) if base_norm else None,
+            "len": len(base_norm),
+            "anchor_flags": _contains_any_anchor(base_norm),
+        }
+    return items
+
+def _get_catalog(catalog_data: Optional[List[Dict]] = None) -> Dict[str, Dict]:
+    """
+    Retrieve the catalog. Priority:
+    1. In-memory data (catalog_data) if provided.
+    2. Disk cache / File (legacy behavior).
+    """
+    if catalog_data is not None:
+        return _process_catalog_data(catalog_data)
+    
+    return _load_catalog_with_cache(LICENSES_JSON)
+
 # ---------- Catalog cache ----------
 def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
     src_hash = _hash_file_bytes(licenses_path)
@@ -262,17 +258,9 @@ def _load_catalog_with_cache(licenses_path: Path) -> Dict[str, Dict]:
 def _flatten_permissive_entries(raw_value: Any) -> List[str]:
     """
     Normalize a permissive policy blob into a flat list of strings.
-    Accepted shapes:
-      1) list[str]
-      2) list[dict]           -> pull 'name' and/or 'spdx_id' (or 'spdx'/'id')
-      3) dict with 'permissive_names': <list[...]>
-      4) dict-as-map: { "<name_or_id>": <bool|dict|any>, ... }
-         - if value is truthy, include the KEY as an entry
-         - if value is a dict, also pull 'name'/'spdx_id' inside it
     """
     # Case 3: dict with explicit list keys
     if isinstance(raw_value, dict):
-        # Accept either "permissive_names" or "permissive"
         if "permissive_names" in raw_value:
             raw_value = raw_value["permissive_names"]
         elif "permissive" in raw_value:
@@ -297,7 +285,7 @@ def _flatten_permissive_entries(raw_value: Any) -> List[str]:
     # Case 4: dict-as-map
     if isinstance(raw_value, dict):
         for k, v in raw_value.items():
-            if v:  # truthy means "permissive"
+            if v:
                 if isinstance(k, str):
                     out.append(k)
                 if isinstance(v, dict):
@@ -317,7 +305,6 @@ def _load_permissive_entries(path: Path) -> List[str]:
     except Exception:
         return []
     entries = _flatten_permissive_entries(raw)
-    # De-dup while preserving order
     seen = set()
     uniq = []
     for e in entries:
@@ -346,14 +333,16 @@ def _canon_variants(s: str) -> List[str]:
     c2 = _canon_key(s2) if s2 != s else c1
     return list(dict.fromkeys([c1, c2]))
 
-def _build_perm_index() -> Tuple[set, set, set]:
+def _build_perm_index(permissive_data: Optional[List[Any]] = None, catalog_data: Optional[List[Dict]] = None) -> Tuple[set, set, set]:
     """
     Build permissive sets:
       - allow_name_raw: exact catalog names (raw strings)
       - allow_id_raw:   exact SPDX IDs (raw strings)
-      - allow_canon:    canonical keys for both names and IDs (with/without LicenseRef)
+      - allow_canon:    canonical keys for both names and IDs
     """
-    catalog = _load_catalog_with_cache(LICENSES_JSON)
+    # Use provided catalog data or load from file
+    catalog = _get_catalog(catalog_data)
+    
     name_to_id: Dict[str, str] = {}
     id_to_name: Dict[str, str] = {}
     for name, rec in catalog.items():
@@ -362,7 +351,11 @@ def _build_perm_index() -> Tuple[set, set, set]:
             name_to_id[name] = spdx
             id_to_name[spdx] = name
 
-    entries = [e for e in _load_permissive_entries(PERMISSIVE_JSON) if isinstance(e, str)]
+    # Use provided permissive data or load from file
+    if permissive_data is not None:
+        entries = [e for e in _flatten_permissive_entries(permissive_data) if isinstance(e, str)]
+    else:
+        entries = [e for e in _load_permissive_entries(PERMISSIVE_JSON) if isinstance(e, str)]
 
     allow_name_raw: set = set()
     allow_id_raw: set = set()
@@ -437,8 +430,8 @@ def _parse_spdx_expr(expr: str) -> List[List[str]]:
     return clauses
 
 # ---------- Public helpers ----------
-def catalog_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
-    cat = _load_catalog_with_cache(LICENSES_JSON)
+def catalog_maps(catalog_data: Optional[List[Dict]] = None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    cat = _get_catalog(catalog_data)
     name_to_id_lower: Dict[str, str] = {}
     id_to_name: Dict[str, str] = {}
     for name, rec in cat.items():
@@ -485,9 +478,9 @@ def _is_unit_permissive(unit: str,
 
     return False, "no_match"
 
-def _is_expr_permissive(expr: str, allow_name_raw: set, allow_id_raw: set, allow_canon: set) -> Tuple[Optional[bool], str]:
+def _is_expr_permissive(expr: str, allow_name_raw: set, allow_id_raw: set, allow_canon: set, catalog_data: Optional[List[Dict]] = None) -> Tuple[Optional[bool], str]:
     """Evaluate SPDX expression; returns (decision, reason)."""
-    name_to_id_lower, id_to_name = catalog_maps()
+    name_to_id_lower, id_to_name = catalog_maps(catalog_data)
     clauses = _parse_spdx_expr(expr)
     if not clauses:
         return None, "expr_empty_or_unparsed"
@@ -506,7 +499,7 @@ def _is_expr_permissive(expr: str, allow_name_raw: set, allow_id_raw: set, allow
             return True, "expr_OR(any_true): " + "; ".join(reasons)
     return False, "expr_OR(all_false)"
 
-def is_permissive_with_reason(license_name: Optional[str], spdx_id: Optional[str] = None) -> Tuple[Optional[bool], str]:
+def is_permissive_with_reason(license_name: Optional[str], spdx_id: Optional[str] = None, permissive_data: Optional[List[Any]] = None, catalog_data: Optional[List[Dict]] = None) -> Tuple[Optional[bool], str]:
     """
     Decide permissiveness with a human-readable reason for auditing.
     Returns (True/False/None, reason).
@@ -514,7 +507,7 @@ def is_permissive_with_reason(license_name: Optional[str], spdx_id: Optional[str
     if not license_name and not spdx_id:
         return None, "no_inputs"
 
-    allow_name_raw, allow_id_raw, allow_canon = _build_perm_index()
+    allow_name_raw, allow_id_raw, allow_canon = _build_perm_index(permissive_data, catalog_data)
 
     # Expression detection
     expr_candidate = None
@@ -523,10 +516,10 @@ def is_permissive_with_reason(license_name: Optional[str], spdx_id: Optional[str
             expr_candidate = cand
             break
     if expr_candidate:
-        return _is_expr_permissive(expr_candidate, allow_name_raw, allow_id_raw, allow_canon)
+        return _is_expr_permissive(expr_candidate, allow_name_raw, allow_id_raw, allow_canon, catalog_data)
 
     # Single unit
-    name_to_id_lower, id_to_name = catalog_maps()
+    name_to_id_lower, id_to_name = catalog_maps(catalog_data)
     if spdx_id:
         unit_ok, why = _is_unit_permissive(spdx_id, allow_name_raw, allow_id_raw, allow_canon,
                                            id_to_name, name_to_id_lower)
@@ -540,27 +533,26 @@ def is_permissive_with_reason(license_name: Optional[str], spdx_id: Optional[str
 
     return None, "insufficient_info"
 
-def is_permissive(license_name: Optional[str], spdx_id: Optional[str] = None) -> Optional[bool]:
+def is_permissive(license_name: Optional[str], spdx_id: Optional[str] = None, permissive_data: Optional[List[Any]] = None, catalog_data: Optional[List[Dict]] = None) -> Optional[bool]:
     """Compatibility wrapper (without reason) used by older callers."""
-    decision, _ = is_permissive_with_reason(license_name, spdx_id)
+    decision, _ = is_permissive_with_reason(license_name, spdx_id, permissive_data, catalog_data)
     return decision
 
 # ---------- Detection ----------
-def detect_from_text(text: str) -> Dict[str, Any]:
+def detect_from_text(text: str, catalog_data: Optional[List[Dict]] = None) -> Dict[str, Any]:
     full_norm = _normalize(text or "")
     body = _strip_preamble(full_norm)
 
     notes = None
     m = SPDX_LINE_RE.search(text or "")
 
+    catalog = _get_catalog(catalog_data)
+
     # --- START PATCH: Trust the SPDX Header ---
     if m:
         spdx_hint = m.group('expr').strip()
         notes = f"spdx_hint={spdx_hint}"
 
-        # Load catalog immediately to verify the hint
-        catalog = _load_catalog_with_cache(LICENSES_JSON)
-        
         # Look up the ID from the header (e.g., "LicenseRef-Broadcom-...")
         found_name = _catalog_find_by_spdx(spdx_hint, catalog)
         
@@ -576,11 +568,8 @@ def detect_from_text(text: str) -> Dict[str, Any]:
             }
     # --- END PATCH ---
 
-    catalog = _load_catalog_with_cache(LICENSES_JSON)
-
-      # Quick Apache-2.0 recognition (very high confidence)
+    # Quick Apache-2.0 recognition (very high confidence)
     if _apache_quick_markers(full_norm):
-        catalog = _load_catalog_with_cache(LICENSES_JSON)
         apache_name = _catalog_find_by_spdx("Apache-2.0", catalog)
         if apache_name:
             rec = catalog[apache_name]
@@ -642,18 +631,11 @@ def detect_from_text(text: str) -> Dict[str, Any]:
   
     picked_name, picked_sig = None, ""
 
-    # --- REPLACE THE DECISION BLOCK ABOVE WITH THIS SAFE VERSION ---
-
-
     # 1. TRUST STRUCTURE FIRST (The Fix)
-    # If Jaccard is > 0.85, the structure is nearly identical. 
-    # This correctly disqualifies "Subsets" (like MIT inside Broadcom).
     if best_j >= 0.85:
         picked_name, picked_sig = best_j_id, f"jaccard:{best_j:.3f}"
 
     # 2. FALLBACK TO FUZZY (The Safety Net)
-    # Only if structure was poor (e.g. massive header text, weird formatting),
-    # we let Fuzzy take over to find the "best partial match".
     elif HAVE_RAPID and best_f >= FUZZY_STRONG:
         picked_name, picked_sig = best_f_id, f"fuzzy:{best_f:.1f}"
         
@@ -665,8 +647,8 @@ def detect_from_text(text: str) -> Dict[str, Any]:
     # -----------------------------------------------------------
       
     if picked_name:
-        rec = _load_catalog_with_cache(LICENSES_JSON)[picked_name]
+        rec = catalog[picked_name]
         return {"matched": True, "name": picked_name, "id": rec["spdx_id"], "match": picked_sig, "notes": notes}
 
     return {"matched": False, "name": None, "id": None, "match": None, "notes": notes}
-
+  
