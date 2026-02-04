@@ -41,10 +41,16 @@ def main():
     api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 
     # --- CONFIGURATION: DATE FILTER ---
-    # We only care about PRs updated in the last 24 hours.
-    HOURS_BACK = 24
-    cutoff_time = datetime.utcnow() - timedelta(hours=HOURS_BACK)
-    debug_log(f"🕒 Filtering: Ignoring PRs not updated since {cutoff_time.isoformat()}")
+    # Retrieve from environment (workflow input) or default to 24
+    hours_back_str = os.environ.get("HOURS_BACK", "24")
+    try:
+        hours_back = int(hours_back_str)
+    except ValueError:
+        debug_log(f"⚠️ Invalid HOURS_BACK value '{hours_back_str}', defaulting to 24.")
+        hours_back = 24
+
+    cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+    debug_log(f"🕒 Filtering: Ignoring PRs not updated in the last {hours_back} hours (since {cutoff_time.isoformat()})")
 
     # 2. Get All Repositories this App is Installed On
     # This call REQUIRES the App Token (ghs_). A standard GITHUB_TOKEN will fail here.
