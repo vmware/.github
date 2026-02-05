@@ -103,8 +103,8 @@ jobs:
           TOOLS_PATH: .github-tools
           
           # DOC LINKS:
-          CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/CLA.md"
-          DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/DCO.md"
+          CLA_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/legal/Broadcom_CLA.md"
+          DCO_DOC_URL: "https://github.com/${{ vars.CENTRAL_ORG }}/.github/blob/main/legal/DCO_1.1.md"
 
           HOURS_BACK: ${{ github.event.inputs.hours_back || '24' }}
           
