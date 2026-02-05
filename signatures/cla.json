@@ -1,3 +1,15 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "rexracer23",
+      "id": 239053532,
+      "signedAt": "2026-02-05T19:48:02.871219Z",
+      "org": "vmware",
+      "repo": "vmware/test-cla-gpl2",
+      "pr_number": 138,
+      "head_sha": "9780459c34dd4a05e6ddd575dcca359d2ddc574f",
+      "comment_id": 3855808694,
+      "agreement_version": "1.0"
+    }
+  ]
 }
