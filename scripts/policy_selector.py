@@ -44,7 +44,7 @@ INSTRUCTION_MESSAGE_LINES = [
     "**2. Sign via Comment:** Copy and paste the exact line below into a new comment on this Pull Request:",
     "",
     "```text",
-    "I have read the {doc_type} Document and I hereby sign the {doc_type} for this and all future contributions to this repository.",
+    "I have read the {doc_type} Document and I hereby sign the {doc_type} for this and all future contributions.",
     "```",
     "",
     "---",
@@ -191,6 +191,8 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
 
     possible_types = ["CLA", "DCO"]
     base_phrase = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
+    # The suffix we expect (without "to this repository")
+    suffix_check = "for this and all future contributions"
 
     for c in comments:
         body = c.get("body", "")
@@ -200,11 +202,15 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
             for current_type in possible_types:
                 # We check the core phrase. If user includes "and future contributions", it still matches.
                 target_phrase = base_phrase.format(doc_type=current_type)
-                
+
                 if target_phrase in normalized_body:
-                    debug_log(f"✅ Found matching {current_type} signature from {user}!")
-                    add_reaction_to_comment(api_root, repo, c.get("id"), token)
-                    return c.get("id") # RETURN ID
+                    # OPTIONAL: We can enforce the suffix if strictness is required.
+                    # Given the legal strategy, it's good to ensure they didn't just type half of it.
+                    if suffix_check in normalized_body:
+                        debug_log(f"✅ Found matching {current_type} signature from {user}!")
+                        add_reaction_to_comment(api_root, repo, c.get("id"), token)
+                        return c.get("id")
+                                            
     debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
     return None
 
