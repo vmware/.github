@@ -103,8 +103,8 @@ jobs:
           TOOLS_PATH: .github-tools
           
           # DOC LINKS:
-          CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA.md"
-          DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1.md"
+          CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA"
+          DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1"
 
           HOURS_BACK: ${{ github.event.inputs.hours_back || '24' }}
           
