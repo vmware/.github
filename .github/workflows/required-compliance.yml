@@ -85,8 +85,8 @@ jobs:
           LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
           
           # Documentation Links (Used in the failure comment)
-          CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA.md"
-          DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1.md"
+          CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA"
+          DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1"
           
         # We run the UPDATED policy_selector.py which includes the validation logic
         run: python .github-tools/scripts/policy_selector.py
