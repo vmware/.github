@@ -21,7 +21,7 @@ except ImportError:
     print("::warning::[SETUP] 'requires_cla' module not found. Assuming strict CLA policy.")
     class requires_cla_stub:
         @staticmethod
-        def requires_CLA(repo, token=None, licenses_data=None, permissive_data=None): return True
+        def requires_CLA(repo, token=None, licenses_data=None, permissive_data=None, allowlist_data=None): return True
     requires_cla = requires_cla_stub
 # --- [INTEGRATION END] -------------------------------------
 
@@ -30,6 +30,7 @@ STATUS_CONTEXT = "Check CLA/DCO"
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
 SIGNATURE_PHRASE = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
 
+# --- UPDATED TEXT: STANDING WARRANTY ---
 INSTRUCTION_MESSAGE_LINES = [
     "### 🛑 Legal Compliance Check Failed",
     "Hi @{user}, thank you for your contribution!",
@@ -37,13 +38,13 @@ INSTRUCTION_MESSAGE_LINES = [
     "To merge this Pull Request, you must sign our **{doc_type}**.",
     "",
     "**Note:** Even if you signed off your commits locally (using `git commit -s`), you must post the comment below to register your signature with our automated system.",
-    "**Note:** This is a one-time process. Once signed, future pull requests will be verified automatically.",
+    "**Note:** This is a one-time process. Once signed, future contributions to this repository will be verified automatically.",
     "",
     "**1. Read the Document:** [Click here to read the {doc_type}]({url})",
     "**2. Sign via Comment:** Copy and paste the exact line below into a new comment on this Pull Request:",
     "",
     "```text",
-    "I have read the {doc_type} Document and I hereby sign the {doc_type}",
+    "I have read the {doc_type} Document and I hereby sign the {doc_type} for this and all future contributions to this repository.",
     "```",
     "",
     "---",
@@ -181,26 +182,31 @@ def add_reaction_to_comment(api_root, repo, comment_id, token):
     except:
         pass
 
+# --- CHANGED: Returns ID (int) instead of Bool for audit trail ---
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
-    if not pr_number: return False
+    if not pr_number: return None
     url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
     comments = github_api(url, token)
-    if not comments: return False
+    if not comments: return None
 
     possible_types = ["CLA", "DCO"]
+    base_phrase = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
+
     for c in comments:
         body = c.get("body", "")
         comment_user = c.get("user", {}).get("login")
         if comment_user and user and comment_user.lower() == user.lower():
             normalized_body = body.replace("\xa0", " ").strip()
             for current_type in possible_types:
-                target_phrase = SIGNATURE_PHRASE.format(doc_type=current_type)
+                # We check the core phrase. If user includes "and future contributions", it still matches.
+                target_phrase = base_phrase.format(doc_type=current_type)
+                
                 if target_phrase in normalized_body:
                     debug_log(f"✅ Found matching {current_type} signature from {user}!")
                     add_reaction_to_comment(api_root, repo, c.get("id"), token)
-                    return True
+                    return c.get("id") # RETURN ID
     debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
-    return False
+    return None
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
     if not pr_number: return
@@ -230,7 +236,8 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
 
 from datetime import datetime
 
-def record_signature(api_root, org_name, doc_type, user, repo_name, token):
+# --- CHANGED: Accepts & Stores Context Metadata ---
+def record_signature(api_root, org_name, doc_type, user, repo_name, token, pr_number, head_sha, comment_id):
     target_repo = f"{org_name}/.github"
     file_path = f"signatures/{doc_type.lower()}.json"
     url = f"{api_root}/repos/{target_repo}/contents/{file_path}"
@@ -251,23 +258,29 @@ def record_signature(api_root, org_name, doc_type, user, repo_name, token):
         if "signedContributors" not in json_data: json_data["signedContributors"] = []
         contributors = json_data["signedContributors"]
 
+        # 1. Check if already signed (The Registry Check)
         for c in contributors:
             if isinstance(c, dict):
                 if c.get("name", "").lower() == user.lower(): return True
                 if user_id and c.get("id") == user_id: return True
             elif isinstance(c, str) and c.lower() == user.lower(): return True
 
+        # 2. If new, Capture Hybrid Context (The Enrollment)
         new_entry = {
             "name": user,
             "id": user_id,
             "signedAt": datetime.utcnow().isoformat() + "Z",
             "org": org_name,
-            "repo": repo_name
+            "repo": repo_name,
+            "pr_number": pr_number,      # Context
+            "head_sha": head_sha,        # Forensic Link
+            "comment_id": comment_id,    # Audit Trail
+            "agreement_version": "1.0"   # Future Proofing
         }
         contributors.append(new_entry)
         
         updated_content = json.dumps(json_data, indent=2)
-        commit_message = f"Sign {doc_type} for @{user}"
+        commit_message = f"Sign {doc_type} for @{user} (PR #{pr_number})"
         put_payload = {
             "message": commit_message,
             "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
@@ -284,10 +297,12 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     gh_token = os.environ.get("GH_TOKEN") or gh_token
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
+    # 1. Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Bot Bypass", "", gh_token)
         return
 
+    # 2. Org Member/Owner Check
     org_name = repo_full_name.split("/")[0]
     if is_org_member(api_root, org_name, pr_user, gh_token):
         debug_log(f"🛡️ User @{pr_user} is an Organization Member. Skipping check.")
@@ -302,10 +317,12 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
         
     allowlist_repos = []
+    allowlist_data = {} 
+    
     if raw_allowlist:
         try:
             allowlist_data = yaml.safe_load(raw_allowlist)
-            # FIX: Updated path to handle nesting under 'license_overrides' -> 'repos'
+            # Handle nesting under 'license_overrides' -> 'repos'
             repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
             if not repos_config:
                  repos_config = allowlist_data.get("repos", {})
@@ -316,24 +333,15 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
                         allowlist_repos.append(r_name)
             
             allowlist_repos.extend(allowlist_data.get("repositories", []))
-            
             debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
         except Exception as e:
             debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
 
     # B. Licenses
-    licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token)
-    if not licenses_data:
-        debug_log("⚠️ Licenses not found in API. Defaulting to empty list.")
-        licenses_data = []
-    else:
-        # CLEANUP: Removed the conversion patch. license_detector handles Dicts now.
-        debug_log(f"✅ Licenses loaded via API. Count: {len(licenses_data)}")
-
+    licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token) or []
+    
     # C. Permissive Names
-    permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token)
-    if not permissive_data:
-         permissive_data = []
+    permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token) or []
 
     # --- 2. DETERMINE POLICY ---
     is_strict = True
@@ -357,7 +365,7 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     debug_log(f"🧐 POLICY DECISION for {repo_full_name}: {'CLA' if is_strict else 'DCO'}")
     doc_type = "CLA" if is_strict else "DCO"
     
-    # --- 3. CHECK SIGNATURES ---
+    # --- 3. CHECK SIGNATURES (Registry Check) ---
     has_signed_json = False
     sig_file_path = f"signatures/{doc_type.lower()}.json"
     raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
@@ -374,10 +382,11 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         except Exception as e:
             debug_log(f"⚠️ Failed to parse Signatures JSON: {e}")
             
-    # 4. Check Comments
-    has_signed_comment = False
+    # 4. Check Comments (Forensics Collection)
+    comment_id = None
     if not has_signed_json:
-        has_signed_comment = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+        # Returns ID (int) if found, None if not
+        comment_id = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
 
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
 
@@ -385,9 +394,11 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         debug_log(f"✅ User {pr_user} is COMPLIANT (Found in JSON).")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         
-    elif has_signed_comment:
+    elif comment_id:
         debug_log(f"✅ User {pr_user} is COMPLIANT (Signature comment found).")
-        record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token)
+        # RECORD HYBRID METADATA
+        record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token, pr_number, pr_head_sha, comment_id)
+        
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         time.sleep(1)
         force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
