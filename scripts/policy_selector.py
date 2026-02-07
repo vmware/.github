@@ -4,6 +4,7 @@ import json
 import urllib.request
 import urllib.error
 import time
+import random
 import yaml
 import base64
 import gzip
@@ -126,6 +127,31 @@ def github_api(url, token, method="GET", data=None):
         debug_log(f"Network Error: {e}")
         return None
 
+# --- NEW: PAGINATION HELPER (Fixes 100 Item Limit) ---
+def github_api_paginated(url, token):
+    """Fetches ALL pages of results."""
+    all_results = []
+    page = 1
+    
+    while True:
+        separator = "&" if "?" in url else "?"
+        paged_url = f"{url}{separator}page={page}&per_page=100"
+        
+        data = github_api(paged_url, token)
+        
+        # Handle cases where API returns dict (like search results) vs list
+        items = data.get("items") if isinstance(data, dict) and "items" in data else data
+        
+        if not items or not isinstance(items, list):
+            break
+            
+        all_results.extend(items)
+        if len(items) < 100:
+            break
+        page += 1
+        
+    return all_results
+
 # --- UNIFIED RESOURCE LOADER ---
 def fetch_mothership_file(api_root, file_path, token):
     central_org = os.environ.get("CENTRAL_ORG") or "vmware"
@@ -182,16 +208,17 @@ def add_reaction_to_comment(api_root, repo, comment_id, token):
     except:
         pass
 
-# --- CHANGED: Returns ID (int) instead of Bool for audit trail ---
+# --- UPDATED: Uses Pagination for Comments ---
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
     if not pr_number: return None
-    url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments?per_page=100"
-    comments = github_api(url, token)
+    # Fix: Use paginated fetch to see >100 comments
+    url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
+    comments = github_api_paginated(url, token)
+    
     if not comments: return None
 
     possible_types = ["CLA", "DCO"]
     base_phrase = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
-    # The suffix we expect (without "to this repository")
     suffix_check = "for this and all future contributions"
 
     for c in comments:
@@ -200,12 +227,9 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
         if comment_user and user and comment_user.lower() == user.lower():
             normalized_body = body.replace("\xa0", " ").strip()
             for current_type in possible_types:
-                # We check the core phrase. If user includes "and future contributions", it still matches.
                 target_phrase = base_phrase.format(doc_type=current_type)
 
                 if target_phrase in normalized_body:
-                    # OPTIONAL: We can enforce the suffix if strictness is required.
-                    # Given the legal strategy, it's good to ensure they didn't just type half of it.
                     if suffix_check in normalized_body:
                         debug_log(f"✅ Found matching {current_type} signature from {user}!")
                         add_reaction_to_comment(api_root, repo, c.get("id"), token)
@@ -213,6 +237,24 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
                                             
     debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
     return None
+
+# --- NEW: DCO Commit Check (Fixes 100 Commit Limit) ---
+def check_dco_commits(api_root, repo, pr_number, token):
+    """Returns True if ALL commits are signed-off."""
+    url = f"{api_root}/repos/{repo}/pulls/{pr_number}/commits"
+    # Fix: Use paginated fetch for >100 commits
+    commits = github_api_paginated(url, token)
+    
+    if not commits: return False
+    
+    for commit in commits:
+        message = commit.get("commit", {}).get("message", "")
+        if "Signed-off-by:" not in message:
+            debug_log(f"❌ Commit {commit.get('sha')[:7]} missing DCO Sign-off.")
+            return False
+            
+    debug_log(f"✅ All {len(commits)} commits have DCO Sign-off.")
+    return True
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
     if not pr_number: return
@@ -242,7 +284,7 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
 
 from datetime import datetime
 
-# --- CHANGED: Accepts & Stores Context Metadata ---
+# --- UPDATED: Retry Loop for Database Contention ---
 def record_signature(api_root, org_name, doc_type, user, repo_name, token, pr_number, head_sha, comment_id):
     target_repo = f"{org_name}/.github"
     file_path = f"signatures/{doc_type.lower()}.json"
@@ -253,51 +295,62 @@ def record_signature(api_root, org_name, doc_type, user, repo_name, token, pr_nu
     user_details = github_api(f"{api_root}/users/{user}", token)
     user_id = user_details.get("id") if user_details else None
 
-    data = github_api(url, token)
-    if not data or "content" not in data:
-        debug_log(f"❌ Failed to fetch signature file. Check permissions for {target_repo}.")
-        return False
+    # RETRY LOOP: Try up to 3 times to handle race conditions
+    max_retries = 3
+    for attempt in range(max_retries):
+        data = github_api(url, token)
+        if not data or "content" not in data:
+            debug_log(f"❌ Failed to fetch signature file. Check permissions for {target_repo}.")
+            return False
 
-    try:
-        file_content = base64.b64decode(data["content"]).decode("utf-8")
-        json_data = json.loads(file_content)
-        if "signedContributors" not in json_data: json_data["signedContributors"] = []
-        contributors = json_data["signedContributors"]
+        try:
+            file_content = base64.b64decode(data["content"]).decode("utf-8")
+            json_data = json.loads(file_content)
+            if "signedContributors" not in json_data: json_data["signedContributors"] = []
+            contributors = json_data["signedContributors"]
 
-        # 1. Check if already signed (The Registry Check)
-        for c in contributors:
-            if isinstance(c, dict):
-                if c.get("name", "").lower() == user.lower(): return True
-                if user_id and c.get("id") == user_id: return True
-            elif isinstance(c, str) and c.lower() == user.lower(): return True
+            # Check duplication
+            for c in contributors:
+                if isinstance(c, dict):
+                    if c.get("name", "").lower() == user.lower(): return True
+                    if user_id and c.get("id") == user_id: return True
+                elif isinstance(c, str) and c.lower() == user.lower(): return True
 
-        # 2. If new, Capture Hybrid Context (The Enrollment)
-        new_entry = {
-            "name": user,
-            "id": user_id,
-            "signedAt": datetime.utcnow().isoformat() + "Z",
-            "org": org_name,
-            "repo": repo_name,
-            "pr_number": pr_number,      # Context
-            "head_sha": head_sha,        # Forensic Link
-            "comment_id": comment_id,    # Audit Trail
-            "agreement_version": "1.0"   # Future Proofing
-        }
-        contributors.append(new_entry)
-        
-        updated_content = json.dumps(json_data, indent=2)
-        commit_message = f"Sign {doc_type} for @{user} (PR #{pr_number})"
-        put_payload = {
-            "message": commit_message,
-            "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
-            "sha": data["sha"]
-        }
-        response = github_api(url, token, "PUT", put_payload)
-        return True if response else False
+            # Create Entry
+            new_entry = {
+                "name": user,
+                "id": user_id,
+                "signedAt": datetime.utcnow().isoformat() + "Z",
+                "org": org_name,
+                "repo": repo_name,
+                "pr_number": pr_number,      
+                "head_sha": head_sha,        
+                "comment_id": comment_id,    
+                "agreement_version": "1.0"   
+            }
+            contributors.append(new_entry)
+            
+            updated_content = json.dumps(json_data, indent=2)
+            commit_message = f"Sign {doc_type} for @{user} (PR #{pr_number})"
+            put_payload = {
+                "message": commit_message,
+                "content": base64.b64encode(updated_content.encode("utf-8")).decode("utf-8"),
+                "sha": data["sha"] # Vital: Must use SHA from *this* fetch
+            }
+            
+            response = github_api(url, token, "PUT", put_payload)
+            if response:
+                return True
+            else:
+                debug_log(f"⚠️ Write conflict (Attempt {attempt+1}/{max_retries}). Retrying...")
+                time.sleep(random.uniform(1, 3)) # Jitter to prevent lockstep
 
-    except Exception as e:
-        debug_log(f"❌ Error updating signature file: {e}")
-        return False
+        except Exception as e:
+            debug_log(f"❌ Error updating signature file: {e}")
+            return False
+            
+    debug_log("❌ Failed to update signature file after retries.")
+    return False
         
 def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token, base_path, api_root):
     gh_token = os.environ.get("GH_TOKEN") or gh_token
@@ -394,6 +447,13 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         # Returns ID (int) if found, None if not
         comment_id = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
 
+    # 5. DCO Commit Check (Optional Override)
+    # If using DCO, and not in registry, and no comment, we check individual commits.
+    # If all commits are signed-off, we treat it as compliant.
+    dco_commits_valid = False
+    if doc_type == "DCO" and not has_signed_json and not comment_id:
+        dco_commits_valid = check_dco_commits(api_root, repo_full_name, pr_number, gh_token)
+
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
 
     if has_signed_json:
@@ -408,6 +468,10 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         time.sleep(1)
         force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
+
+    elif dco_commits_valid:
+        debug_log(f"✅ User {pr_user} is COMPLIANT (DCO Sign-off on commits).")
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         
     else:
         debug_log(f"❌ User {pr_user} is NOT compliant.")
