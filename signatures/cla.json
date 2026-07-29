@@ -10,6 +10,17 @@
       "head_sha": "b70c75e4555d5e0464067e29efe2bad4b9475038",
       "comment_id": 3855944033,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "aabusai1-eng",
+      "id": 310748718,
+      "signedAt": "2026-07-29T21:04:20.624008Z",
+      "org": "vmware",
+      "repo": "vmware/test-cla-gpl2",
+      "pr_number": 142,
+      "head_sha": "fd4f74d78ea4bb7c89a7373d6bd8b095ce2e990d",
+      "comment_id": 5123293429,
+      "agreement_version": "1.0"
     }
   ]
 }
