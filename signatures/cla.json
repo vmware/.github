@@ -10,6 +10,17 @@
       "head_sha": "cf33363f9aeba4d54ba9a583724a6688d6a2d976",
       "comment_id": 5169489194,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "heitbaum",
+      "id": 6086324,
+      "signedAt": "2026-08-03T22:42:58.406726Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 783,
+      "head_sha": "b309f5d40619f033bbddef5c95682beed31659ac",
+      "comment_id": 5172513840,
+      "agreement_version": "1.0"
     }
   ]
 }
