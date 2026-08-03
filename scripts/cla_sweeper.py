@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION ---
 # Set this to True during your 1-Year Backfill. 
 # Set to False for your daily Cron jobs.
-MIGRATION_MODE = True 
+MIGRATION_MODE = False 
 
 def debug_log(message):
     print(f"::warning::{message}")
