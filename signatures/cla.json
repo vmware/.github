@@ -1,3 +1,15 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "aabusai1-eng",
+      "id": 310748718,
+      "signedAt": "2026-08-03T17:23:32.707654Z",
+      "org": "vmware",
+      "repo": "vmware/test-cla-gpl2",
+      "pr_number": 163,
+      "head_sha": "cf33363f9aeba4d54ba9a583724a6688d6a2d976",
+      "comment_id": 5169489194,
+      "agreement_version": "1.0"
+    }
+  ]
 }
