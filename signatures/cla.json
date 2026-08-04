@@ -21,6 +21,17 @@
       "head_sha": "b309f5d40619f033bbddef5c95682beed31659ac",
       "comment_id": 5172513840,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "ThatOneGoodDeveloper",
+      "id": 200378637,
+      "signedAt": "2026-08-04T00:37:07.428035Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 799,
+      "head_sha": "570f3a16576b0511ccfd88d0eefa2ce353cb06eb",
+      "comment_id": 5173125484,
+      "agreement_version": "1.0"
     }
   ]
 }
