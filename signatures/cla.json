@@ -32,6 +32,17 @@
       "head_sha": "570f3a16576b0511ccfd88d0eefa2ce353cb06eb",
       "comment_id": 5173125484,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "tormath1",
+      "id": 28657343,
+      "signedAt": "2026-08-11T12:14:24.331728Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 796,
+      "head_sha": "5613927a21b26768e421078dedc18be46e804ddd",
+      "comment_id": 5252864922,
+      "agreement_version": "1.0"
     }
   ]
 }
