@@ -1,15 +1,13 @@
 name: Compliance Sweeper
 
 on:
-  # 1. IMMEDIATE GATE (Runs when user interacts with PR)
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-  
-  # 2. BATCH SWEEPER (Runs every 5 minutes)
+  # Runs every 5 minutes. This is the only trigger that re-checks an
+  # already-open PR after a user posts a CLA/DCO sign-off comment — nothing
+  # here listens for issue_comment directly.
   schedule:
     - cron: '*/5 * * * *'
-  
-  # 3. MANUAL TEST (Allows you to click "Run Now")
+
+  # Manual trigger (e.g. to force a re-sweep with a custom lookback window)
   workflow_dispatch:
     inputs:
       hours_back:
@@ -18,7 +16,7 @@ on:
         default: '24'
 
 # PREVENTS OVERLAPPING RUNS (Safety Mechanism)
-concurrency: 
+concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
@@ -40,12 +38,6 @@ jobs:
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           owner: ${{ vars.CENTRAL_ORG }}
 
-      # --- ADD THIS DEBUG STEP ---
-      - name: 🕵️ Verify Bot Identity
-        run: |
-          echo "::warning:: [IDENTITY CHECK] I am currently logged in as App: '${{ steps.app-token.outputs.app-slug }}'"
-          echo "::warning:: [IDENTITY CHECK] Installation ID: ${{ steps.app-token.outputs.installation-id }}"
-          
       - name: Checkout Mothership Scripts
         uses: actions/checkout@v4
         with:
@@ -55,9 +47,6 @@ jobs:
           ref: main
           sparse-checkout: |
             scripts
-            signatures
-            data
-            cla
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -76,13 +65,7 @@ jobs:
 
       - name: Install Dependencies
         run: pip install requests aiohttp rapidfuzz pyyaml PyJWT cryptography
-        
-      - name: Fix Data Path
-        run: |
-          echo "Moving data folder to root..."
-          cp -r .github-tools/data .
-          ls -R data  # Optional: Verifies the file is there in the logs
-          
+
       - name: Run Engine
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -90,48 +73,21 @@ jobs:
           # We pass the App Token as GITHUB_TOKEN so the script has "Write" access
           # to post comments and update status checks on the child repo.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          
+
           # APP CONFIG:
           CLA_APP_ID: ${{ secrets.CLA_APP_ID }}
           CLA_APP_PRIVATE_KEY: ${{ secrets.CLA_APP_PRIVATE_KEY }}
           ORG_NAME: ${{ github.repository_owner }}
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
-          
+
           # PATHS:
           CONFIG_REPO: .github
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
           TOOLS_PATH: .github-tools
-          
+
           # DOC LINKS:
           CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA"
           DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1"
 
           HOURS_BACK: ${{ github.event.inputs.hours_back || '24' }}
-          
-        # LOGIC SWITCH:
-        # If triggered by a Schedule (Cron) or Manual Dispatch -> Run the "Sweeper" (scans all PRs)
-        # If triggered by a PR Event -> Run the "Selector" (checks just that PR immediately)
-        run: |
-          echo "::warning:: [SANITY CHECK] I AM RUNNING THE NEW YAML VER 1.0"
-          # --- DEBUG STEP: VERIFY TOKENS IN SHELL ---
-          echo "::warning::[YAML DEBUG] Checking Shell Variables..."
-          
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::[YAML DEBUG] GH_TOKEN is EMPTY or MISSING in the shell!"
-          else
-            echo "::warning::[YAML DEBUG] GH_TOKEN is set (Length: ${#GH_TOKEN})"
-          fi
-
-          if [ -z "$GITHUB_TOKEN" ]; then
-            echo "::error::[YAML DEBUG] GITHUB_TOKEN is EMPTY or MISSING in the shell!"
-          else
-            echo "::warning::[YAML DEBUG] GITHUB_TOKEN is set (Length: ${#GITHUB_TOKEN})"
-          fi
-          # -------------------------------------------
-
-          if [ "${{ github.event_name }}" == "schedule" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            python .github-tools/scripts/cla_sweeper.py
-          else
-            python .github-tools/scripts/policy_selector.py
-          fi
-
+        run: python .github-tools/scripts/cla_sweeper.py
