@@ -54,6 +54,17 @@
       "head_sha": "7302abfadd97a8665fdc0b7006be8cd1a228b105",
       "comment_id": 5393024671,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "zinin",
+      "id": 1776839,
+      "signedAt": "2026-08-24T17:18:31.282767Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 801,
+      "head_sha": "8163a6e7df499fe9a2de8be2a99f07a302ba345d",
+      "comment_id": 5398728210,
+      "agreement_version": "1.0"
     }
   ]
 }
