@@ -43,6 +43,17 @@
       "head_sha": "7022b1e4c357c713d5838e2340eeecb7dd364344",
       "comment_id": 5347939181,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Yoda-BZH",
+      "id": 751889,
+      "signedAt": "2026-08-24T09:23:23.886648Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 728,
+      "head_sha": "7302abfadd97a8665fdc0b7006be8cd1a228b105",
+      "comment_id": 5393024671,
+      "agreement_version": "1.0"
     }
   ]
 }
