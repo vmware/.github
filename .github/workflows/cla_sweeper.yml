@@ -44,9 +44,7 @@ jobs:
           repository: ${{ vars.CENTRAL_ORG }}/.github
           token: ${{ steps.app-token.outputs.token }}
           path: .github-tools
-          # TEMPORARY, for live-testing the rate-limit/caching fix branch —
-          # revert to `main` before merging this branch.
-          ref: fix/sweeper-rate-limit-and-config-caching
+          ref: main
           sparse-checkout: |
             scripts
 
