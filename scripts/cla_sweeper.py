@@ -119,6 +119,11 @@ def main():
 
     debug_log(f"✅ Scanning {len(repos)} repositories...")
 
+    # Fetch the shared CLA/DCO config (allowlist + both license catalogs)
+    # once for this whole sweep instead of once per PR — see
+    # policy_selector.fetch_shared_config's docstring for why.
+    shared_config = policy_selector.fetch_shared_config(api_root, gh_token)
+
     for repo in repos:
         full_name = repo.get("full_name")
         time.sleep(2) # Rate Limit Safety
@@ -149,8 +154,9 @@ def main():
                 # 1. Run Standard Logic (Paints Status)
                 # This ensures the status check (green checkmark) is applied
                 policy_selector.process_single_pr(
-                    pr_number, pr_head_sha, pr_user, 
-                    full_name, gh_token, base_path, api_root
+                    pr_number, pr_head_sha, pr_user,
+                    full_name, gh_token, base_path, api_root,
+                    shared_config=shared_config,
                 )
                 
                 # 2. Run Migration Logic (Communicates Fix)
