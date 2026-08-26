@@ -106,9 +106,25 @@ def is_org_member(api_root, org_name, user, token):
         return False
     return False
         
-def github_api(url, token, method="GET", data=None):
+def _sleep_until_rate_limit_reset(headers, context=""):
+    """Sleeps until X-RateLimit-Reset if present. Mirrors the proven pattern
+    already used by the batch reporting pipeline (detect_org_repo_licenses.py's
+    _rate_limit_sleep), adapted for this module's sync urllib calls."""
+    try:
+        reset = int(headers.get("X-RateLimit-Reset", "0"))
+    except (TypeError, ValueError):
+        return
+    if not reset:
+        return
+    sleep_for = max(0, reset - int(time.time()) + 2)
+    if sleep_for:
+        debug_log(f"⏳ Rate limit low{f' ({context})' if context else ''}. Sleeping {sleep_for}s until reset...")
+        time.sleep(sleep_for)
+
+
+def github_api(url, token, method="GET", data=None, _retry_on_rate_limit=True):
     headers = {
-        "Authorization": f"Bearer {token}", 
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28"
     }
@@ -116,12 +132,28 @@ def github_api(url, token, method="GET", data=None):
         req = urllib.request.Request(url, headers=headers, method=method)
         if data: req.data = json.dumps(data).encode("utf-8")
         with urllib.request.urlopen(req) as r:
+            remaining = r.headers.get("X-RateLimit-Remaining")
+            if remaining is not None and remaining.isdigit() and int(remaining) <= 1:
+                _sleep_until_rate_limit_reset(r.headers, context=url)
             if method == "DELETE": return {}
-            if r.status == 204: return {} 
+            if r.status == 204: return {}
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
+        # A rate-limit 403 and a permissions 403 (e.g. this App isn't
+        # installed on the target repo) look identical unless we check this
+        # header — X-RateLimit-Remaining is only "0" for the former. Only
+        # the rate-limit case is worth sleeping-and-retrying; a permissions
+        # error would just fail the same way again.
+        is_rate_limited = e.code in (403, 429) and e.headers and e.headers.get("X-RateLimit-Remaining") == "0"
+        if is_rate_limited and _retry_on_rate_limit:
+            debug_log(f"⏳ Rate limited (HTTP {e.code}) for {url}. Sleeping until reset, then retrying once...")
+            _sleep_until_rate_limit_reset(e.headers, context=url)
+            return github_api(url, token, method, data, _retry_on_rate_limit=False)
         if e.code != 404:
-            debug_log(f"API Error {e.code} for {url}: {e.read().decode()}")
+            if is_rate_limited:
+                debug_log(f"❌ Still rate limited after retry for {url}.")
+            else:
+                debug_log(f"API Error {e.code} for {url}: {e.read().decode()}")
         return None
     except Exception as e:
         debug_log(f"Network Error: {e}")
@@ -352,7 +384,55 @@ def record_signature(api_root, org_name, doc_type, user, repo_name, token, pr_nu
     debug_log("❌ Failed to update signature file after retries.")
     return False
         
-def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token, base_path, api_root):
+def fetch_shared_config(api_root, gh_token):
+    """Fetches the 3 mothership config files (allowlist + both license
+    catalogs) once. Callers that process many PRs in one run (e.g.
+    cla_sweeper.py's sweep loop) should call this once and pass the result
+    into every process_single_pr() call via shared_config=, instead of
+    letting each PR refetch independently — one of these files is a
+    multi-MB blob, and refetching it per PR doesn't scale past a handful
+    of open PRs total."""
+    # A. Allowlist (Try cla/ -> data/)
+    raw_allowlist = fetch_mothership_file(api_root, "cla/allowlist.yml", gh_token)
+    if not raw_allowlist:
+        raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
+
+    allowlist_repos = []
+    allowlist_data = {}
+
+    if raw_allowlist:
+        try:
+            allowlist_data = yaml.safe_load(raw_allowlist)
+            # Handle nesting under 'license_overrides' -> 'repos'
+            repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
+            if not repos_config:
+                 repos_config = allowlist_data.get("repos", {})
+
+            if isinstance(repos_config, dict):
+                for r_name, r_config in repos_config.items():
+                    if r_config.get("require_cla") is False:
+                        allowlist_repos.append(r_name)
+
+            allowlist_repos.extend(allowlist_data.get("repositories", []))
+            debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
+        except Exception as e:
+            debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
+
+    # B. Licenses
+    licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token) or []
+
+    # C. Permissive Names
+    permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token) or []
+
+    return {
+        "allowlist_data": allowlist_data,
+        "allowlist_repos": allowlist_repos,
+        "licenses_data": licenses_data,
+        "permissive_data": permissive_data,
+    }
+
+
+def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token, base_path, api_root, shared_config=None):
     gh_token = os.environ.get("GH_TOKEN") or gh_token
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
 
@@ -367,40 +447,16 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         debug_log(f"🛡️ User @{pr_user} is an Organization Member. Skipping check.")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", "Member Bypass", "", gh_token)
         return
-        
-    # --- 1. FETCH CONFIGURATION ---
-    
-    # A. Allowlist (Try cla/ -> data/)
-    raw_allowlist = fetch_mothership_file(api_root, "cla/allowlist.yml", gh_token)
-    if not raw_allowlist:
-        raw_allowlist = fetch_mothership_file(api_root, "data/allowlist.yml", gh_token)
-        
-    allowlist_repos = []
-    allowlist_data = {} 
-    
-    if raw_allowlist:
-        try:
-            allowlist_data = yaml.safe_load(raw_allowlist)
-            # Handle nesting under 'license_overrides' -> 'repos'
-            repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
-            if not repos_config:
-                 repos_config = allowlist_data.get("repos", {})
-            
-            if isinstance(repos_config, dict):
-                for r_name, r_config in repos_config.items():
-                    if r_config.get("require_cla") is False:
-                        allowlist_repos.append(r_name)
-            
-            allowlist_repos.extend(allowlist_data.get("repositories", []))
-            debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
-        except Exception as e:
-            debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
 
-    # B. Licenses
-    licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token) or []
-    
-    # C. Permissive Names
-    permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token) or []
+    # --- 1. FETCH CONFIGURATION ---
+    # Reuse the caller's pre-fetched config if provided (e.g. a sweep run
+    # fetching once for many PRs); otherwise fetch fresh — correct either
+    # way, since required-compliance.yml only ever processes one PR per run.
+    config = shared_config or fetch_shared_config(api_root, gh_token)
+    allowlist_data = config["allowlist_data"]
+    allowlist_repos = config["allowlist_repos"]
+    licenses_data = config["licenses_data"]
+    permissive_data = config["permissive_data"]
 
     # --- 2. DETERMINE POLICY ---
     is_strict = True
