@@ -65,6 +65,17 @@
       "head_sha": "8163a6e7df499fe9a2de8be2a99f07a302ba345d",
       "comment_id": 5398728210,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "pwn2ooown",
+      "id": 71911511,
+      "signedAt": "2026-08-26T05:05:45.178939Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 802,
+      "head_sha": "3a7e65e99d888af8204316df872515650f303b07",
+      "comment_id": 5420807649,
+      "agreement_version": "1.0"
     }
   ]
 }
