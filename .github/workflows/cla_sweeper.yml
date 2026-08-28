@@ -44,7 +44,7 @@ jobs:
           repository: ${{ vars.CENTRAL_ORG }}/.github
           token: ${{ steps.app-token.outputs.token }}
           path: .github-tools
-          ref: main
+          ref: fix/skip-already-resolved-prs # TEMPORARY: live-test before merge, revert to main before merging
           sparse-checkout: |
             scripts
 
