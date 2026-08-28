@@ -314,6 +314,18 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}'...")
     github_api(url, token, "POST", payload)
 
+def get_existing_status_state(api_root, repo, sha, token):
+    """Returns the current state of our STATUS_CONTEXT on this commit
+    ('success'/'failure'/'pending'), or None if we haven't posted one yet."""
+    url = f"{api_root}/repos/{repo}/commits/{sha}/status"
+    data = github_api(url, token)
+    if not data:
+        return None
+    for s in data.get("statuses", []):
+        if s.get("context") == STATUS_CONTEXT:
+            return s.get("state")
+    return None
+
 from datetime import datetime
 
 # --- UPDATED: Retry Loop for Database Contention ---
@@ -435,6 +447,17 @@ def fetch_shared_config(api_root, gh_token):
 def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token, base_path, api_root, shared_config=None):
     gh_token = os.environ.get("GH_TOKEN") or gh_token
     debug_log(f"🔍 Checking PR #{pr_number} by @{pr_user}...")
+
+    # 0. Already-Resolved Check
+    # Posting a status bumps the PR's updated_at, which can put it right back
+    # into the sweeper's lookback window — repeatedly re-confirming an
+    # already-successful PR just repaints the same result and pushes
+    # updated_at again, looping forever every sweep cycle. A new commit gets
+    # a fresh SHA (no prior status), so this only skips true no-op re-checks.
+    existing_state = get_existing_status_state(api_root, repo_full_name, pr_head_sha, gh_token)
+    if existing_state == "success":
+        debug_log(f"✅ PR #{pr_number} already has a successful '{STATUS_CONTEXT}' status on {pr_head_sha[:7]}. Skipping re-check.")
+        return
 
     # 1. Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
