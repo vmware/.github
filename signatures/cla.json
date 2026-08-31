@@ -76,6 +76,17 @@
       "head_sha": "4c912bf68c2c7e86d21e3aaa40bdf60b72be8d4f",
       "comment_id": 5432035059,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "grigassukys",
+      "id": 135010329,
+      "signedAt": "2026-08-31T06:25:46.408047Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vra",
+      "pr_number": 641,
+      "head_sha": "99027b2cb9f08c01acdf9d70df63e18a22b24561",
+      "comment_id": 5474544782,
+      "agreement_version": "1.0"
     }
   ]
 }
