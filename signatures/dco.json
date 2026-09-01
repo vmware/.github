@@ -1,3 +1,15 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "SuparnaSrinivas",
+      "id": 297145227,
+      "signedAt": "2026-09-01T08:15:20.918990Z",
+      "org": "vmware",
+      "repo": "vmware/govmomi",
+      "pr_number": 4122,
+      "head_sha": "accfcba9eab29cce348a9bf4ccf1551421b96267",
+      "comment_id": 5490854685,
+      "agreement_version": "1.0"
+    }
+  ]
 }
