@@ -10,6 +10,17 @@
       "head_sha": "accfcba9eab29cce348a9bf4ccf1551421b96267",
       "comment_id": 5490854685,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "dcasota",
+      "id": 14890243,
+      "signedAt": "2026-09-02T18:32:59.701421Z",
+      "org": "vmware",
+      "repo": "vmware/photon",
+      "pr_number": 1674,
+      "head_sha": "42af6789ad2347fa7c13328397703928407db41b",
+      "comment_id": 5514420063,
+      "agreement_version": "1.0"
     }
   ]
 }
