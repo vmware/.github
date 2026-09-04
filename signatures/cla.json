@@ -87,6 +87,17 @@
       "head_sha": "99027b2cb9f08c01acdf9d70df63e18a22b24561",
       "comment_id": 5474544782,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "steven-zou",
+      "id": 5753287,
+      "signedAt": "2026-09-04T04:42:52.418700Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-tanzu-mission-control",
+      "pr_number": 677,
+      "head_sha": "09cef0d2957700389a024670b67827f1b433e7d8",
+      "comment_id": 5535215227,
+      "agreement_version": "1.0"
     }
   ]
 }
