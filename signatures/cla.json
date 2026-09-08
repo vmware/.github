@@ -98,6 +98,17 @@
       "head_sha": "09cef0d2957700389a024670b67827f1b433e7d8",
       "comment_id": 5535215227,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Avicennasis",
+      "id": 913872,
+      "signedAt": "2026-09-08T06:21:14.794437Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-vcf-toolkit",
+      "pr_number": 5,
+      "head_sha": "08af6d3693dddd879640c11ec27f4551f8a00940",
+      "comment_id": 5580024590,
+      "agreement_version": "1.0"
     }
   ]
 }
