@@ -109,6 +109,17 @@
       "head_sha": "08af6d3693dddd879640c11ec27f4551f8a00940",
       "comment_id": 5580024590,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "azrdev",
+      "id": 5132647,
+      "signedAt": "2026-09-11T13:00:00.677761Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vra",
+      "pr_number": 576,
+      "head_sha": "e0e76f77d5d9e3734432d509f9992c9751cd4e44",
+      "comment_id": 5634720985,
+      "agreement_version": "1.0"
     }
   ]
 }
