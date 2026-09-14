@@ -120,6 +120,17 @@
       "head_sha": "e0e76f77d5d9e3734432d509f9992c9751cd4e44",
       "comment_id": 5634720985,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Itxaka",
+      "id": 1447686,
+      "signedAt": "2026-09-14T07:10:10.385418Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 793,
+      "head_sha": "d5b3d24ceb34b49a2ff9e429dd6847d990265f67",
+      "comment_id": 5660315467,
+      "agreement_version": "1.0"
     }
   ]
 }
