@@ -1,0 +1,55 @@
+name: Tests
+
+# Regression tests for the compliance engine. This workflow is test-only —
+# it touches no repo outside this one and cannot affect the Compliance
+# Sweeper or the Legal Compliance Gate.
+#
+# It matters because both of those check the scripts out at `ref: main`, so a
+# change is live across every gated repo the moment it merges. These tests are
+# the only pre-merge signal that does not require a live `workflow_dispatch`
+# against real PRs.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Pip Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-compliance-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-compliance-
+
+      # Same set the two production workflows install. `cla_auth.py` shells out
+      # to `pip install` at import time if jwt/cryptography/requests are
+      # missing, so these are installed up front to keep the test run
+      # hermetic rather than self-modifying.
+      - name: Install Dependencies
+        run: pip install pyyaml PyJWT cryptography requests aiohttp rapidfuzz
+
+      - name: Run tests
+        run: python -m unittest discover scripts/tests -v
