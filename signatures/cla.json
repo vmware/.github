@@ -120,6 +120,17 @@
       "head_sha": "d5b3d24ceb34b49a2ff9e429dd6847d990265f67",
       "comment_id": 5660315467,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "ganesank-git",
+      "id": 63475004,
+      "signedAt": "2026-09-15T21:21:14.855275Z",
+      "org": "vmware",
+      "repo": "vmware/k-bench",
+      "pr_number": 60,
+      "head_sha": "4a1242e6b21d1b628f2b3564a9594d5624ddf8d6",
+      "comment_id": 5688120160,
+      "agreement_version": "1.0"
     }
   ]
 }
