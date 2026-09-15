@@ -21,6 +21,17 @@
       "head_sha": "42af6789ad2347fa7c13328397703928407db41b",
       "comment_id": 5514420063,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "sarala-gopalasetty-brcm",
+      "id": 235364779,
+      "signedAt": "2026-09-15T21:30:52.688000Z",
+      "org": "vmware",
+      "repo": "vmware/dod-compliance-and-automation",
+      "pr_number": 365,
+      "head_sha": "c5459512b5af6d232a5b4bee167e630f91fdb5c5",
+      "comment_id": 5688335546,
+      "agreement_version": "1.0"
     }
   ]
 }
