@@ -27,6 +27,9 @@ except ImportError:
 # --- [INTEGRATION END] -------------------------------------
 
 # --- CONFIGURATION ---
+# The context the org ruleset requires. MUST NOT match the job name in
+# .github/workflows/required-compliance.yml — see the comment there for why
+# letting them collide makes the gate fail open.
 STATUS_CONTEXT = "Check CLA/DCO" 
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
 
