@@ -67,17 +67,6 @@
       "agreement_version": "1.0"
     },
     {
-      "name": "aabusai1-eng",
-      "id": 310748718,
-      "signedAt": "2026-08-26T22:54:17.316869Z",
-      "org": "vmware",
-      "repo": "vmware/MTAT",
-      "pr_number": 1,
-      "head_sha": "4c912bf68c2c7e86d21e3aaa40bdf60b72be8d4f",
-      "comment_id": 5432035059,
-      "agreement_version": "1.0"
-    },
-    {
       "name": "grigassukys",
       "id": 135010329,
       "signedAt": "2026-08-31T06:25:46.408047Z",
