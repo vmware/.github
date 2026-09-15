@@ -8,7 +8,20 @@ on:
 
 jobs:
   policy-enforcement:
-    name: Check CLA/DCO
+    # This name MUST NOT match STATUS_CONTEXT in scripts/policy_selector.py
+    # (currently "Check CLA/DCO"), which is also the context the org ruleset
+    # requires. A required status check is satisfied by EITHER a commit status
+    # or a check run of that name — verified experimentally: a green check run
+    # alone yields mergeStateStatus=CLEAN with zero commit statuses present.
+    #
+    # While the names matched, this job merely *finishing* satisfied the gate.
+    # That was survivable only because the script always posted a status before
+    # exiting; any path that returns without posting one (a failed status POST,
+    # or a deliberate bail on unreadable data) silently turned the gate from
+    # fail-closed into fail-open, merging a PR with no verification at all.
+    #
+    # Keeping the names distinct means only a real status can satisfy the gate.
+    name: Compliance Gate
     runs-on: ubuntu-latest
     permissions:
       actions: write
