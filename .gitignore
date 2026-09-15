@@ -1,0 +1,9 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# License-catalog cache. `license_detector.py` mkdirs CACHE_DIR at import
+# time, resolved against the current working directory, so running any script
+# (or the tests) from the repo root drops this here. It is regenerable build
+# output, not source data.
+.github/tools/.cache/
