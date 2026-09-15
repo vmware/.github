@@ -124,6 +124,15 @@ def main():
     # policy_selector.fetch_shared_config's docstring for why.
     shared_config = policy_selector.fetch_shared_config(api_root, gh_token)
 
+    # Without the licence catalogues every CLA-vs-DCO decision in this sweep
+    # would be made from empty data, mislabelling repos across the whole org.
+    # Doing nothing is strictly better: statuses stay as they are and the next
+    # sweep retries. (A missing allowlist deliberately does NOT abort — see
+    # fetch_shared_config, where an empty allowlist is a valid configuration.)
+    if not shared_config.get("complete", True):
+        policy_selector.error_log("❌ Aborting sweep: shared config could not be loaded.")
+        return
+
     for repo in repos:
         full_name = repo.get("full_name")
         time.sleep(2) # Rate Limit Safety

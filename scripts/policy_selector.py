@@ -94,6 +94,12 @@ ensure_valid_token()
 def debug_log(message):
     print(f"::warning::{message}")
 
+def error_log(message):
+    """For genuine failures. debug_log emits ::warning:: for everything —
+    including success messages — so a real problem is indistinguishable from
+    noise. Anything logged here is something a human should look at."""
+    print(f"::error::{message}")
+
 def is_org_member(api_root, org_name, user, token):
     url = f"{api_root}/orgs/{org_name}/members/{user}"
     debug_log(f"🕵️ Checking membership for @{user} in {org_name}...")
@@ -167,30 +173,62 @@ def github_api(url, token, method="GET", data=None, _retry_on_rate_limit=True):
         debug_log(f"Network Error: {e}")
         return None
 
-# --- NEW: PAGINATION HELPER (Fixes 100 Item Limit) ---
-def github_api_paginated(url, token):
-    """Fetches ALL pages of results."""
+# --- PAGINATION HELPERS (Fixes 100 Item Limit) ---
+def github_api_paginated_checked(url, token):
+    """Fetches ALL pages, and reports whether the fetch actually completed.
+
+    Returns (items, ok). `ok` is False if any page's request failed or came
+    back malformed.
+
+    This distinction matters because `github_api` returns None for every
+    failure mode — a rate-limit 403, a permissions 403, a 404, a network
+    error — so once collapsed into a list they are indistinguishable from
+    "there is nothing here". Any caller that turns "empty" into a *decision*
+    ("nobody signed", "we haven't commented yet") will silently turn a
+    transient error into a wrong answer, and in the commenting case into a
+    self-sustaining loop: posting bumps the PR's updated_at, which keeps it
+    inside the sweeper's lookback window, so it re-posts every sweep.
+    """
     all_results = []
     page = 1
-    
+
     while True:
         separator = "&" if "?" in url else "?"
         paged_url = f"{url}{separator}page={page}&per_page=100"
-        
+
         data = github_api(paged_url, token)
-        
+        if data is None:
+            # Request failed. Whatever we collected so far may be partial, so
+            # the caller must not read it as a complete picture.
+            return all_results, False
+
         # Handle cases where API returns dict (like search results) vs list
         items = data.get("items") if isinstance(data, dict) and "items" in data else data
-        
-        if not items or not isinstance(items, list):
+
+        if not isinstance(items, list):
+            return all_results, False
+
+        if not items:
+            # A genuinely empty page: the listing is complete.
             break
-            
+
         all_results.extend(items)
         if len(items) < 100:
             break
         page += 1
-        
-    return all_results
+
+    return all_results, True
+
+
+def github_api_paginated(url, token):
+    """Fetches ALL pages of results.
+
+    A failed fetch is indistinguishable from an empty result here. Use
+    github_api_paginated_checked() wherever that difference changes a
+    contributor-visible outcome.
+    """
+    items, _ok = github_api_paginated_checked(url, token)
+    return items
 
 # --- UNIFIED RESOURCE LOADER ---
 def fetch_mothership_file(api_root, file_path, token):
@@ -278,21 +316,28 @@ def signature_candidate_text(body):
 
 # --- UPDATED: Uses Pagination for Comments ---
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
-    """Returns (comment_id, signed_doc_type), or (None, None) if the PR author
-    has not signed.
+    """Returns (comment_id, signed_doc_type, readable).
 
     `signed_doc_type` is the document the author actually signed, which is not
     necessarily the one this repo requires — the caller compares them. This
     used to return only a comment id and accept either phrase regardless of
     `doc_type`, so posting the DCO sentence on a CLA repo passed the gate and
     then recorded a CLA consent record for someone who never agreed to the CLA.
+
+    `readable` is False when the comment listing could not be fetched. Without
+    it, an unreadable thread looks exactly like a thread with no sign-off in
+    it, and we would paint `failure` on a contributor who had in fact signed.
     """
-    if not pr_number: return None, None
+    if not pr_number: return None, None, True
     # Fix: Use paginated fetch to see >100 comments
     url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
-    comments = github_api_paginated(url, token)
+    comments, readable = github_api_paginated_checked(url, token)
 
-    if not comments: return None, None
+    if not readable:
+        debug_log(f"⚠️ Could not read comments on {repo}#{pr_number}; treating the sign-off state as unknown.")
+        return None, None, False
+
+    if not comments: return None, None, True
 
     # Check the document this repo actually requires first, so a comment that
     # happens to contain both sentences is credited to the required one.
@@ -320,39 +365,69 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
                         # would contradict the failure status we go on to set.
                         if current_type == doc_type:
                             add_reaction_to_comment(api_root, repo, c.get("id"), token)
-                        return c.get("id"), current_type
+                        return c.get("id"), current_type, True
 
     debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
-    return None, None
+    return None, None, True
 
 # --- NEW: DCO Commit Check (Fixes 100 Commit Limit) ---
 def check_dco_commits(api_root, repo, pr_number, token):
-    """Returns True if ALL commits are signed-off."""
+    """Returns (all_signed_off, readable).
+
+    `readable` is False when the commit listing could not be fetched. An
+    unreadable list previously returned False, i.e. "not signed off", which
+    fails a contributor whose commits are in fact all signed.
+    """
     url = f"{api_root}/repos/{repo}/pulls/{pr_number}/commits"
     # Fix: Use paginated fetch for >100 commits
-    commits = github_api_paginated(url, token)
-    
-    if not commits: return False
+    commits, readable = github_api_paginated_checked(url, token)
+
+    if not readable:
+        debug_log(f"⚠️ Could not read commits on {repo}#{pr_number}; treating DCO sign-off state as unknown.")
+        return False, False
+
+    if not commits: return False, True
     
     for commit in commits:
         message = commit.get("commit", {}).get("message", "")
         if "Signed-off-by:" not in message:
-            debug_log(f"❌ Commit {commit.get('sha')[:7]} missing DCO Sign-off.")
-            return False
+            # A missing sha used to raise TypeError here, which the sweeper's
+            # per-PR except swallowed — silently skipping the PR entirely.
+            sha = commit.get("sha") or "unknown"
+            debug_log(f"❌ Commit {sha[:7]} missing DCO Sign-off.")
+            return False, True
             
     debug_log(f"✅ All {len(commits)} commits have DCO Sign-off.")
-    return True
+    return True, True
 
 def post_pr_comment(api_root, repo, pr_number, message, token):
+    """Posts the instruction comment, unless we have already posted it.
+
+    The dedup scan used to be an unpaginated fetch, which returns only
+    GitHub's default first 30 comments. On a thread with 30+ comments older
+    than ours, the scan never saw our comment and posted another — and since
+    each post bumps the PR's updated_at, the PR stayed inside the sweeper's
+    lookback window and got another comment every sweep, forever. Each new
+    comment also lands later in the listing, so a 30-item window can never
+    catch up.
+    """
     if not pr_number: return
     comments_url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
-    existing_comments = github_api(comments_url, token)
-    if existing_comments:
-        for c in existing_comments:
-            if "I have read the" in c.get("body", "") and "Sign via Comment" in c.get("body", ""):
-                return 
-    payload = {"body": message}
-    github_api(comments_url, token, "POST", payload)
+    existing_comments, readable = github_api_paginated_checked(comments_url, token)
+
+    if not readable:
+        # We cannot tell whether we already commented. Posting on a failed
+        # read is exactly how one duplicate becomes an endless stream, so stay
+        # quiet: the cost is one delayed instruction comment, and the next
+        # sweep retries.
+        debug_log(f"⚠️ Could not read comments on {repo}#{pr_number}; not posting instructions this pass.")
+        return
+
+    for c in existing_comments:
+        if "I have read the" in c.get("body", "") and "Sign via Comment" in c.get("body", ""):
+            return
+
+    github_api(comments_url, token, "POST", {"body": message})
 
 def force_merge_check_refresh(api_root, repo, pr_number, token):
     url = f"{api_root}/repos/{repo}/pulls/{pr_number}"
@@ -370,16 +445,23 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     github_api(url, token, "POST", payload)
 
 def get_existing_status_state(api_root, repo, sha, token):
-    """Returns the current state of our STATUS_CONTEXT on this commit
-    ('success'/'failure'/'pending'), or None if we haven't posted one yet."""
+    """Returns (state, readable).
+
+    `state` is our STATUS_CONTEXT's current state on this commit
+    ('success'/'failure'/'pending'), or None if we have not posted one yet.
+    `readable` is False when the status could not be fetched — previously
+    indistinguishable from "no status yet", which quietly disabled the
+    already-resolved short-circuit during API trouble and let the sweeper
+    repaint (and so bump updated_at on) PRs it should have left alone.
+    """
     url = f"{api_root}/repos/{repo}/commits/{sha}/status"
     data = github_api(url, token)
     if not data:
-        return None
+        return None, False
     for s in data.get("statuses", []):
         if s.get("context") == STATUS_CONTEXT:
-            return s.get("state")
-    return None
+            return s.get("state"), True
+    return None, True
 
 from datetime import datetime
 
@@ -491,11 +573,42 @@ def fetch_shared_config(api_root, gh_token):
     # C. Permissive Names
     permissive_data = fetch_json_with_fallback(api_root, "data/permissive_names.json", "cla/permissive_names.json", gh_token) or []
 
+    # Completeness deliberately covers only the two licence catalogues. They
+    # are pure data tables (multi-MB) that cannot legitimately be empty, so a
+    # falsy value means the fetch failed — and deciding CLA-vs-DCO from an
+    # empty catalogue would mislabel every PR in the sweep.
+    #
+    # The allowlist is NOT included, even though a failed allowlist fetch also
+    # skews decisions (DCO-only repos would be treated as CLA). An *empty*
+    # allowlist is a perfectly valid configuration meaning "no overrides", and
+    # fetch_mothership_file cannot tell empty from failed — so gating on it
+    # would mean that emptying cla/allowlist.yml silently aborts every sweep
+    # org-wide. A wrong-but-stricter policy that self-corrects next sweep is
+    # far better than switching compliance off without telling anyone.
+    complete = bool(licenses_data) and bool(permissive_data)
+    if not complete:
+        error_log(
+            "❌ Licence catalogues could not be loaded "
+            f"(licenses={len(licenses_data)}, permissive={len(permissive_data)}). "
+            "Policy decisions would be made from empty data, so callers should "
+            "abort rather than guess."
+        )
+    if not raw_allowlist:
+        # Warning, not error: an intentionally-empty allowlist is valid, and we
+        # cannot tell it from a failed fetch — so raising this to ::error::
+        # would emit a permanent alert for a legitimate configuration.
+        debug_log(
+            "⚠️ Allowlist is empty or could not be loaded. Proceeding, but "
+            "repos configured as DCO-only will be evaluated as CLA until it "
+            "loads again."
+        )
+
     return {
         "allowlist_data": allowlist_data,
         "allowlist_repos": allowlist_repos,
         "licenses_data": licenses_data,
         "permissive_data": permissive_data,
+        "complete": complete,
     }
 
 
@@ -509,7 +622,10 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     # already-successful PR just repaints the same result and pushes
     # updated_at again, looping forever every sweep cycle. A new commit gets
     # a fresh SHA (no prior status), so this only skips true no-op re-checks.
-    existing_state = get_existing_status_state(api_root, repo_full_name, pr_head_sha, gh_token)
+    existing_state, status_readable = get_existing_status_state(api_root, repo_full_name, pr_head_sha, gh_token)
+    if not status_readable:
+        debug_log(f"⚠️ Could not read the existing status on {pr_head_sha[:7]}; leaving PR #{pr_number} alone this pass.")
+        return
     if existing_state == "success":
         debug_log(f"✅ PR #{pr_number} already has a successful '{STATUS_CONTEXT}' status on {pr_head_sha[:7]}. Skipping re-check.")
         return
@@ -531,6 +647,11 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     # fetching once for many PRs); otherwise fetch fresh — correct either
     # way, since required-compliance.yml only ever processes one PR per run.
     config = shared_config or fetch_shared_config(api_root, gh_token)
+    # .get() so a hand-built config (e.g. in tests) without the key is treated
+    # as complete rather than raising.
+    if not config.get("complete", True):
+        debug_log(f"⚠️ Shared config incomplete; leaving PR #{pr_number} alone rather than guessing its policy.")
+        return
     allowlist_data = config["allowlist_data"]
     allowlist_repos = config["allowlist_repos"]
     licenses_data = config["licenses_data"]
@@ -559,28 +680,47 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     doc_type = "CLA" if is_strict else "DCO"
     
     # --- 3. CHECK SIGNATURES (Registry Check) ---
+    # An unreadable registry is NOT the same as "this user has not signed".
+    # fetch_mothership_file returns None for a missing file and for every
+    # failure alike, so without this guard a transient error on the primary
+    # compliance path fails everyone who has actually signed.
     has_signed_json = False
     sig_file_path = f"signatures/{doc_type.lower()}.json"
     raw_signatures = fetch_mothership_file(api_root, sig_file_path, gh_token)
-    
-    if raw_signatures:
-        try:
-            data = json.loads(raw_signatures)
-            contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
-            for c in contributors:
-                if isinstance(c, dict):
-                    if c.get("name", "").lower() == pr_user.lower(): has_signed_json = True; break
-                elif isinstance(c, str):
-                    if c.lower() == pr_user.lower(): has_signed_json = True; break
-        except Exception as e:
-            debug_log(f"⚠️ Failed to parse Signatures JSON: {e}")
-            
+
+    if not raw_signatures:
+        # Deliberately NOT treated as "nobody has signed": that would fail
+        # every contributor who has. But note the cost of bailing — if this
+        # file were genuinely absent rather than briefly unfetchable, PRs on
+        # this policy would get no status at all and stay blocked by the
+        # required check. That is silent unless this is loud, hence error_log.
+        error_log(f"❌ Could not read {sig_file_path}; leaving PR #{pr_number} untouched rather than guessing.")
+        return
+
+    try:
+        data = json.loads(raw_signatures)
+        contributors = data.get("signedContributors", []) if isinstance(data, dict) else data
+        for c in contributors:
+            if isinstance(c, dict):
+                if c.get("name", "").lower() == pr_user.lower(): has_signed_json = True; break
+            elif isinstance(c, str):
+                if c.lower() == pr_user.lower(): has_signed_json = True; break
+    except Exception as e:
+        # Malformed registry is also not evidence of non-compliance.
+        error_log(f"❌ Failed to parse {sig_file_path}: {e}. Leaving PR #{pr_number} untouched.")
+        return
+
     # 4. Check Comments (Forensics Collection)
     comment_id = None
     signed_type = None
     if not has_signed_json:
-        # Returns (ID, document actually signed), or (None, None)
-        comment_id, signed_type = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+        # Returns (ID, document actually signed, whether the thread was readable)
+        comment_id, signed_type, comments_readable = check_comments_for_signature(
+            api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+        if not comments_readable:
+            # Don't paint anything: whatever status the PR already has is a
+            # better answer than one derived from a failed read.
+            return
 
     # A sign-off only counts if it is for the document this repo requires.
     has_valid_signature = bool(comment_id) and signed_type == doc_type
@@ -593,7 +733,9 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     # properly signed-off commits, and shouldn't lose that fallback.
     dco_commits_valid = False
     if doc_type == "DCO" and not has_signed_json and not has_valid_signature:
-        dco_commits_valid = check_dco_commits(api_root, repo_full_name, pr_number, gh_token)
+        dco_commits_valid, commits_readable = check_dco_commits(api_root, repo_full_name, pr_number, gh_token)
+        if not commits_readable:
+            return
 
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
 
