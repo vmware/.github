@@ -29,7 +29,15 @@ except ImportError:
 # --- CONFIGURATION ---
 STATUS_CONTEXT = "Check CLA/DCO" 
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
-SIGNATURE_PHRASE = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
+
+# Substrings that only ever appear in our own instruction comment, never in a
+# sign-off. Needed because INSTRUCTION_MESSAGE_LINES *contains* the signature
+# phrase verbatim, so matching on the phrase alone cannot tell a deliberate
+# sign-off from a comment that merely reproduces the instructions.
+# tests/test_policy_selector.py asserts these still appear in
+# INSTRUCTION_MESSAGE, so rewording the message fails loudly rather than
+# silently reopening the bypass.
+INSTRUCTION_MARKERS = ("Sign via Comment", "Legal Compliance Check Failed")
 
 # --- UPDATED TEXT: STANDING WARRANTY ---
 INSTRUCTION_MESSAGE_LINES = [
@@ -240,16 +248,55 @@ def add_reaction_to_comment(api_root, repo, comment_id, token):
     except:
         pass
 
+def signature_candidate_text(body):
+    """Returns the part of a comment body that may count as a sign-off, or None
+    if the comment is a reproduction of our own instruction comment.
+
+    Our instruction comment quotes the exact sentence a contributor has to
+    post, so a comment can contain that sentence without anyone intending to
+    sign. Two such cases, both confirmed against real comment bodies:
+
+      * GitHub's "Quote reply" button prefixes every line with "> ", so
+        quoting the bot reproduces the sentence verbatim.
+      * Pasting the whole instruction comment does the same without any quote
+        markers.
+
+    Quoted lines are dropped, and anything still carrying an
+    INSTRUCTION_MARKERS fingerprint is rejected outright: a sign-off is one
+    sentence, while the instruction comment is a document. Content inside code
+    fences is deliberately *kept* — the instructions tell contributors to copy
+    a line that is itself shown inside a fence, so someone who copies the
+    fence markers too is signing in good faith.
+    """
+    normalized = body.replace("\xa0", " ")
+    kept = [ln for ln in normalized.splitlines() if not ln.strip().startswith(">")]
+    remaining = "\n".join(kept).strip()
+    if any(marker in remaining for marker in INSTRUCTION_MARKERS):
+        return None
+    return remaining
+
+
 # --- UPDATED: Uses Pagination for Comments ---
 def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, token):
-    if not pr_number: return None
+    """Returns (comment_id, signed_doc_type), or (None, None) if the PR author
+    has not signed.
+
+    `signed_doc_type` is the document the author actually signed, which is not
+    necessarily the one this repo requires — the caller compares them. This
+    used to return only a comment id and accept either phrase regardless of
+    `doc_type`, so posting the DCO sentence on a CLA repo passed the gate and
+    then recorded a CLA consent record for someone who never agreed to the CLA.
+    """
+    if not pr_number: return None, None
     # Fix: Use paginated fetch to see >100 comments
     url = f"{api_root}/repos/{repo}/issues/{pr_number}/comments"
     comments = github_api_paginated(url, token)
-    
-    if not comments: return None
 
-    possible_types = ["CLA", "DCO"]
+    if not comments: return None, None
+
+    # Check the document this repo actually requires first, so a comment that
+    # happens to contain both sentences is credited to the required one.
+    possible_types = [doc_type] + [t for t in ("CLA", "DCO") if t != doc_type]
     base_phrase = "I have read the {doc_type} Document and I hereby sign the {doc_type}"
     suffix_check = "for this and all future contributions"
 
@@ -257,18 +304,26 @@ def check_comments_for_signature(api_root, repo, pr_number, user, doc_type, toke
         body = c.get("body", "")
         comment_user = c.get("user", {}).get("login")
         if comment_user and user and comment_user.lower() == user.lower():
-            normalized_body = body.replace("\xa0", " ").strip()
+            normalized_body = signature_candidate_text(body)
+            if normalized_body is None:
+                # The author reproduced our instruction comment rather than
+                # signing. Not an error, and not a signature.
+                continue
             for current_type in possible_types:
                 target_phrase = base_phrase.format(doc_type=current_type)
 
                 if target_phrase in normalized_body:
                     if suffix_check in normalized_body:
                         debug_log(f"✅ Found matching {current_type} signature from {user}!")
-                        add_reaction_to_comment(api_root, repo, c.get("id"), token)
-                        return c.get("id")
-                                            
+                        # Only acknowledge a sign-off that satisfies this
+                        # repo's policy — a 🚀 on a wrong-document comment
+                        # would contradict the failure status we go on to set.
+                        if current_type == doc_type:
+                            add_reaction_to_comment(api_root, repo, c.get("id"), token)
+                        return c.get("id"), current_type
+
     debug_log(f"❌ No matching CLA or DCO signature found in {len(comments)} comments.")
-    return None
+    return None, None
 
 # --- NEW: DCO Commit Check (Fixes 100 Commit Limit) ---
 def check_dco_commits(api_root, repo, pr_number, token):
@@ -522,15 +577,22 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
             
     # 4. Check Comments (Forensics Collection)
     comment_id = None
+    signed_type = None
     if not has_signed_json:
-        # Returns ID (int) if found, None if not
-        comment_id = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+        # Returns (ID, document actually signed), or (None, None)
+        comment_id, signed_type = check_comments_for_signature(api_root, repo_full_name, pr_number, pr_user, doc_type, gh_token)
+
+    # A sign-off only counts if it is for the document this repo requires.
+    has_valid_signature = bool(comment_id) and signed_type == doc_type
 
     # 5. DCO Commit Check (Optional Override)
-    # If using DCO, and not in registry, and no comment, we check individual commits.
-    # If all commits are signed-off, we treat it as compliant.
+    # If using DCO, and not in registry, and no valid sign-off, we check
+    # individual commits. If all commits are signed-off, we treat it as
+    # compliant. Note this keys off has_valid_signature rather than comment_id:
+    # someone who posted the *wrong* document's sentence may still have
+    # properly signed-off commits, and shouldn't lose that fallback.
     dco_commits_valid = False
-    if doc_type == "DCO" and not has_signed_json and not comment_id:
+    if doc_type == "DCO" and not has_signed_json and not has_valid_signature:
         dco_commits_valid = check_dco_commits(api_root, repo_full_name, pr_number, gh_token)
 
     doc_url = os.environ.get("CLA_DOC_URL") if doc_type == "CLA" else os.environ.get("DCO_DOC_URL")
@@ -539,11 +601,11 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         debug_log(f"✅ User {pr_user} is COMPLIANT (Found in JSON).")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         
-    elif comment_id:
+    elif has_valid_signature:
         debug_log(f"✅ User {pr_user} is COMPLIANT (Signature comment found).")
         # RECORD HYBRID METADATA
         record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token, pr_number, pr_head_sha, comment_id)
-        
+
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
         time.sleep(1)
         force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
@@ -551,10 +613,18 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     elif dco_commits_valid:
         debug_log(f"✅ User {pr_user} is COMPLIANT (DCO Sign-off on commits).")
         set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
-        
+
     else:
-        debug_log(f"❌ User {pr_user} is NOT compliant.")
-        set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", f"{doc_type} Missing", doc_url or "", gh_token)
+        # Say which document was posted when the author signed the wrong one —
+        # otherwise a good-faith contributor sees an unchanged failure and has
+        # no idea the text they pasted was for the other document.
+        if signed_type and signed_type != doc_type:
+            debug_log(f"❌ User {pr_user} posted the {signed_type} sentence, but this repo requires the {doc_type}.")
+            description = f"{doc_type} Missing ({signed_type} text posted)"
+        else:
+            debug_log(f"❌ User {pr_user} is NOT compliant.")
+            description = f"{doc_type} Missing"
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "failure", description, doc_url or "", gh_token)
         formatted_message = INSTRUCTION_MESSAGE.format(user=pr_user, doc_type=doc_type, url=doc_url or "#")
         post_pr_comment(api_root, repo_full_name, pr_number, formatted_message, gh_token)
 
