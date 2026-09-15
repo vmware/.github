@@ -2,7 +2,7 @@
 
 Run from the repo root:
 
-    python -m unittest discover scripts/tests
+    python -m unittest discover tests
 
 Why these tests exist: `policy_selector.py` and `cla_sweeper.py` run in
 production against every gated repo in the org, on a 5-minute cron, with both
@@ -11,6 +11,11 @@ environment, so until now the only verification available was a live
 `workflow_dispatch` against real PRs. These tests cover the parts that can be
 checked deterministically, so a live run only has to confirm the things that
 genuinely need real GitHub semantics.
+
+These live in `tests/` rather than `scripts/tests/` on purpose: both
+production workflows sparse-checkout the whole `scripts` directory, so
+anything under it gets downloaded onto the runner on every sweep. Keeping
+the tests out means production pulls exactly what it did before.
 
 Test seams (see the import block below for why the env setup comes first):
 
@@ -45,7 +50,7 @@ for _var in ("CLA_APP_ID", "CLA_APP_PRIVATE_KEY"):
 _CACHE_TMP = tempfile.mkdtemp(prefix="cla-test-cache-")
 os.environ["CACHE_DIR"] = _CACHE_TMP
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 import policy_selector  # noqa: E402

@@ -13,11 +13,13 @@ on:
   pull_request:
     paths:
       - 'scripts/**'
+      - 'tests/**'
       - '.github/workflows/tests.yml'
   push:
     branches: [main]
     paths:
       - 'scripts/**'
+      - 'tests/**'
       - '.github/workflows/tests.yml'
 
 permissions:
@@ -52,4 +54,4 @@ jobs:
         run: pip install pyyaml PyJWT cryptography requests aiohttp rapidfuzz
 
       - name: Run tests
-        run: python -m unittest discover scripts/tests -v
+        run: python -m unittest discover tests -v
