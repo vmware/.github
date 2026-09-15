@@ -151,30 +151,30 @@ class TestCheckCommentsForSignature(PolicySelectorTestCase):
 
     def test_exact_signature_matches(self):
         result, _ = self.call([comment(signature_body("CLA"), comment_id=42)])
-        self.assertEqual(result, 42)
+        self.assertEqual(result, (42, "CLA"))
 
     def test_signature_without_suffix_is_rejected(self):
         # The phrase alone is not a signature; the "and all future
         # contributions" suffix is what makes it a standing warranty.
         result, _ = self.call([comment(signature_body("CLA", suffix=False))])
-        self.assertIsNone(result)
+        self.assertEqual(result, (None, None))
 
     def test_comment_from_another_user_is_ignored(self):
         result, _ = self.call([comment(signature_body("CLA"), login="someone-else")])
-        self.assertIsNone(result)
+        self.assertEqual(result, (None, None))
 
     def test_login_match_is_case_insensitive(self):
         result, _ = self.call(
             [comment(signature_body("CLA"), login="ConTributor", comment_id=7)], user="contributor"
         )
-        self.assertEqual(result, 7)
+        self.assertEqual(result, (7, "CLA"))
 
     def test_non_breaking_spaces_are_normalised(self):
         # Copy-pasting the phrase out of a rendered web page can bring
         # U+00A0 along with it.
         body = signature_body("CLA").replace(" ", "\xa0")
         result, _ = self.call([comment(body, comment_id=11)])
-        self.assertEqual(result, 11)
+        self.assertEqual(result, (11, "CLA"))
 
     def test_signature_is_found_beyond_the_first_page(self):
         # This function paginates, so a signature buried under a long
@@ -182,7 +182,7 @@ class TestCheckCommentsForSignature(PolicySelectorTestCase):
         comments = [comment("just a normal comment", comment_id=i) for i in range(60)]
         comments.append(comment(signature_body("CLA"), comment_id=12345))
         result, _ = self.call(comments)
-        self.assertEqual(result, 12345)
+        self.assertEqual(result, (12345, "CLA"))
 
     def test_reaction_is_added_to_the_signing_comment(self):
         _, fake = self.call([comment(signature_body("CLA"), comment_id=42)])
@@ -192,8 +192,104 @@ class TestCheckCommentsForSignature(PolicySelectorTestCase):
 
     def test_no_comments_returns_none(self):
         result, fake = self.call([])
-        self.assertIsNone(result)
+        self.assertEqual(result, (None, None))
         self.assertEqual(fake.writes(), [])
+
+    def test_signature_in_a_code_fence_still_counts(self):
+        # The instruction comment shows the sentence inside a ```text fence
+        # and says "copy and paste the exact line below", so a contributor who
+        # brings the fence markers along is signing in good faith.
+        body = "```text\n" + signature_body("CLA") + "\n```"
+        result, _ = self.call([comment(body, comment_id=21)])
+        self.assertEqual(result, (21, "CLA"))
+
+    def test_signature_with_surrounding_chat_still_counts(self):
+        body = signature_body("CLA") + "\n\nThanks for the quick review!"
+        result, _ = self.call([comment(body, comment_id=22)])
+        self.assertEqual(result, (22, "CLA"))
+
+
+# ---------------------------------------------------------------------------
+# Signature validation: reproducing the instructions is not signing
+# ---------------------------------------------------------------------------
+class TestSignatureIsNotManufacturedFromAQuote(PolicySelectorTestCase):
+    """The instruction comment contains the signature sentence verbatim, so
+    matching on the sentence alone let a contributor pass the gate — and get a
+    durable consent record written — just by quoting the bot. Both vectors
+    below were confirmed against the real matcher before being fixed."""
+
+    def call(self, body, doc_type="CLA"):
+        self.install(paginated_routes={
+            "/issues/5/comments": [comment(body, comment_id=99)]
+        })
+        return policy_selector.check_comments_for_signature(
+            "https://api.invalid", "vmware/repo", 5, "contributor", doc_type, "tok"
+        )
+
+    def _bot_message(self, doc_type="CLA"):
+        return policy_selector.INSTRUCTION_MESSAGE.format(
+            user="contributor", doc_type=doc_type, url="https://example.invalid/doc"
+        )
+
+    def test_quote_reply_to_the_bot_is_not_a_signature(self):
+        # GitHub's "Quote reply" button prefixes every line with "> ".
+        quoted = "\n".join("> " + ln for ln in self._bot_message().splitlines())
+        self.assertEqual(self.call(quoted + "\n\nwhat do I do here?"), (None, None))
+
+    def test_verbatim_paste_of_the_instructions_is_not_a_signature(self):
+        self.assertEqual(self.call(self._bot_message()), (None, None))
+
+    def test_quoted_signature_sentence_alone_is_not_a_signature(self):
+        self.assertEqual(self.call("> " + signature_body("CLA")), (None, None))
+
+    def test_instruction_markers_really_are_in_the_message(self):
+        # The rejection above keys off these markers. If the instruction
+        # message is ever reworded without updating them, the bypass silently
+        # reopens — so fail here instead.
+        msg = self._bot_message()
+        for marker in policy_selector.INSTRUCTION_MARKERS:
+            self.assertIn(marker, msg)
+
+    def test_a_genuine_signature_quoting_nothing_is_unaffected(self):
+        self.assertEqual(self.call(signature_body("CLA")), (99, "CLA"))
+
+
+# ---------------------------------------------------------------------------
+# Signature validation: the document signed must be the one required
+# ---------------------------------------------------------------------------
+class TestDocTypeMustMatch(PolicySelectorTestCase):
+    def call(self, body, doc_type):
+        fake = self.install(paginated_routes={
+            "/issues/5/comments": [comment(body, comment_id=31)]
+        })
+        result = policy_selector.check_comments_for_signature(
+            "https://api.invalid", "vmware/repo", 5, "contributor", doc_type, "tok"
+        )
+        return result, fake
+
+    def test_cla_repo_cla_sentence(self):
+        result, _ = self.call(signature_body("CLA"), "CLA")
+        self.assertEqual(result, (31, "CLA"))
+
+    def test_dco_repo_dco_sentence(self):
+        result, _ = self.call(signature_body("DCO"), "DCO")
+        self.assertEqual(result, (31, "DCO"))
+
+    def test_cla_repo_dco_sentence_reports_the_mismatch(self):
+        # Previously this passed the gate and wrote a CLA consent record for
+        # someone who only ever agreed to the DCO text.
+        result, _ = self.call(signature_body("DCO"), "CLA")
+        self.assertEqual(result, (31, "DCO"))
+
+    def test_no_rocket_reaction_on_a_mismatched_document(self):
+        # A 🚀 reads as "accepted" and would contradict the failure status.
+        _, fake = self.call(signature_body("DCO"), "CLA")
+        self.assertEqual([c for c in fake.calls if "/reactions" in c[1]], [])
+
+    def test_both_sentences_present_credits_the_required_one(self):
+        body = signature_body("DCO") + "\n\n" + signature_body("CLA")
+        result, _ = self.call(body, "CLA")
+        self.assertEqual(result, (31, "CLA"))
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +422,19 @@ class TestProcessSinglePr(PolicySelectorTestCase):
     def _registry(self, names):
         import base64
         payload = json.dumps({"signedContributors": [{"name": n} for n in names]})
-        return {"content": base64.b64encode(payload.encode()).decode()}
+        # "sha" matters: without it record_signature bails at "failed to fetch
+        # signature file" before attempting a write, which silently makes any
+        # "no consent record written" assertion vacuous.
+        return {"content": base64.b64encode(payload.encode()).decode(), "sha": "filesha"}
+
+    def _writable_registry_routes(self):
+        """Routes that let record_signature get all the way to its PUT, so a
+        test asserting that no record was written can actually fail."""
+        return {
+            "/users/": {"id": 4242},
+            "/contents/signatures/cla.json": self._registry([]),
+            "/contents/signatures/dco.json": self._registry([]),
+        }
 
     def test_already_successful_status_short_circuits_with_no_writes(self):
         # This is the PR #67 fix. Repainting an already-green PR bumps its
@@ -390,6 +498,62 @@ class TestProcessSinglePr(PolicySelectorTestCase):
         config = dict(self.SHARED_CONFIG, allowlist_repos=["vmware/repo"])
         fake = self.run_pr(paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []}, config=config)
         self.assertEqual(fake.statuses()[0]["description"], "DCO Missing")
+
+    def test_correct_sentence_passes_and_is_recorded(self):
+        fake = self.run_pr(paginated_routes={
+            "/issues/5/comments": [comment(signature_body("CLA"), comment_id=61)],
+        })
+        self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
+        self.assertEqual(fake.statuses()[0]["description"], "CLA Signed")
+
+    def test_wrong_document_sentence_fails_with_a_diagnostic_description(self):
+        fake = self.run_pr(paginated_routes={
+            "/issues/5/comments": [comment(signature_body("DCO"), comment_id=62)],
+        })
+        self.assertEqual([s["state"] for s in fake.statuses()], ["failure"])
+        self.assertEqual(fake.statuses()[0]["description"], "CLA Missing (DCO text posted)")
+
+    def test_correct_sentence_does_write_a_consent_record(self):
+        # Positive control for the test below. Without this, "no record
+        # written" could pass simply because the fake never made a write
+        # possible — which is exactly how that assertion was once vacuous.
+        fake = self.run_pr(
+            routes=self._writable_registry_routes(),
+            paginated_routes={"/issues/5/comments": [comment(signature_body("CLA"), comment_id=61)]},
+        )
+        puts = [c for c in fake.calls if c[0] == "PUT" and "signatures/" in c[1]]
+        self.assertEqual(len(puts), 1)
+
+    def test_wrong_document_sentence_writes_no_consent_record(self):
+        fake = self.run_pr(
+            routes=self._writable_registry_routes(),
+            paginated_routes={"/issues/5/comments": [comment(signature_body("DCO"), comment_id=62)]},
+        )
+        puts = [c for c in fake.calls if c[0] == "PUT" and "signatures/" in c[1]]
+        self.assertEqual(puts, [])
+
+    def test_quoting_the_bot_does_not_pass_the_gate(self):
+        bot_msg = policy_selector.INSTRUCTION_MESSAGE.format(
+            user="contributor", doc_type="CLA", url="https://example.invalid/doc"
+        )
+        quoted = "\n".join("> " + ln for ln in bot_msg.splitlines())
+        fake = self.run_pr(paginated_routes={
+            "/issues/5/comments": [comment(quoted, comment_id=63)],
+        })
+        self.assertEqual([s["state"] for s in fake.statuses()], ["failure"])
+        self.assertEqual([c for c in fake.calls if c[0] == "PUT" and "signatures/" in c[1]], [])
+
+    def test_wrong_sentence_does_not_cost_a_dco_repo_its_commit_fallback(self):
+        # Keying the fallback off comment_id rather than a *valid* signature
+        # would silently strand someone who pasted the CLA sentence on a DCO
+        # repo but whose commits are properly signed off.
+        policy_selector.requires_cla.requires_CLA = lambda *a, **k: False
+        fake = self.run_pr(paginated_routes={
+            "/issues/5/comments": [comment(signature_body("CLA"), comment_id=64)],
+            "/pulls/5/commits": [{"sha": "a" * 10, "commit": {"message": "x\n\nSigned-off-by: A <a@b.c>"}}],
+        })
+        self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
+        self.assertEqual(fake.statuses()[0]["description"], "DCO Signed")
 
 
 # ---------------------------------------------------------------------------
