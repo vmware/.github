@@ -32,6 +32,17 @@
       "head_sha": "c5459512b5af6d232a5b4bee167e630f91fdb5c5",
       "comment_id": 5688335546,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "akantchev",
+      "id": 125263901,
+      "signedAt": "2026-09-16T09:25:17.645522Z",
+      "org": "vmware",
+      "repo": "vmware/build-tools-for-vmware-aria",
+      "pr_number": 1183,
+      "head_sha": "4afbcd14ac636b979710c9bba2ce3c7936fc3a55",
+      "comment_id": 5695137864,
+      "agreement_version": "1.0"
     }
   ]
 }
