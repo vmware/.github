@@ -131,6 +131,17 @@
       "head_sha": "4a1242e6b21d1b628f2b3564a9594d5624ddf8d6",
       "comment_id": 5688120160,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "chpag",
+      "id": 115650339,
+      "signedAt": "2026-09-17T07:24:29.706451Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vsphere",
+      "pr_number": 2773,
+      "head_sha": "b51d0c2fabee243b336fc3c94f25c21d7331cf7b",
+      "comment_id": 5683844850,
+      "agreement_version": "1.0"
     }
   ]
 }
