@@ -31,6 +31,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 # --- Import setup. Must happen before `import policy_selector`. ---
 #
@@ -684,6 +685,63 @@ class TestInstructionMessage(unittest.TestCase):
         msg = policy_selector.INSTRUCTION_MESSAGE.format(user="a", doc_type="CLA", url="u")
         self.assertIn("I have read the", msg)
         self.assertIn("Sign via Comment", msg)
+
+
+class AllowlistFileTests(unittest.TestCase):
+    """Parse the REAL cla/allowlist.yml.
+
+    Every other test in this file injects allowlist data as a dict, so none of
+    them read the shipped file — the suite passes whether or not it is valid,
+    or even present. That gap let a change to this file reach a PR with the
+    full suite green and nothing actually exercising it.
+
+    The file is fetched at runtime from `ref: main` by every gated repo, so a
+    malformed or emptied version is live org-wide the moment it merges. These
+    tests are cheap insurance against that.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.path = Path(__file__).resolve().parents[1] / "cla" / "allowlist.yml"
+        cls.data = yaml.safe_load(cls.path.read_text())
+
+    def test_file_parses_to_a_mapping(self):
+        self.assertIsInstance(self.data, dict, "allowlist.yml must parse to a mapping")
+
+    def test_license_overrides_present_and_shaped(self):
+        overrides = self.data.get("license_overrides")
+        self.assertIsInstance(overrides, dict, "license_overrides is the only section live code reads")
+        self.assertIsInstance(overrides.get("require_cla"), list)
+
+    def test_broadcom_source_available_still_forces_cla(self):
+        """The one override with real teeth: a non-permissive Broadcom licence
+        must still be pushed to CLA rather than falling through to DCO."""
+        decision = policy_selector_module_requires_cla()._override_requires_cla(
+            "licenseref-broadcom-source-available", self.data
+        )
+        self.assertIs(decision, True)
+
+    def test_no_stale_workflow_override_keys(self):
+        """org_members / users / bots / teams / dco_on_permissive /
+        temporary_exemptions were read only by the decommissioned
+        reusable-cla-check.yml. Re-adding one would look like a gate bypass
+        while doing nothing, which is how a departed employee came to appear
+        allowlisted long after the workflow that honoured it was retired."""
+        stale = {"org_members", "dco_on_permissive", "users", "bots", "teams",
+                 "temporary_exemptions"}
+        found = stale & set(self.data)
+        self.assertEqual(
+            found, set(),
+            f"{sorted(found)} is not read by any live code — enforcement bypasses "
+            "live in policy_selector.process_single_pr(), not in this file",
+        )
+
+
+def policy_selector_module_requires_cla():
+    """Import requires_cla the same way policy_selector does at runtime."""
+    import requires_cla
+    return requires_cla
 
 
 if __name__ == "__main__":
