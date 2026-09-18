@@ -1,20 +1,8 @@
 
 # .github/cla/allowlist.yml
-# Purpose: license-policy overrides for requires_cla.py.
-#
-# This file previously also carried a "workflow overrides" section
-# (org_members, dco_on_permissive, users, bots, teams, temporary_exemptions).
-# Those keys were read only by reusable-cla-check.yml, which was decommissioned
-# when policy_selector.py took over enforcement. No live code has read them
-# since, so they were removed rather than left looking authoritative — an
-# allowlist that appears to grant standing gate bypasses, but doesn't, is worse
-# than no allowlist at all.
-#
-# Who actually skips the gate today is decided in scripts/policy_selector.py,
-# not here. There are exactly two bypasses, both in process_single_pr():
-#   * bots        — BOT_ALLOWLIST, plus any login ending in "[bot]"
-#   * org members — is_org_member(), checked live against the GitHub API
-# To change either, change that script.
+# License-policy overrides for requires_cla.py. This file does NOT decide who
+# skips the gate — that is scripts/policy_selector.py::process_single_pr(),
+# which bypasses only bots and org members.
 
 # -----------------------------
 # LICENSE POLICY OVERRIDES (used by requires_cla.py)
