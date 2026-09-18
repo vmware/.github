@@ -1,45 +1,23 @@
 
 # .github/cla/allowlist.yml
-# Purpose: (A) workflow overrides for CLA/DCO, (B) license overrides for requires_cla.py
+# Purpose: license-policy overrides for requires_cla.py.
+#
+# This file previously also carried a "workflow overrides" section
+# (org_members, dco_on_permissive, users, bots, teams, temporary_exemptions).
+# Those keys were read only by reusable-cla-check.yml, which was decommissioned
+# when policy_selector.py took over enforcement. No live code has read them
+# since, so they were removed rather than left looking authoritative — an
+# allowlist that appears to grant standing gate bypasses, but doesn't, is worse
+# than no allowlist at all.
+#
+# Who actually skips the gate today is decided in scripts/policy_selector.py,
+# not here. There are exactly two bypasses, both in process_single_pr():
+#   * bots        — BOT_ALLOWLIST, plus any login ending in "[bot]"
+#   * org members — is_org_member(), checked live against the GitHub API
+# To change either, change that script.
 
 # -----------------------------
-# A) WORKFLOW OVERRIDES (used by reusable-cla-check.yml)
-# -----------------------------
-
-# If true, any org member is treated as allowed (no CLA/DCO gate).
-org_members: true
-
-# Run DCO on permissive repos?
-#   off            -> never run assistant on permissive repos
-#   external_only  -> run assistant (DCO mode) for non-members only
-#   all            -> run assistant (DCO mode) for everyone
-dco_on_permissive: external_only
-
-# GitHub logins that always skip the gate (case-insensitive)
-users:
-   - normansden
-#   - bob-consultant
-
-# Bot accounts that always skip the gate
-bots:
-  - dependabot[bot]
-  - github-actions[bot]
-
-# Teams whose members always skip the gate.
-# Accepts "org/team" or bare "team" (interpreted as <current-org>/team).
-# teams:
-#   - myorg/maintainers
-#   - release-engineering
-
-# Optional global exemption window (everyone is allowed during this period).
-# ISO 8601 timestamps; end is inclusive to the minute.
-#temporary_exemptions:
-#  start: 2025-12-30T00:00:00Z
-#  end:   2025-12-31T23:59:59Z
-#  reason: "Partner pilot"
-
-# -----------------------------
-# B) LICENSE POLICY OVERRIDES (used by requires_cla.py)
+# LICENSE POLICY OVERRIDES (used by requires_cla.py)
 # -----------------------------
 # Base truth for permissive/non-permissive comes from:
 #   data/permissive.json + data/licenses_all.json
