@@ -43,6 +43,17 @@
       "head_sha": "4afbcd14ac636b979710c9bba2ce3c7936fc3a55",
       "comment_id": 5695137864,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Avicennasis",
+      "id": 913872,
+      "signedAt": "2026-09-18T13:54:54.784234Z",
+      "org": "vmware",
+      "repo": "vmware/powershell-module-for-vmware-cloud-foundation-power-management",
+      "pr_number": 166,
+      "head_sha": "7fd1dd397c5987221921b6ef4d9356478f9876c4",
+      "comment_id": 5730997247,
+      "agreement_version": "1.0"
     }
   ]
 }
