@@ -42,18 +42,20 @@ license_overrides:
     - LicenseRef-Broadcom*
     # (add more as needed)
 
-  # (Optional) Treat specific IDs as permissive (force allow), even if base says otherwise.
-  # Only use this if you intend to *downgrade* certain licenses to permissive.
-#  permissive:
+  # (Optional) The inverse of require_cla: force these IDs to DCO even if the
+  # base tables call them non-permissive. The key is allow_dco — an earlier
+  # version of this file documented it as "permissive", which nothing reads.
+#  allow_dco:
 
-  # (Optional) Per-repo overrides. Keys can be "<owner>/<repo>" or just "<repo>".
-  # Useful when the detector result needs correction or you want to force policy.
+  # (Optional) Per-repo overrides. Keys MUST be "<owner>/<repo>" — process_single_pr
+  # compares against the full name, so a bare "<repo>" key is collected but never
+  # matches anything.
   repos:
     vmware/.github:
       require_cla: false           # false = downgrade this repo to DCO-only
       # force_spdx: "MIT"         # pretend this is the detected license (rarely needed)
-#    docs-site:
-#      require_cla: false          # force permissive for this repo
+#    vmware/docs-site:
+#      require_cla: false        # false = downgrade that repo to DCO-only
 
   # (Optional) Normalize odd/legacy license IDs to canonical SPDX before evaluation.
   # The left side is what the detector finds; the right side is the canonical ID.

@@ -56,7 +56,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 import policy_selector  # noqa: E402
-import requires_cla  # noqa: E402
+
+# policy_selector wraps this import in try/except and substitutes a stub, so a
+# missing optional dep (aiohttp, rapidfuzz) degrades rather than breaking. Match
+# that: an unguarded import here turns one absent dep into a collection error
+# that erases the whole suite instead of skipping the tests that need it.
+try:
+    import requires_cla  # noqa: E402
+except Exception:  # pragma: no cover - exercised only on a degraded runner
+    requires_cla = None
 
 
 SIGNED_SUFFIX = "for this and all future contributions"
@@ -689,6 +697,7 @@ class TestInstructionMessage(unittest.TestCase):
         self.assertIn("Sign via Comment", msg)
 
 
+@unittest.skipIf(requires_cla is None, "requires_cla unavailable (optional dep missing)")
 class TestAllowlistFile(unittest.TestCase):
     """Parse the REAL cla/allowlist.yml.
 
@@ -753,18 +762,33 @@ class TestAllowlistFile(unittest.TestCase):
         self.assertIsInstance(overrides.get("require_cla"), list)
 
     def test_repo_overrides_shaped_as_policy_selector_expects(self):
-        """`license_overrides.repos` is the part policy_selector reads, and it
-        decides CLA-vs-DCO for a whole repo. fetch_shared_config swallows a
-        malformed shape into a debug log, so every downgrade would silently
-        revert with no failing check — this is the assertion that catches it."""
+        """`license_overrides.repos` decides CLA-vs-DCO for a whole repo, and
+        fetch_shared_config swallows a malformed shape into a debug log."""
         repos = (self.mapping().get("license_overrides") or {}).get("repos")
-        if repos is None:
-            return  # optional section
-        self.assertIsInstance(repos, dict, "repos must be a mapping, not a list")
+        self.assertIsInstance(repos, dict, "repos must be a mapping, not a list or null")
         for name, cfg in repos.items():
             self.assertIsInstance(cfg, dict, f"repos[{name}] must be a mapping, not null")
             self.assertIsInstance(cfg.get("require_cla"), bool,
                                   f"repos[{name}].require_cla must be a bool")
+            self.assertIn("/", name,
+                          f"repos[{name}] must be '<owner>/<repo>' — process_single_pr "
+                          "compares against the full name, so a bare repo never matches")
+
+    def test_dotgithub_stays_on_dco(self):
+        """Pins a deliberate policy decision rather than the file's shape.
+
+        Deleting the repos block, emptying it, dropping this entry, or flipping
+        it to true all leave the previous shape-only assertions green while
+        silently moving this repo from DCO back to CLA. Changing that is a
+        legitimate decision — it just has to be a deliberate one, so it fails
+        here first.
+        """
+        repos = (self.mapping().get("license_overrides") or {}).get("repos") or {}
+        self.assertIs(
+            repos.get("vmware/.github", {}).get("require_cla"), False,
+            "vmware/.github is intentionally on DCO; if that changed on purpose, "
+            "update this test in the same commit",
+        )
 
     def test_broadcom_source_available_still_forces_cla(self):
         """Broadcom Source Available is listed as permissive in the base
