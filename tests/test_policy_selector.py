@@ -29,9 +29,10 @@ Test seams (see the import block below for why the env setup comes first):
 import json
 import os
 import sys
+import contextlib
+import io
 import tempfile
 import unittest
-from pathlib import Path
 
 # --- Import setup. Must happen before `import policy_selector`. ---
 #
@@ -55,6 +56,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 import policy_selector  # noqa: E402
+import requires_cla  # noqa: E402
 
 
 SIGNED_SUFFIX = "for this and all future contributions"
@@ -687,61 +689,93 @@ class TestInstructionMessage(unittest.TestCase):
         self.assertIn("Sign via Comment", msg)
 
 
-class AllowlistFileTests(unittest.TestCase):
+class TestAllowlistFile(unittest.TestCase):
     """Parse the REAL cla/allowlist.yml.
 
-    Every other test in this file injects allowlist data as a dict, so none of
-    them read the shipped file — the suite passes whether or not it is valid,
-    or even present. That gap let a change to this file reach a PR with the
-    full suite green and nothing actually exercising it.
+    Every other test in this file monkeypatches `requires_cla.requires_CLA`
+    away in setUp, so none of them exercise the shipped file — the suite
+    passes whether it is valid, emptied, or absent. That gap let a change to
+    this file reach a PR with the full suite green and nothing reading it.
 
-    The file is fetched at runtime from `ref: main` by every gated repo, so a
-    malformed or emptied version is live org-wide the moment it merges. These
-    tests are cheap insurance against that.
+    (Note the seam is the monkeypatch, not `allowlist_data={}`: `_load_allowlist`
+    gates on a truthiness check, so an empty dict falls through to the disk
+    read and would pick up the real file anyway.)
+
+    Both production workflows fetch this file from `ref: main` with no pinned
+    ref, so a malformed version is live org-wide the moment it merges.
     """
+
+    # The only top-level keys any live code reads: `license_overrides` via
+    # requires_cla, and `repos`/`repositories` via
+    # policy_selector.fetch_shared_config. Asserting a subset rather than
+    # denying a list of known-dead names catches keys nobody has thought of —
+    # including `temp_exemptions`, the spelling the retired workflow actually
+    # read, which an earlier denylist here missed while blocking the inert
+    # `temporary_exemptions`.
+    READ_BY_LIVE_CODE = {"license_overrides", "repos", "repositories"}
 
     @classmethod
     def setUpClass(cls):
         import yaml
-        cls.path = Path(__file__).resolve().parents[1] / "cla" / "allowlist.yml"
-        cls.data = yaml.safe_load(cls.path.read_text())
+        # Reuse production's own path constant so moving the file fails loudly
+        # here instead of leaving the test reading a stale location.
+        cls.path = requires_cla._ALLOWLIST_PATH
+        # encoding= matters: _load_allowlist opens utf-8 explicitly, and this
+        # file contains non-ASCII. Without it a non-UTF-8 locale raises in
+        # setUpClass and silently erases all of these tests from the report.
+        cls.data = yaml.safe_load(cls.path.read_text(encoding="utf-8"))
+
+    def mapping(self):
+        """Fail fast with a message naming the file, rather than letting a
+        non-mapping surface as AttributeError/TypeError in four places."""
+        self.assertIsInstance(
+            self.data, dict,
+            f"{self.path} must parse to a mapping; got {type(self.data).__name__}",
+        )
+        return self.data
 
     def test_file_parses_to_a_mapping(self):
-        self.assertIsInstance(self.data, dict, "allowlist.yml must parse to a mapping")
+        self.mapping()
 
-    def test_license_overrides_present_and_shaped(self):
-        overrides = self.data.get("license_overrides")
-        self.assertIsInstance(overrides, dict, "license_overrides is the only section live code reads")
+    def test_only_keys_live_code_reads(self):
+        extra = set(self.mapping()) - self.READ_BY_LIVE_CODE
+        self.assertEqual(
+            extra, set(),
+            f"{sorted(extra)} is read by no live code. Enforcement bypasses live in "
+            "policy_selector.process_single_pr(); a key here that looks like one "
+            "but does nothing is how a departed employee stayed apparently "
+            "allowlisted after the workflow honouring it was retired.",
+        )
+
+    def test_license_overrides_shaped_as_requires_cla_expects(self):
+        overrides = self.mapping().get("license_overrides")
+        self.assertIsInstance(overrides, dict)
         self.assertIsInstance(overrides.get("require_cla"), list)
 
+    def test_repo_overrides_shaped_as_policy_selector_expects(self):
+        """`license_overrides.repos` is the part policy_selector reads, and it
+        decides CLA-vs-DCO for a whole repo. fetch_shared_config swallows a
+        malformed shape into a debug log, so every downgrade would silently
+        revert with no failing check — this is the assertion that catches it."""
+        repos = (self.mapping().get("license_overrides") or {}).get("repos")
+        if repos is None:
+            return  # optional section
+        self.assertIsInstance(repos, dict, "repos must be a mapping, not a list")
+        for name, cfg in repos.items():
+            self.assertIsInstance(cfg, dict, f"repos[{name}] must be a mapping, not null")
+            self.assertIsInstance(cfg.get("require_cla"), bool,
+                                  f"repos[{name}].require_cla must be a bool")
+
     def test_broadcom_source_available_still_forces_cla(self):
-        """The one override with real teeth: a non-permissive Broadcom licence
-        must still be pushed to CLA rather than falling through to DCO."""
-        decision = policy_selector_module_requires_cla()._override_requires_cla(
-            "licenseref-broadcom-source-available", self.data
-        )
+        """Broadcom Source Available is listed as permissive in the base
+        tables, so without this override it would fall through to DCO. Feed
+        the raw ID through production's own normaliser rather than a
+        hand-normalised literal, so a change to that normaliser fails here."""
+        norm = requires_cla._norm_license_name("LicenseRef-Broadcom_Source_Available")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):  # keeps ::warning:: out of CI annotations
+            decision = requires_cla._override_requires_cla(norm, self.mapping())
         self.assertIs(decision, True)
-
-    def test_no_stale_workflow_override_keys(self):
-        """org_members / users / bots / teams / dco_on_permissive /
-        temporary_exemptions were read only by the decommissioned
-        reusable-cla-check.yml. Re-adding one would look like a gate bypass
-        while doing nothing, which is how a departed employee came to appear
-        allowlisted long after the workflow that honoured it was retired."""
-        stale = {"org_members", "dco_on_permissive", "users", "bots", "teams",
-                 "temporary_exemptions"}
-        found = stale & set(self.data)
-        self.assertEqual(
-            found, set(),
-            f"{sorted(found)} is not read by any live code — enforcement bypasses "
-            "live in policy_selector.process_single_pr(), not in this file",
-        )
-
-
-def policy_selector_module_requires_cla():
-    """Import requires_cla the same way policy_selector does at runtime."""
-    import requires_cla
-    return requires_cla
 
 
 if __name__ == "__main__":
