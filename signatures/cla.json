@@ -142,6 +142,17 @@
       "head_sha": "b51d0c2fabee243b336fc3c94f25c21d7331cf7b",
       "comment_id": 5683844850,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "aaronjwood",
+      "id": 446283,
+      "signedAt": "2026-09-21T22:46:18.634702Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vcfa",
+      "pr_number": 254,
+      "head_sha": "3823a84ddc90e840f1f930999a2ae20ab9097c12",
+      "comment_id": 5768463117,
+      "agreement_version": "1.0"
     }
   ]
 }
