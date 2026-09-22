@@ -980,6 +980,25 @@ class TestOverrideWildcards(unittest.TestCase):
     def test_exact_entry_still_matches(self):
         self.assertIs(self.check("LicenseRef-Broadcom_Source_Available"), True)
 
+    def test_exact_entries_match_when_no_wildcard_covers_them(self):
+        """Pins the non-glob branch of _matches_any independently.
+
+        Every other fixture here pairs an exact entry with a wildcard over the
+        same namespace (`LicenseRef-Broadcom_Source_Available` alongside
+        `LicenseRef-Broadcom*`), so the wildcard masks a broken exact branch.
+        Verified: with the exact branch removed, an exact-only allowlist stops
+        matching and every one of those tests still passed. This fixture has
+        no wildcard, so the exact path has to work on its own.
+        """
+        exact_only = {"license_overrides": {"require_cla": ["MIT", "GPL-2.0"],
+                                            "allow_dco": ["Apache-2.0"]}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIs(requires_cla._override_requires_cla("mit", exact_only), True)
+            self.assertIs(requires_cla._override_requires_cla("gpl-2.0", exact_only), True)
+            self.assertIs(requires_cla._override_requires_cla("apache-2.0", exact_only), False)
+            self.assertIsNone(requires_cla._override_requires_cla("bsd-3-clause", exact_only))
+
     def test_wildcard_catches_other_broadcom_licences(self):
         """The gap this closes: without it, LicenseRef-Broadcom-Proprietary
         falls through to the base tables, where the canonical matcher strips
