@@ -33,6 +33,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from pathlib import Path
 
 # --- Import setup. Must happen before `import policy_selector`. ---
 #
@@ -505,6 +506,44 @@ class TestProcessSinglePr(PolicySelectorTestCase):
         self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
         self.assertEqual(fake.statuses()[0]["description"], "DCO Signed")
 
+    def test_unreadable_allowlist_forces_cla_not_dco(self):
+        """The behaviour that matters. requires_CLA says permissive (DCO) and
+        the repo is in allowlist_repos (DCO), but the allowlist could not be
+        read — so neither signal is trustworthy and the gate must ask for the
+        stronger document rather than the weaker one."""
+        policy_selector.requires_cla.requires_CLA = lambda *a, **k: False
+        fake = self.run_pr(
+            paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []},
+            config=dict(self.SHARED_CONFIG, allowlist_ok=False,
+                        allowlist_repos=["vmware/repo"]))
+        self.assertEqual(fake.statuses()[0]["description"], "CLA Missing")
+
+    def test_fail_closed_guard_does_not_corrupt_a_shared_config(self):
+        """cla_sweeper fetches the config ONCE and threads the same dict
+        through every PR in the sweep. The guard clears allowlist_repos, so if
+        it mutated the list in place instead of rebinding the local name, the
+        first PR to hit it would strip the DCO downgrade from every repo
+        processed afterwards in that sweep.
+        """
+        shared = dict(self.SHARED_CONFIG, allowlist_ok=False,
+                      allowlist_repos=["vmware/repo", "vmware/other"])
+        before = list(shared["allowlist_repos"])
+        policy_selector.requires_cla.requires_CLA = lambda *a, **k: False
+        self.run_pr(paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []},
+                    config=shared)
+        self.assertEqual(shared["allowlist_repos"], before,
+                         "the guard must rebind, not mutate the caller's list")
+
+    def test_hand_built_config_without_the_flag_is_treated_as_readable(self):
+        """Back-compat: a caller supplying its own data deliberately (tests,
+        license_report.py) has no allowlist_ok key and must not be forced
+        strict by its absence."""
+        policy_selector.requires_cla.requires_CLA = lambda *a, **k: False
+        fake = self.run_pr(
+            paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []},
+            config=dict(self.SHARED_CONFIG))  # no allowlist_ok key at all
+        self.assertEqual(fake.statuses()[0]["description"], "DCO Missing")
+
     def test_allowlisted_repo_is_downgraded_to_dco(self):
         config = dict(self.SHARED_CONFIG, allowlist_repos=["vmware/repo"])
         fake = self.run_pr(paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []}, config=config)
@@ -653,14 +692,15 @@ class TestRecordSignature(PolicySelectorTestCase):
 # fetch_shared_config  (protects the PR #66 per-sweep caching contract)
 # ---------------------------------------------------------------------------
 class TestFetchSharedConfig(PolicySelectorTestCase):
-    def test_returns_all_four_keys_process_single_pr_indexes(self):
+    def test_returns_all_keys_process_single_pr_indexes(self):
         # process_single_pr indexes these directly, so a missing key is a
         # KeyError mid-sweep rather than a soft failure.
         self.install()
         config = policy_selector.fetch_shared_config("https://api.invalid", "tok")
         self.assertEqual(
             sorted(config.keys()),
-            ["allowlist_data", "allowlist_repos", "licenses_data", "permissive_data"],
+            ["allowlist_data", "allowlist_ok", "allowlist_repos",
+             "licenses_data", "permissive_data"],
         )
 
     def test_missing_config_degrades_to_empty_rather_than_raising(self):
@@ -668,6 +708,11 @@ class TestFetchSharedConfig(PolicySelectorTestCase):
         config = policy_selector.fetch_shared_config("https://api.invalid", "tok")
         self.assertEqual(config["licenses_data"], [])
         self.assertEqual(config["permissive_data"], [])
+        # allowlist_data was previously omitted here — it is the one key that
+        # could come back poisoned (None, or a list) rather than empty.
+        self.assertEqual(config["allowlist_data"], {})
+        self.assertIs(config["allowlist_ok"], False,
+                      "an unfetchable allowlist must be reported as not-ok, not as empty")
         self.assertEqual(config["allowlist_repos"], [])
 
 
@@ -790,6 +835,17 @@ class TestAllowlistFile(unittest.TestCase):
             "update this test in the same commit",
         )
 
+    def test_broadcom_wildcard_entry_is_present(self):
+        """Pins the entry itself, not just the matcher. Deleting
+        `LicenseRef-Broadcom*` from this file silently returns every Broadcom
+        licence except the one spelled out to the base tables, where they are
+        listed as permissive — i.e. back to DCO."""
+        req = (self.mapping().get("license_overrides") or {}).get("require_cla") or []
+        self.assertTrue(
+            any("*" in str(x) and "roadcom" in str(x) for x in req),
+            f"expected a LicenseRef-Broadcom* wildcard in require_cla, got {req}",
+        )
+
     def test_broadcom_source_available_still_forces_cla(self):
         """Broadcom Source Available is listed as permissive in the base
         tables, so without this override it would fall through to DCO. Feed
@@ -800,6 +856,201 @@ class TestAllowlistFile(unittest.TestCase):
         with contextlib.redirect_stdout(buf):  # keeps ::warning:: out of CI annotations
             decision = requires_cla._override_requires_cla(norm, self.mapping())
         self.assertIs(decision, True)
+
+
+
+# ---------------------------------------------------------------------------
+# Allowlist robustness: a policy we cannot read must not read as a policy
+# that permits everything.
+# ---------------------------------------------------------------------------
+class TestAllowlistFailClosed(PolicySelectorTestCase):
+    """cla/allowlist.yml is fetched from `ref: main` on every run.
+
+    Before this, `allowlist_data = yaml.safe_load(...)` was assigned before
+    the `.get()` that can raise, so a comments-only file left allowlist_data
+    as None, the AttributeError was swallowed into a debug_log, and every
+    licence override silently disappeared org-wide. That direction is
+    dangerous: Broadcom Source Available is listed as permissive in the base
+    tables and is held at CLA *only* by the override, so losing it downgrades
+    those repos to DCO.
+    """
+
+    def _config(self, body):
+        self.install(routes={"/contents/cla/allowlist.yml": self._file(body)})
+        return policy_selector.fetch_shared_config("https://api.invalid", "tok")
+
+    @staticmethod
+    def _file(text):
+        import base64
+        return {"content": base64.b64encode(text.encode()).decode()}
+
+    def test_valid_allowlist_is_ok_and_parsed(self):
+        cfg = self._config(
+            "license_overrides:\n"
+            "  require_cla: [LicenseRef-Broadcom_Source_Available]\n"
+            "  repos:\n"
+            "    vmware/x:\n"
+            "      require_cla: false\n"
+        )
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertEqual(cfg["allowlist_repos"], ["vmware/x"])
+
+    def test_comments_only_file_is_not_ok_and_data_stays_a_dict(self):
+        cfg = self._config("# nothing but a comment\n")
+        self.assertIs(cfg["allowlist_ok"], False)
+        self.assertEqual(cfg["allowlist_data"], {},
+                         "must not leak yaml.safe_load's None into callers")
+
+    def test_top_level_list_is_not_ok(self):
+        cfg = self._config("- one\n- two\n")
+        self.assertIs(cfg["allowlist_ok"], False)
+        self.assertEqual(cfg["allowlist_data"], {})
+
+    def test_malformed_yaml_is_not_ok(self):
+        cfg = self._config("license_overrides: [unclosed\n")
+        self.assertIs(cfg["allowlist_ok"], False)
+        self.assertEqual(cfg["allowlist_data"], {})
+        self.assertEqual(cfg["allowlist_repos"], [])
+
+    def test_repositories_scalar_does_not_explode_into_characters(self):
+        cfg = self._config("repositories: vmware/foo\n")
+        self.assertEqual(cfg["allowlist_repos"], [],
+                         "a bare string must be rejected, not iterated per character")
+
+
+class TestOverrideMatchesTheRealCatalogue(unittest.TestCase):
+    """Guard the seam between two files that must agree but are spelled
+    differently.
+
+    cla/allowlist.yml says `LicenseRef-Broadcom_Source_Available`
+    (underscores); data/licenses_all.json's canonical spdx_id is
+    `LicenseRef-Broadcom-Source-Available` (hyphens). They match ONLY because
+    _norm_license_name collapses [\\s_]+ to '-'. Change that normaliser, or
+    regenerate the catalogue with a different spelling, and production stops
+    forcing CLA on 48 repos while a test that normalises both sides itself
+    would stay green. So this drives the lookup from the catalogue's own
+    value, not from a literal.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.allowlist = yaml.safe_load(
+            requires_cla._ALLOWLIST_PATH.read_text(encoding="utf-8"))
+        cls.catalogue = json.loads(
+            (Path(__file__).resolve().parents[1] / "data" / "licenses_all.json").read_text())
+
+    def override_for(self, catalogue_key):
+        entry = self.catalogue[catalogue_key]
+        spdx = entry.get("spdx_id") or catalogue_key
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return requires_cla._override_requires_cla(
+                requires_cla._norm_license_name(spdx), self.allowlist)
+
+    def test_allowlist_and_catalogue_spellings_converge(self):
+        """Assert the convergence directly, not through the matcher.
+
+        Going via _override_requires_cla cannot detect a broken normaliser,
+        because the LicenseRef-Broadcom* wildcard matches the catalogue form
+        either way and masks it. The two files genuinely disagree on spelling
+        — underscores here, hyphens there — and only _norm_license_name makes
+        them meet. That property is what has to hold.
+        """
+        entry = self.catalogue["Broadcom_Source_Available"]
+        from_catalogue = requires_cla._norm_license_name(entry["spdx_id"])
+        from_allowlist = requires_cla._norm_license_name(
+            "LicenseRef-Broadcom_Source_Available")
+        self.assertEqual(
+            from_catalogue, from_allowlist,
+            f"catalogue spells it {entry['spdx_id']!r} and the allowlist spells it "
+            "'LicenseRef-Broadcom_Source_Available'; _norm_license_name is the only "
+            "thing making them match, so 48 repos depend on this rule",
+        )
+
+    def test_broadcom_source_available_resolves_to_cla_from_catalogue_id(self):
+        self.assertIs(self.override_for("Broadcom_Source_Available"), True)
+
+    def test_broadcom_proprietary_resolves_to_cla_via_the_wildcard(self):
+        """Without the wildcard this falls through to the base tables, which
+        list Broadcom_Proprietary as permissive, and the repo gets DCO."""
+        self.assertIs(self.override_for("Broadcom_Proprietary"), True)
+
+
+class TestOverrideWildcards(unittest.TestCase):
+    """`cla/allowlist.yml` has always documented "simple '*' wildcards", and
+    ships `LicenseRef-Broadcom*` on that basis, but matching was plain set
+    membership so that entry matched nothing."""
+
+    ALLOWLIST = {"license_overrides": {
+        "require_cla": ["LicenseRef-Broadcom_Source_Available", "LicenseRef-Broadcom*"],
+        "allow_dco": ["LicenseRef-Sample*"],
+    }}
+
+    def check(self, license_id):
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return requires_cla._override_requires_cla(
+                requires_cla._norm_license_name(license_id), self.ALLOWLIST)
+
+    def test_exact_entry_still_matches(self):
+        self.assertIs(self.check("LicenseRef-Broadcom_Source_Available"), True)
+
+    def test_exact_entries_match_when_no_wildcard_covers_them(self):
+        """Pins the non-glob branch of _matches_any independently.
+
+        Every other fixture here pairs an exact entry with a wildcard over the
+        same namespace (`LicenseRef-Broadcom_Source_Available` alongside
+        `LicenseRef-Broadcom*`), so the wildcard masks a broken exact branch.
+        Verified: with the exact branch removed, an exact-only allowlist stops
+        matching and every one of those tests still passed. This fixture has
+        no wildcard, so the exact path has to work on its own.
+        """
+        exact_only = {"license_overrides": {"require_cla": ["MIT", "GPL-2.0"],
+                                            "allow_dco": ["Apache-2.0"]}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIs(requires_cla._override_requires_cla("mit", exact_only), True)
+            self.assertIs(requires_cla._override_requires_cla("gpl-2.0", exact_only), True)
+            self.assertIs(requires_cla._override_requires_cla("apache-2.0", exact_only), False)
+            self.assertIsNone(requires_cla._override_requires_cla("bsd-3-clause", exact_only))
+
+    def test_wildcard_catches_other_broadcom_licences(self):
+        """The gap this closes: without it, LicenseRef-Broadcom-Proprietary
+        falls through to the base tables, where the canonical matcher strips
+        the LicenseRef- prefix and finds Broadcom_Proprietary listed as
+        permissive — so a proprietary licence resolved to DCO."""
+        for lic in ("LicenseRef-Broadcom-Proprietary",
+                    "LicenseRef-Broadcom_Enterprise",
+                    "LicenseRef-BroadcomAnything"):
+            self.assertIs(self.check(lic), True, lic)
+
+    def test_wildcard_does_not_over_match(self):
+        for lic in ("MIT", "Apache-2.0", "LicenseRef-Other", "Broadcom-Without-Prefix"):
+            self.assertIsNone(self.check(lic), lic)
+
+    def test_allow_dco_wildcards_work_too(self):
+        self.assertIs(self.check("LicenseRef-Sample-Thing"), False)
+
+    def test_matching_is_case_sensitive_on_already_normalised_input(self):
+        """Both sides are lowercased by _norm_license_name before matching, so
+        fnmatchcase is correct and fnmatch's platform-dependent case folding
+        is not wanted. An upper-case pattern must therefore NOT match."""
+        upper = {"license_overrides": {"require_cla": ["LICENSEREF-ZZZ*"]}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            # the pattern is normalised (lowercased) too, so this still matches
+            self.assertIs(requires_cla._override_requires_cla("licenseref-zzz-a", upper), True)
+            # but a raw, un-normalised upper-case subject must not
+            self.assertIsNone(requires_cla._override_requires_cla("LICENSEREF-ZZZ-A", upper))
+
+    def test_require_cla_wins_over_allow_dco(self):
+        both = {"license_overrides": {"require_cla": ["LicenseRef-X*"],
+                                      "allow_dco": ["LicenseRef-X*"]}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            d = requires_cla._override_requires_cla("licenseref-xyz", both)
+        self.assertIs(d, True, "require_cla must take precedence")
 
 
 if __name__ == "__main__":

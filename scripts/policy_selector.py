@@ -469,10 +469,23 @@ def fetch_shared_config(api_root, gh_token):
 
     allowlist_repos = []
     allowlist_data = {}
+    # False means "we could not read the policy", which is NOT the same as
+    # "the policy is empty". Callers use it to fail closed rather than
+    # silently enforcing a weaker document than the real allowlist requires.
+    allowlist_ok = False
 
     if raw_allowlist:
         try:
-            allowlist_data = yaml.safe_load(raw_allowlist)
+            parsed = yaml.safe_load(raw_allowlist)
+            if not isinstance(parsed, dict):
+                # safe_load returns None for an empty/comments-only file and a
+                # list for a top-level sequence. Assigning either to
+                # allowlist_data before the .get() below would destroy the {}
+                # default and poison every downstream consumer.
+                raise ValueError(
+                    f"allowlist must be a mapping, got {type(parsed).__name__}"
+                )
+            allowlist_data = parsed
             # Handle nesting under 'license_overrides' -> 'repos'
             repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
             if not repos_config:
@@ -483,10 +496,23 @@ def fetch_shared_config(api_root, gh_token):
                     if r_config.get("require_cla") is False:
                         allowlist_repos.append(r_name)
 
-            allowlist_repos.extend(allowlist_data.get("repositories", []))
+            extra = allowlist_data.get("repositories") or []
+            if isinstance(extra, list):
+                allowlist_repos.extend(extra)
+            else:
+                # A bare string here would be iterated character by character.
+                debug_log(f"⚠️ 'repositories' must be a list, got {type(extra).__name__}; ignoring.")
+            allowlist_ok = True
             debug_log(f"✅ Allowlist loaded via API. Found {len(allowlist_repos)} DCO-only repos.")
         except Exception as e:
-            debug_log(f"⚠️ Failed to parse allowlist YAML: {e}")
+            # Reset rather than leave a half-built or poisoned value behind.
+            allowlist_data = {}
+            allowlist_repos = []
+            print(f"::error::Failed to parse cla/allowlist.yml: {e}. "
+                  "Enforcing CLA for every repo until this is fixed.")
+    else:
+        print("::error::Could not fetch cla/allowlist.yml. "
+              "Enforcing CLA for every repo until this is fixed.")
 
     # B. Licenses
     licenses_data = fetch_json_with_fallback(api_root, "data/licenses_all.json", "cla/licenses_all.json", gh_token) or []
@@ -497,6 +523,7 @@ def fetch_shared_config(api_root, gh_token):
     return {
         "allowlist_data": allowlist_data,
         "allowlist_repos": allowlist_repos,
+        "allowlist_ok": allowlist_ok,
         "licenses_data": licenses_data,
         "permissive_data": permissive_data,
     }
@@ -553,6 +580,18 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         debug_log(f"⚠️ Logic Module Error: {e}. Defaulting to STRICT mode.")
         is_strict = True
         
+    # An unreadable allowlist is not an empty one. Without its overrides a
+    # non-permissive licence can look permissive — Broadcom Source Available
+    # is listed as permissive in the base tables and is held at CLA only by
+    # the override — so continuing would silently downgrade repos to DCO.
+    # Default to strict instead, matching the Logic Module Error path above.
+    # .get() default is True so a hand-built shared_config (tests, callers
+    # that supply their own data) is treated as deliberate, not as a failure.
+    if not config.get("allowlist_ok", True):
+        debug_log("⚠️ Allowlist unavailable. Defaulting to STRICT mode.")
+        is_strict = True
+        allowlist_repos = []
+
     # Allowlist Override
     if repo_full_name in allowlist_repos:
         debug_log(f"ℹ️ Repo {repo_full_name} is in Allowlist. Enforcing DCO only.")
