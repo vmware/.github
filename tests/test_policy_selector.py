@@ -33,6 +33,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from pathlib import Path
 
 # --- Import setup. Must happen before `import policy_selector`. ---
 #
@@ -818,6 +819,17 @@ class TestAllowlistFile(unittest.TestCase):
             "update this test in the same commit",
         )
 
+    def test_broadcom_wildcard_entry_is_present(self):
+        """Pins the entry itself, not just the matcher. Deleting
+        `LicenseRef-Broadcom*` from this file silently returns every Broadcom
+        licence except the one spelled out to the base tables, where they are
+        listed as permissive — i.e. back to DCO."""
+        req = (self.mapping().get("license_overrides") or {}).get("require_cla") or []
+        self.assertTrue(
+            any("*" in str(x) and "roadcom" in str(x) for x in req),
+            f"expected a LicenseRef-Broadcom* wildcard in require_cla, got {req}",
+        )
+
     def test_broadcom_source_available_still_forces_cla(self):
         """Broadcom Source Available is listed as permissive in the base
         tables, so without this override it would fall through to DCO. Feed
@@ -890,6 +902,65 @@ class TestAllowlistFailClosed(PolicySelectorTestCase):
                          "a bare string must be rejected, not iterated per character")
 
 
+class TestOverrideMatchesTheRealCatalogue(unittest.TestCase):
+    """Guard the seam between two files that must agree but are spelled
+    differently.
+
+    cla/allowlist.yml says `LicenseRef-Broadcom_Source_Available`
+    (underscores); data/licenses_all.json's canonical spdx_id is
+    `LicenseRef-Broadcom-Source-Available` (hyphens). They match ONLY because
+    _norm_license_name collapses [\\s_]+ to '-'. Change that normaliser, or
+    regenerate the catalogue with a different spelling, and production stops
+    forcing CLA on 48 repos while a test that normalises both sides itself
+    would stay green. So this drives the lookup from the catalogue's own
+    value, not from a literal.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.allowlist = yaml.safe_load(
+            requires_cla._ALLOWLIST_PATH.read_text(encoding="utf-8"))
+        cls.catalogue = json.loads(
+            (Path(__file__).resolve().parents[1] / "data" / "licenses_all.json").read_text())
+
+    def override_for(self, catalogue_key):
+        entry = self.catalogue[catalogue_key]
+        spdx = entry.get("spdx_id") or catalogue_key
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return requires_cla._override_requires_cla(
+                requires_cla._norm_license_name(spdx), self.allowlist)
+
+    def test_allowlist_and_catalogue_spellings_converge(self):
+        """Assert the convergence directly, not through the matcher.
+
+        Going via _override_requires_cla cannot detect a broken normaliser,
+        because the LicenseRef-Broadcom* wildcard matches the catalogue form
+        either way and masks it. The two files genuinely disagree on spelling
+        — underscores here, hyphens there — and only _norm_license_name makes
+        them meet. That property is what has to hold.
+        """
+        entry = self.catalogue["Broadcom_Source_Available"]
+        from_catalogue = requires_cla._norm_license_name(entry["spdx_id"])
+        from_allowlist = requires_cla._norm_license_name(
+            "LicenseRef-Broadcom_Source_Available")
+        self.assertEqual(
+            from_catalogue, from_allowlist,
+            f"catalogue spells it {entry['spdx_id']!r} and the allowlist spells it "
+            "'LicenseRef-Broadcom_Source_Available'; _norm_license_name is the only "
+            "thing making them match, so 48 repos depend on this rule",
+        )
+
+    def test_broadcom_source_available_resolves_to_cla_from_catalogue_id(self):
+        self.assertIs(self.override_for("Broadcom_Source_Available"), True)
+
+    def test_broadcom_proprietary_resolves_to_cla_via_the_wildcard(self):
+        """Without the wildcard this falls through to the base tables, which
+        list Broadcom_Proprietary as permissive, and the repo gets DCO."""
+        self.assertIs(self.override_for("Broadcom_Proprietary"), True)
+
+
 class TestOverrideWildcards(unittest.TestCase):
     """`cla/allowlist.yml` has always documented "simple '*' wildcards", and
     ships `LicenseRef-Broadcom*` on that basis, but matching was plain set
@@ -925,6 +996,18 @@ class TestOverrideWildcards(unittest.TestCase):
 
     def test_allow_dco_wildcards_work_too(self):
         self.assertIs(self.check("LicenseRef-Sample-Thing"), False)
+
+    def test_matching_is_case_sensitive_on_already_normalised_input(self):
+        """Both sides are lowercased by _norm_license_name before matching, so
+        fnmatchcase is correct and fnmatch's platform-dependent case folding
+        is not wanted. An upper-case pattern must therefore NOT match."""
+        upper = {"license_overrides": {"require_cla": ["LICENSEREF-ZZZ*"]}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            # the pattern is normalised (lowercased) too, so this still matches
+            self.assertIs(requires_cla._override_requires_cla("licenseref-zzz-a", upper), True)
+            # but a raw, un-normalised upper-case subject must not
+            self.assertIsNone(requires_cla._override_requires_cla("LICENSEREF-ZZZ-A", upper))
 
     def test_require_cla_wins_over_allow_dco(self):
         both = {"license_overrides": {"require_cla": ["LicenseRef-X*"],
