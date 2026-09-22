@@ -1,48 +1,36 @@
 
 # .github/cla/allowlist.yml
-# Purpose: (A) workflow overrides for CLA/DCO, (B) license overrides for requires_cla.py
+#
+# This file does NOT contain a per-user or per-team bypass list. It has two
+# effects, both on WHICH DOCUMENT a contributor must sign, never on whether
+# someone is checked at all:
+#   * license_overrides.require_cla / allow_dco  — read by requires_cla.py,
+#     override a licence's permissive/non-permissive classification.
+#   * license_overrides.repos.<repo>.require_cla — read by
+#     policy_selector.fetch_shared_config(), and `false` downgrades that whole
+#     repo from CLA to DCO. This is live: vmware/.github is on DCO because of
+#     the entry below.
+#
+# Two further top-level keys are honoured but undocumented elsewhere, so they
+# are recorded here rather than left to be rediscovered: a top-level `repos:`
+# block (used only when license_overrides.repos is absent or empty), and a
+# top-level `repositories:` list whose entries are appended straight to the
+# DCO-only set. Prefer license_overrides.repos; the other two exist for
+# backwards compatibility.
+#
+# Who skips the gate entirely is decided in policy_selector.process_single_pr(),
+# not here. Three paths return early, in order: an existing successful
+# "Check CLA/DCO" status on the head SHA, a bot (BOT_ALLOWLIST or any login
+# ending "[bot]"), and an org member (live is_org_member() API call).
+#
+# Both production workflows fetch this file from the default branch with no
+# pinned ref, so any edit is live across every gated repo on the next sweep.
 
 # -----------------------------
-# A) WORKFLOW OVERRIDES (used by reusable-cla-check.yml)
-# -----------------------------
-
-# If true, any org member is treated as allowed (no CLA/DCO gate).
-org_members: true
-
-# Run DCO on permissive repos?
-#   off            -> never run assistant on permissive repos
-#   external_only  -> run assistant (DCO mode) for non-members only
-#   all            -> run assistant (DCO mode) for everyone
-dco_on_permissive: external_only
-
-# GitHub logins that always skip the gate (case-insensitive)
-users:
-   - normansden
-#   - bob-consultant
-
-# Bot accounts that always skip the gate
-bots:
-  - dependabot[bot]
-  - github-actions[bot]
-
-# Teams whose members always skip the gate.
-# Accepts "org/team" or bare "team" (interpreted as <current-org>/team).
-# teams:
-#   - myorg/maintainers
-#   - release-engineering
-
-# Optional global exemption window (everyone is allowed during this period).
-# ISO 8601 timestamps; end is inclusive to the minute.
-#temporary_exemptions:
-#  start: 2025-12-30T00:00:00Z
-#  end:   2025-12-31T23:59:59Z
-#  reason: "Partner pilot"
-
-# -----------------------------
-# B) LICENSE POLICY OVERRIDES (used by requires_cla.py)
+# LICENSE POLICY OVERRIDES
 # -----------------------------
 # Base truth for permissive/non-permissive comes from:
-#   data/permissive.json + data/licenses_all.json
+#   data/permissive_names.json + data/licenses_all.json
 # The keys below *override* that base decision.
 license_overrides:
 
@@ -54,18 +42,20 @@ license_overrides:
     - LicenseRef-Broadcom*
     # (add more as needed)
 
-  # (Optional) Treat specific IDs as permissive (force allow), even if base says otherwise.
-  # Only use this if you intend to *downgrade* certain licenses to permissive.
-#  permissive:
+  # (Optional) The inverse of require_cla: force these IDs to DCO even if the
+  # base tables call them non-permissive. The key is allow_dco — an earlier
+  # version of this file documented it as "permissive", which nothing reads.
+#  allow_dco:
 
-  # (Optional) Per-repo overrides. Keys can be "<owner>/<repo>" or just "<repo>".
-  # Useful when the detector result needs correction or you want to force policy.
+  # (Optional) Per-repo overrides. Keys MUST be "<owner>/<repo>" — process_single_pr
+  # compares against the full name, so a bare "<repo>" key is collected but never
+  # matches anything.
   repos:
     vmware/.github:
-      require_cla: false           # force enforcement for this repo
+      require_cla: false           # false = downgrade this repo to DCO-only
       # force_spdx: "MIT"         # pretend this is the detected license (rarely needed)
-#    docs-site:
-#      require_cla: false          # force permissive for this repo
+#    vmware/docs-site:
+#      require_cla: false        # false = downgrade that repo to DCO-only
 
   # (Optional) Normalize odd/legacy license IDs to canonical SPDX before evaluation.
   # The left side is what the detector finds; the right side is the canonical ID.

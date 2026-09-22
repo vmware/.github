@@ -14,12 +14,14 @@ on:
     paths:
       - 'scripts/**'
       - 'tests/**'
+      - 'cla/**'
       - '.github/workflows/tests.yml'
   push:
     branches: [main]
     paths:
       - 'scripts/**'
       - 'tests/**'
+      - 'cla/**'
       - '.github/workflows/tests.yml'
 
 permissions:

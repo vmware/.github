@@ -29,6 +29,8 @@ Test seams (see the import block below for why the env setup comes first):
 import json
 import os
 import sys
+import contextlib
+import io
 import tempfile
 import unittest
 
@@ -54,6 +56,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
 import policy_selector  # noqa: E402
+
+# policy_selector wraps this import in try/except and substitutes a stub, so a
+# missing optional dep (aiohttp, rapidfuzz) degrades rather than breaking. Match
+# that: an unguarded import here turns one absent dep into a collection error
+# that erases the whole suite instead of skipping the tests that need it.
+try:
+    import requires_cla  # noqa: E402
+except Exception:  # pragma: no cover - exercised only on a degraded runner
+    requires_cla = None
 
 
 SIGNED_SUFFIX = "for this and all future contributions"
@@ -684,6 +695,111 @@ class TestInstructionMessage(unittest.TestCase):
         msg = policy_selector.INSTRUCTION_MESSAGE.format(user="a", doc_type="CLA", url="u")
         self.assertIn("I have read the", msg)
         self.assertIn("Sign via Comment", msg)
+
+
+@unittest.skipIf(requires_cla is None, "requires_cla unavailable (optional dep missing)")
+class TestAllowlistFile(unittest.TestCase):
+    """Parse the REAL cla/allowlist.yml.
+
+    Every other test in this file monkeypatches `requires_cla.requires_CLA`
+    away in setUp, so none of them exercise the shipped file — the suite
+    passes whether it is valid, emptied, or absent. That gap let a change to
+    this file reach a PR with the full suite green and nothing reading it.
+
+    (Note the seam is the monkeypatch, not `allowlist_data={}`: `_load_allowlist`
+    gates on a truthiness check, so an empty dict falls through to the disk
+    read and would pick up the real file anyway.)
+
+    Both production workflows fetch this file from `ref: main` with no pinned
+    ref, so a malformed version is live org-wide the moment it merges.
+    """
+
+    # The only top-level keys any live code reads: `license_overrides` via
+    # requires_cla, and `repos`/`repositories` via
+    # policy_selector.fetch_shared_config. Asserting a subset rather than
+    # denying a list of known-dead names catches keys nobody has thought of —
+    # including `temp_exemptions`, the spelling the retired workflow actually
+    # read, which an earlier denylist here missed while blocking the inert
+    # `temporary_exemptions`.
+    READ_BY_LIVE_CODE = {"license_overrides", "repos", "repositories"}
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        # Reuse production's own path constant so moving the file fails loudly
+        # here instead of leaving the test reading a stale location.
+        cls.path = requires_cla._ALLOWLIST_PATH
+        # encoding= matters: _load_allowlist opens utf-8 explicitly, and this
+        # file contains non-ASCII. Without it a non-UTF-8 locale raises in
+        # setUpClass and silently erases all of these tests from the report.
+        cls.data = yaml.safe_load(cls.path.read_text(encoding="utf-8"))
+
+    def mapping(self):
+        """Fail fast with a message naming the file, rather than letting a
+        non-mapping surface as AttributeError/TypeError in four places."""
+        self.assertIsInstance(
+            self.data, dict,
+            f"{self.path} must parse to a mapping; got {type(self.data).__name__}",
+        )
+        return self.data
+
+    def test_file_parses_to_a_mapping(self):
+        self.mapping()
+
+    def test_only_keys_live_code_reads(self):
+        extra = set(self.mapping()) - self.READ_BY_LIVE_CODE
+        self.assertEqual(
+            extra, set(),
+            f"{sorted(extra)} is read by no live code. Enforcement bypasses live in "
+            "policy_selector.process_single_pr(); a key here that looks like one "
+            "but does nothing is how a departed employee stayed apparently "
+            "allowlisted after the workflow honouring it was retired.",
+        )
+
+    def test_license_overrides_shaped_as_requires_cla_expects(self):
+        overrides = self.mapping().get("license_overrides")
+        self.assertIsInstance(overrides, dict)
+        self.assertIsInstance(overrides.get("require_cla"), list)
+
+    def test_repo_overrides_shaped_as_policy_selector_expects(self):
+        """`license_overrides.repos` decides CLA-vs-DCO for a whole repo, and
+        fetch_shared_config swallows a malformed shape into a debug log."""
+        repos = (self.mapping().get("license_overrides") or {}).get("repos")
+        self.assertIsInstance(repos, dict, "repos must be a mapping, not a list or null")
+        for name, cfg in repos.items():
+            self.assertIsInstance(cfg, dict, f"repos[{name}] must be a mapping, not null")
+            self.assertIsInstance(cfg.get("require_cla"), bool,
+                                  f"repos[{name}].require_cla must be a bool")
+            self.assertIn("/", name,
+                          f"repos[{name}] must be '<owner>/<repo>' — process_single_pr "
+                          "compares against the full name, so a bare repo never matches")
+
+    def test_dotgithub_stays_on_dco(self):
+        """Pins a deliberate policy decision rather than the file's shape.
+
+        Deleting the repos block, emptying it, dropping this entry, or flipping
+        it to true all leave the previous shape-only assertions green while
+        silently moving this repo from DCO back to CLA. Changing that is a
+        legitimate decision — it just has to be a deliberate one, so it fails
+        here first.
+        """
+        repos = (self.mapping().get("license_overrides") or {}).get("repos") or {}
+        self.assertIs(
+            repos.get("vmware/.github", {}).get("require_cla"), False,
+            "vmware/.github is intentionally on DCO; if that changed on purpose, "
+            "update this test in the same commit",
+        )
+
+    def test_broadcom_source_available_still_forces_cla(self):
+        """Broadcom Source Available is listed as permissive in the base
+        tables, so without this override it would fall through to DCO. Feed
+        the raw ID through production's own normaliser rather than a
+        hand-normalised literal, so a change to that normaliser fails here."""
+        norm = requires_cla._norm_license_name("LicenseRef-Broadcom_Source_Available")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):  # keeps ::warning:: out of CI annotations
+            decision = requires_cla._override_requires_cla(norm, self.mapping())
+        self.assertIs(decision, True)
 
 
 if __name__ == "__main__":
