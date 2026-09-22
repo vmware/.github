@@ -518,6 +518,22 @@ class TestProcessSinglePr(PolicySelectorTestCase):
                         allowlist_repos=["vmware/repo"]))
         self.assertEqual(fake.statuses()[0]["description"], "CLA Missing")
 
+    def test_fail_closed_guard_does_not_corrupt_a_shared_config(self):
+        """cla_sweeper fetches the config ONCE and threads the same dict
+        through every PR in the sweep. The guard clears allowlist_repos, so if
+        it mutated the list in place instead of rebinding the local name, the
+        first PR to hit it would strip the DCO downgrade from every repo
+        processed afterwards in that sweep.
+        """
+        shared = dict(self.SHARED_CONFIG, allowlist_ok=False,
+                      allowlist_repos=["vmware/repo", "vmware/other"])
+        before = list(shared["allowlist_repos"])
+        policy_selector.requires_cla.requires_CLA = lambda *a, **k: False
+        self.run_pr(paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []},
+                    config=shared)
+        self.assertEqual(shared["allowlist_repos"], before,
+                         "the guard must rebind, not mutate the caller's list")
+
     def test_hand_built_config_without_the_flag_is_treated_as_readable(self):
         """Back-compat: a caller supplying its own data deliberately (tests,
         license_report.py) has no allowlist_ok key and must not be forced
