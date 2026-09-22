@@ -15,6 +15,7 @@ on:
       - 'scripts/**'
       - 'tests/**'
       - 'cla/**'
+      - 'data/**'
       - '.github/workflows/tests.yml'
   push:
     branches: [main]
@@ -22,6 +23,7 @@ on:
       - 'scripts/**'
       - 'tests/**'
       - 'cla/**'
+      - 'data/**'
       - '.github/workflows/tests.yml'
 
 permissions:
