@@ -26,6 +26,7 @@ import detect_org_repo_licenses as dorl
 
 # --- Overrides Helper ---
 from pathlib import Path
+import fnmatch
 import re
 try:
     import yaml
@@ -61,21 +62,45 @@ def _load_allowlist(in_memory_data: Optional[Dict] = None) -> dict:
         # Silent fail on disk read (expected in new architecture)
         return {}
 
+def _matches_any(norm_license: str, patterns) -> bool:
+    """Exact match, or a glob when the pattern contains '*'.
+
+    cla/allowlist.yml has documented "simple '*' wildcards" since it was
+    written, and ships `LicenseRef-Broadcom*` on that basis — but the match
+    was plain set membership, so that entry could only ever match a licence
+    literally named `LicenseRef-Broadcom*`. Any new Broadcom LicenseRef fell
+    through to the base tables, where the canonical-name matcher strips the
+    `LicenseRef-` prefix and finds `Broadcom_Proprietary` listed as
+    permissive — so a proprietary licence resolved to DCO.
+
+    Patterns are matched case-sensitively against the already-normalised
+    name (both sides are lowercased by _norm_license_name first), so
+    fnmatchcase avoids fnmatch's platform-dependent case folding.
+    """
+    for pattern in patterns:
+        if "*" in pattern or "?" in pattern or "[" in pattern:
+            if fnmatch.fnmatchcase(norm_license, pattern):
+                return True
+        elif norm_license == pattern:
+            return True
+    return False
+
+
 def _override_requires_cla(norm_license: str, allowlist: dict) -> None | bool:
     """
     Return True (force CLA), False (force DCO), or None (no override).
     """
     section = allowlist.get("license_overrides") or {}
-    req = {_norm_license_name(x) for x in (section.get("require_cla") or [])}
-    dco = {_norm_license_name(x) for x in (section.get("allow_dco") or [])}
+    req = [_norm_license_name(x) for x in (section.get("require_cla") or [])]
+    dco = [_norm_license_name(x) for x in (section.get("allow_dco") or [])]
 
     print(f"::warning::[DEBUG OVERRIDE] Checking Normalized License: '{norm_license}'")
     print(f"::warning::   -> 'require_cla' list contains: {sorted(list(req))}")
 
-    if norm_license in req:
+    if _matches_any(norm_license, req):
         print(f"::warning::   -> ✅ MATCH FOUND in require_cla! Forcing True.")
         return True
-    if norm_license in dco:
+    if _matches_any(norm_license, dco):
         print(f"::warning::   -> MATCH FOUND in allow_dco! Forcing False.")
         return False
     
