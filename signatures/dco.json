@@ -54,6 +54,17 @@
       "head_sha": "7fd1dd397c5987221921b6ef4d9356478f9876c4",
       "comment_id": 5730997247,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "aaronjwood",
+      "id": 446283,
+      "signedAt": "2026-09-22T23:19:15.691026Z",
+      "org": "vmware",
+      "repo": "vmware/go-vcloud-director",
+      "pr_number": 823,
+      "head_sha": "9c532d8be21a3eb6a42bd8df44eeebf38bb70a3f",
+      "comment_id": 5785878136,
+      "agreement_version": "1.0"
     }
   ]
 }
