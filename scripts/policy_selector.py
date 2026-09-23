@@ -30,8 +30,26 @@ except ImportError:
 # The context the org ruleset requires. MUST NOT match the job name in
 # .github/workflows/required-compliance.yml — see the comment there for why
 # letting them collide makes the gate fail open.
-STATUS_CONTEXT = "Check CLA/DCO" 
+STATUS_CONTEXT = "Check CLA/DCO"
 BOT_ALLOWLIST = ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"]
+
+# Appended to the status description when the contributor signed correctly but
+# writing their consent record failed. The status stays SUCCESS on purpose —
+# they did sign, and an infrastructure failure is not theirs to pay for — but
+# this marker exempts the PR from the already-resolved short-circuit so the
+# next sweep retries the write. Without it a failed write is invisible AND
+# permanent: green status, no record, nothing ever coming back to fix it.
+#
+# Matched with a substring test rather than equality so the surrounding
+# wording can change without silently disabling the retry.
+RECORD_PENDING_MARKER = "record pending"
+
+
+def has_pending_record(description):
+    """True if a status description we painted marks its consent record as
+    not yet written. Tolerates None, which is what the API returns for a
+    status posted without a description."""
+    return RECORD_PENDING_MARKER in (description or "").lower()
 
 # Substrings that only ever appear in our own instruction comment, never in a
 # sign-off. Needed because INSTRUCTION_MESSAGE_LINES *contains* the signature
@@ -372,17 +390,25 @@ def set_commit_status(api_root, repo, sha, state, description, target_url, token
     debug_log(f"⚡ Painting Commit {sha[:7]} as '{state}'...")
     github_api(url, token, "POST", payload)
 
-def get_existing_status_state(api_root, repo, sha, token):
-    """Returns the current state of our STATUS_CONTEXT on this commit
-    ('success'/'failure'/'pending'), or None if we haven't posted one yet."""
+def get_existing_status(api_root, repo, sha, token):
+    """Returns (state, description) for our STATUS_CONTEXT on this commit, or
+    (None, None) if we haven't posted one yet.
+
+    Renamed from get_existing_status_state when the description became
+    load-bearing. Deliberately a rename rather than a changed return type: a
+    caller left comparing the old name's result to "success" would silently
+    evaluate False against a tuple, the PR #67 short-circuit would stop firing,
+    and the repaint loop it exists to prevent would come back. An AttributeError
+    is the better failure.
+    """
     url = f"{api_root}/repos/{repo}/commits/{sha}/status"
     data = github_api(url, token)
     if not data:
-        return None
+        return None, None
     for s in data.get("statuses", []):
         if s.get("context") == STATUS_CONTEXT:
-            return s.get("state")
-    return None
+            return s.get("state"), s.get("description")
+    return None, None
 
 from datetime import datetime
 
@@ -576,10 +602,20 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
     # already-successful PR just repaints the same result and pushes
     # updated_at again, looping forever every sweep cycle. A new commit gets
     # a fresh SHA (no prior status), so this only skips true no-op re-checks.
-    existing_state = get_existing_status_state(api_root, repo_full_name, pr_head_sha, gh_token)
-    if existing_state == "success":
+    #
+    # Exception: a success we painted while the consent record FAILED to write
+    # carries RECORD_PENDING_MARKER in its description. Skipping that would
+    # make the failed write permanently unretryable — the status is green, so
+    # nothing ever comes back, and the contributor's consent is never durably
+    # recorded. Those we deliberately re-process so the write is retried.
+    existing_state, existing_desc = get_existing_status(
+        api_root, repo_full_name, pr_head_sha, gh_token)
+    if existing_state == "success" and not has_pending_record(existing_desc):
         debug_log(f"✅ PR #{pr_number} already has a successful '{STATUS_CONTEXT}' status on {pr_head_sha[:7]}. Skipping re-check.")
         return
+    if existing_state == "success":
+        debug_log(f"🔁 PR #{pr_number} is green but its consent record never landed "
+                  f"({existing_desc!r}). Re-processing to retry the write.")
 
     # 1. Bot Check
     if pr_user in BOT_ALLOWLIST or pr_user.endswith("[bot]"):
@@ -682,10 +718,20 @@ def process_single_pr(pr_number, pr_head_sha, pr_user, repo_full_name, gh_token,
         
     elif has_valid_signature:
         debug_log(f"✅ User {pr_user} is COMPLIANT (Signature comment found).")
-        # RECORD HYBRID METADATA
-        record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token, pr_number, pr_head_sha, comment_id)
+        # RECORD HYBRID METADATA.
+        # The return value is the only signal that the durable consent record
+        # actually landed. Discarding it painted the PR green with no record
+        # and no way to tell — the signature comment is evidence of intent,
+        # but signatures/<doc>.json is the record of record.
+        recorded = record_signature(api_root, org_name, doc_type, pr_user, repo_full_name, gh_token, pr_number, pr_head_sha, comment_id)
+        if recorded:
+            description = f"{doc_type} Signed"
+        else:
+            description = f"{doc_type} Signed ({RECORD_PENDING_MARKER})"
+            debug_log(f"⚠️ Consent record for @{pr_user} did not persist. Painting success "
+                      f"with '{RECORD_PENDING_MARKER}' so the next sweep retries the write.")
 
-        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", f"{doc_type} Signed", "", gh_token)
+        set_commit_status(api_root, repo_full_name, pr_head_sha, "success", description, "", gh_token)
         time.sleep(1)
         force_merge_check_refresh(api_root, repo_full_name, pr_number, gh_token)
 

@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import urllib.request
@@ -9,6 +10,20 @@ from datetime import datetime, timedelta
 # Set this to True during your 1-Year Backfill. 
 # Set to False for your daily Cron jobs.
 MIGRATION_MODE = False 
+
+# Whether a sweep that hit per-PR failures should exit non-zero.
+#
+# Every PR is processed inside a try/except that logs and moves on, so a sweep
+# where every single PR failed exited 0 and looked identical to a clean one in
+# the Actions UI. This runs on a 5-minute cron with nobody reading the logs, so
+# "silent" meant "invisible indefinitely" — including a consent record that
+# never persisted.
+#
+# Behind a switch because the cron is load-bearing: if a transient failure ever
+# starts reddening every run, set SWEEPER_STRICT_EXIT=false to quiet it without
+# reverting code or disabling the schedule. Failures are still logged either way.
+def strict_exit_enabled():
+    return os.environ.get("SWEEPER_STRICT_EXIT", "true").strip().lower() not in ("false", "0", "no", "off")
 
 def debug_log(message):
     print(f"::warning::{message}")
@@ -115,9 +130,13 @@ def main():
     install_url = f"{api_root}/installation/repositories"
     repos = github_api_paginated(install_url, gh_token)
 
-    if not repos: return
+    if not repos:
+        debug_log("❌ No repositories returned for this installation.")
+        return 1 if strict_exit_enabled() else 0
 
     debug_log(f"✅ Scanning {len(repos)} repositories...")
+
+    failures = []
 
     # Fetch the shared CLA/DCO config (allowlist + both license catalogs)
     # once for this whole sweep instead of once per PR — see
@@ -166,8 +185,23 @@ def main():
                     post_migration_notice(api_root, full_name, pr_number, pr_user, gh_token)
                 
             except Exception as e:
+                failures.append(f"{full_name}#{pr.get('number')}: {e}")
                 debug_log(f"Failed to process PR {pr.get('number')}: {e}")
 
+    if failures:
+        debug_log(f"❌ Sweep finished with {len(failures)} failed PR(s):")
+        for f in failures[:20]:
+            debug_log(f"    {f}")
+        if len(failures) > 20:
+            debug_log(f"    ...and {len(failures) - 20} more")
+        if strict_exit_enabled():
+            return 1
+        debug_log("SWEEPER_STRICT_EXIT is off; reporting success despite the failures above.")
+    else:
+        debug_log("✅ Sweep finished with no failures.")
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
     
