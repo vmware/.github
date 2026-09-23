@@ -13,10 +13,20 @@
 #
 # Two further top-level keys are honoured but undocumented elsewhere, so they
 # are recorded here rather than left to be rediscovered: a top-level `repos:`
-# block (used only when license_overrides.repos is absent or empty), and a
-# top-level `repositories:` list whose entries are appended straight to the
-# DCO-only set. Prefer license_overrides.repos; the other two exist for
-# backwards compatibility.
+# block, and a top-level `repositories:` list whose entries are appended
+# straight to the DCO-only set. Prefer license_overrides.repos; the other two
+# exist for backwards compatibility.
+#
+# The top-level `repos:` block is a FALLBACK, not a supplement: it is read only
+# when license_overrides.repos is absent or empty. Because that block is
+# currently populated, anything added to a top-level `repos:` here would be
+# silently ignored. fetch_shared_config logs a warning when both are present.
+#
+# Only these keys do anything. Anything else — including plausible-sounding
+# knobs like `spdx_aliases` or a per-repo `force_spdx` — is read by no code,
+# so adding one is a silent no-op. tests/test_policy_selector.py asserts this
+# for live keys AND for commented-out examples, so a well-meaning suggestion
+# in a comment cannot quietly become folklore.
 #
 # Who skips the gate entirely is decided in policy_selector.process_single_pr(),
 # not here. Three paths return early, in order: an existing successful
@@ -53,11 +63,5 @@ license_overrides:
   repos:
     vmware/.github:
       require_cla: false           # false = downgrade this repo to DCO-only
-      # force_spdx: "MIT"         # pretend this is the detected license (rarely needed)
 #    vmware/docs-site:
 #      require_cla: false        # false = downgrade that repo to DCO-only
-
-  # (Optional) Normalize odd/legacy license IDs to canonical SPDX before evaluation.
-  # The left side is what the detector finds; the right side is the canonical ID.
-#  spdx_aliases:
-#    "LicenseRef-BSA": "LicenseRef-Broadcom_Source_Available"

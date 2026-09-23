@@ -16,7 +16,7 @@ on:
       - 'tests/**'
       - 'cla/**'
       - 'data/**'
-      - '.github/workflows/tests.yml'
+      - '.github/workflows/**'
   push:
     branches: [main]
     paths:
@@ -24,7 +24,7 @@ on:
       - 'tests/**'
       - 'cla/**'
       - 'data/**'
-      - '.github/workflows/tests.yml'
+      - '.github/workflows/**'
 
 permissions:
   contents: read

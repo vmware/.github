@@ -486,10 +486,28 @@ def fetch_shared_config(api_root, gh_token):
                     f"allowlist must be a mapping, got {type(parsed).__name__}"
                 )
             allowlist_data = parsed
-            # Handle nesting under 'license_overrides' -> 'repos'
-            repos_config = allowlist_data.get("license_overrides", {}).get("repos", {})
-            if not repos_config:
-                 repos_config = allowlist_data.get("repos", {})
+            # Handle nesting under 'license_overrides' -> 'repos', falling back
+            # to a top-level 'repos' for backwards compatibility.
+            #
+            # `or {}` rather than a .get() default on both lookups: a key that is
+            # PRESENT but null (`license_overrides:` with nothing under it) yields
+            # None, and the default only applies when the key is absent. The old
+            # `.get("license_overrides", {}).get(...)` therefore raised
+            # AttributeError on that file, which the except below swallowed into
+            # "enforce CLA everywhere" — the whole allowlist lost to one empty key.
+            nested_repos = (allowlist_data.get("license_overrides") or {}).get("repos") or {}
+            legacy_repos = allowlist_data.get("repos") or {}
+            repos_config = nested_repos or legacy_repos
+
+            # The fallback is unreachable whenever the nested block has entries,
+            # so a top-level 'repos' added alongside one silently does nothing.
+            # Say so rather than letting someone conclude their entry is live.
+            if nested_repos and legacy_repos:
+                debug_log(
+                    "⚠️ Top-level 'repos:' is ignored because license_overrides.repos "
+                    "is non-empty. Move those entries under license_overrides.repos; "
+                    f"currently ignored: {sorted(legacy_repos)}"
+                )
 
             if isinstance(repos_config, dict):
                 for r_name, r_config in repos_config.items():

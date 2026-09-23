@@ -93,10 +93,19 @@ jobs:
           PR_COMMENTS_URL: ${{ github.event.pull_request.comments_url }}
           CENTRAL_ORG: ${{ vars.CENTRAL_ORG }}
           
-          # Paths for Python to find your scripts & data
+          # Paths for Python to find your scripts.
+          #
+          # Only `scripts` is sparse-checked-out above, so nothing here may
+          # point into another directory. There was a LICENSES_JSON pointing at
+          # .github-tools/data/licenses_all.json, which never existed on the
+          # runner. It was inert only by luck: policy_selector fetches both
+          # catalogues over the API and passes them to requires_cla in memory,
+          # and license_detector reads LICENSES_JSON from disk only when it is
+          # handed no catalog_data. Any future call that omits catalog_data
+          # would have hit a missing file in production, where this workflow is
+          # pinned to refs/heads/main and cannot be tested pre-merge.
           TOOLS_PATH: ${{ github.workspace }}/.github-tools
           PYTHONPATH: ${{ github.workspace }}/.github-tools/scripts
-          LICENSES_JSON: ${{ github.workspace }}/.github-tools/data/licenses_all.json
           
           # Documentation Links (Used in the failure comment)
           CLA_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/Broadcom_CLA"
