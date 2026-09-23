@@ -28,6 +28,7 @@ Test seams (see the import block below for why the env setup comes first):
 """
 import json
 import os
+import re
 import sys
 import contextlib
 import io
@@ -806,6 +807,11 @@ class TestAllowlistFile(unittest.TestCase):
     # fetch_shared_config reads require_cla inside each repo entry.
     NESTED_KEYS_READ_BY_LIVE_CODE = {"require_cla", "allow_dco"}
 
+    # Declared once and used by both the check and its guard below.
+    # Duplicating it meant the guard validated a copy, so editing the
+    # real pattern would not have tripped it.
+    COMMENTED_KEY_RE = re.compile(r"\s*#\s*([a-z][a-z0-9_]*):")
+
     def test_commented_out_keys_are_also_read_by_live_code(self):
         """The check above sees live keys only, so a dead knob parked in a
         comment is invisible to it.
@@ -819,11 +825,10 @@ class TestAllowlistFile(unittest.TestCase):
         Matches only `<lowercase_identifier>:` after a `#`, so prose, bullet
         lines, quoted map keys and `owner/repo:` names are all left alone.
         """
-        import re
         allowed = self.READ_BY_LIVE_CODE | self.NESTED_KEYS_READ_BY_LIVE_CODE
         found = set()
         for line in self.path.read_text(encoding="utf-8").splitlines():
-            m = re.match(r"\s*#\s*([a-z][a-z0-9_]*):", line)
+            m = self.COMMENTED_KEY_RE.match(line)
             if m:
                 found.add(m.group(1))
         extra = found - allowed
@@ -839,8 +844,7 @@ class TestAllowlistFile(unittest.TestCase):
         that made it match nothing would leave the test passing vacuously on
         an empty set.
         """
-        import re
-        pattern = re.compile(r"\s*#\s*([a-z][a-z0-9_]*):")
+        pattern = self.COMMENTED_KEY_RE
         self.assertEqual(pattern.match("#  allow_dco:").group(1), "allow_dco")
         self.assertEqual(pattern.match("      # force_spdx: \"MIT\"").group(1), "force_spdx")
         self.assertIsNone(pattern.match("#    vmware/docs-site:"),
