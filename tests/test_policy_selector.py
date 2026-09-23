@@ -1344,3 +1344,108 @@ class TestTestsWorkflowPathsFilter(unittest.TestCase):
         self.assertFalse(self._covered("data/licenses_all.json", globs))
         self.assertFalse(self._covered(".github/workflows/required-compliance.yml", globs),
                          "a literal glob must not match a sibling file")
+
+
+# ---------------------------------------------------------------------------
+# A malformed entry must cost that entry, not the whole policy.
+# ---------------------------------------------------------------------------
+class TestMalformedRepoEntriesAreContained(PolicySelectorTestCase):
+    """`fetch_shared_config` wraps the whole parse in one try/except whose
+    failure mode is "Enforcing CLA for every repo". Anything that raises in
+    there — including while building a log line — therefore has an org-wide
+    blast radius from a single bad indent.
+
+    Two separate faults lived here. `r_config.get("require_cla")` on a null or
+    boolean value raised AttributeError. And the shadowing warning added in
+    this change called `sorted()` on a top-level `repos:` of arbitrary YAML
+    shape, so a list of dicts raised TypeError — a regression caught by
+    re-probing malformed shapes against origin/main rather than by review.
+    """
+
+    def _config(self, body):
+        self.install(routes={"/contents/cla/allowlist.yml": self._file(body)})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cfg = policy_selector.fetch_shared_config("https://api.invalid", "tok")
+        return cfg, buf.getvalue()
+
+    @staticmethod
+    def _file(text):
+        import base64
+        return {"content": base64.b64encode(text.encode()).decode()}
+
+    NESTED = ("license_overrides:\n  repos:\n    vmware/nested:\n"
+              "      require_cla: false\n")
+
+    # A top-level `repos:` of each shape YAML can produce. Only dicts are
+    # meaningful; the rest must be inert, never fatal.
+    LEGACY_SHAPES = {
+        "list of dicts": "repos:\n  - vmware/a: true\n  - vmware/b: true\n",
+        "list of strings": "repos:\n  - vmware/a\n  - vmware/b\n",
+        "scalar string": "repos: vmware/a\n",
+        "integer": "repos: 5\n",
+        "null": "repos:\n",
+    }
+
+    def test_odd_top_level_repos_shape_never_discards_the_allowlist(self):
+        for label, legacy in self.LEGACY_SHAPES.items():
+            with self.subTest(label):
+                cfg, _ = self._config(self.NESTED + legacy)
+                self.assertIs(
+                    cfg["allowlist_ok"], True,
+                    f"a top-level repos: of type {label} must not cost the whole "
+                    "policy — the except in fetch_shared_config enforces CLA "
+                    "org-wide",
+                )
+                self.assertEqual(cfg["allowlist_repos"], ["vmware/nested"])
+
+    NESTED_BAD_VALUES = {"null": "", "boolean": " true", "string": " hello", "integer": " 7"}
+
+    def test_malformed_nested_entry_is_skipped_not_fatal(self):
+        for label, value in self.NESTED_BAD_VALUES.items():
+            with self.subTest(label):
+                cfg, _ = self._config(
+                    f"license_overrides:\n  repos:\n    vmware/x:{value}\n")
+                self.assertIs(cfg["allowlist_ok"], True,
+                              f"a repo entry of type {label} must not discard the file")
+                self.assertEqual(cfg["allowlist_repos"], [])
+
+    def test_a_good_entry_survives_alongside_a_malformed_one(self):
+        """The property that matters: blast radius is the bad entry, not the file."""
+        cfg, _ = self._config(
+            "license_overrides:\n"
+            "  repos:\n"
+            "    vmware/good:\n"
+            "      require_cla: false\n"
+            "    vmware/bad:\n"
+        )
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertEqual(
+            cfg["allowlist_repos"], ["vmware/good"],
+            "one unparseable entry must not take the readable ones with it",
+        )
+
+    def test_malformed_entry_stays_on_cla_rather_than_being_let_through(self):
+        """Skipping must not be mistaken for permitting. allowlist_repos is the
+        DCO-only set, so absence from it means CLA — the strict direction."""
+        cfg, _ = self._config("license_overrides:\n  repos:\n    vmware/bad:\n")
+        self.assertNotIn("vmware/bad", cfg["allowlist_repos"])
+
+    def test_skipped_entry_is_reported(self):
+        _, out = self._config("license_overrides:\n  repos:\n    vmware/bad:\n")
+        self.assertIn("vmware/bad", out)
+        self.assertIn("expected a mapping", out)
+
+    def test_warning_renders_a_non_dict_legacy_block_without_raising(self):
+        """Direct pin on the regression: the diagnostic itself must be safe.
+
+        TWO dicts, deliberately. `sorted()` on a single-element list never
+        performs a comparison, so a one-entry version of this test passes even
+        with the broken `sorted(legacy_repos)` in place — it cannot fail for
+        the scenario its own name describes. Found by mutation testing, which
+        is the only reason this reads as it does.
+        """
+        cfg, out = self._config(
+            self.NESTED + "repos:\n  - vmware/a: true\n  - vmware/b: true\n")
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertIn("Top-level 'repos:' is ignored", out)

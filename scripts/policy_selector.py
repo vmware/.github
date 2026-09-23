@@ -503,14 +503,33 @@ def fetch_shared_config(api_root, gh_token):
             # so a top-level 'repos' added alongside one silently does nothing.
             # Say so rather than letting someone conclude their entry is live.
             if nested_repos and legacy_repos:
+                # `legacy_repos` is whatever YAML produced and may be a list,
+                # an int, or a string. sorted() raises TypeError on a list of
+                # dicts, and the except below would turn that into "enforce CLA
+                # everywhere" — building a diagnostic must never be the thing
+                # that discards the policy.
+                ignored = sorted(legacy_repos) if isinstance(legacy_repos, dict) else repr(legacy_repos)
                 debug_log(
                     "⚠️ Top-level 'repos:' is ignored because license_overrides.repos "
                     "is non-empty. Move those entries under license_overrides.repos; "
-                    f"currently ignored: {sorted(legacy_repos)}"
+                    f"currently ignored: {ignored}"
                 )
 
             if isinstance(repos_config, dict):
                 for r_name, r_config in repos_config.items():
+                    # One malformed entry must cost that entry, not the file.
+                    # `r_config.get(...)` on a null or boolean value raised
+                    # AttributeError, which the except below swallowed into
+                    # enforcing CLA across every gated repo — org-wide blast
+                    # radius from a single missing indent. Skipping instead
+                    # leaves this repo on CLA (absence from the DCO-only list
+                    # is the strict direction) and keeps the rest intact.
+                    if not isinstance(r_config, dict):
+                        debug_log(
+                            f"⚠️ Ignoring repos[{r_name!r}]: expected a mapping, got "
+                            f"{type(r_config).__name__}. That repo stays on CLA."
+                        )
+                        continue
                     if r_config.get("require_cla") is False:
                         allowlist_repos.append(r_name)
 
