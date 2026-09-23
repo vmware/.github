@@ -28,6 +28,7 @@ Test seams (see the import block below for why the env setup comes first):
 """
 import json
 import os
+import re
 import sys
 import contextlib
 import io
@@ -801,6 +802,65 @@ class TestAllowlistFile(unittest.TestCase):
             "allowlisted after the workflow honouring it was retired.",
         )
 
+    # Nested keys live code reads, in addition to the top-level ones above:
+    # requires_cla._override_requires_cla reads require_cla and allow_dco,
+    # fetch_shared_config reads require_cla inside each repo entry.
+    NESTED_KEYS_READ_BY_LIVE_CODE = {"require_cla", "allow_dco"}
+
+    # Declared once and used by both the check and its guard below.
+    # Duplicating it meant the guard validated a copy, so editing the
+    # real pattern would not have tripped it.
+    COMMENTED_KEY_RE = re.compile(r"\s*#\s*([a-z][a-z0-9_]*):")
+
+    def test_commented_out_keys_are_also_read_by_live_code(self):
+        """The check above sees live keys only, so a dead knob parked in a
+        comment is invisible to it.
+
+        Two were: a per-repo `force_spdx` and a top-level `spdx_aliases`, both
+        written as ready-to-uncomment examples, neither read by any code. A
+        commented example is a promise — someone uncomments it, sees no error,
+        and concludes it took effect. That is worse than no documentation,
+        because the file itself is the most authoritative-looking source here.
+
+        Matches only `<lowercase_identifier>:` after a `#`, so prose, bullet
+        lines, quoted map keys and `owner/repo:` names are all left alone.
+        """
+        allowed = self.READ_BY_LIVE_CODE | self.NESTED_KEYS_READ_BY_LIVE_CODE
+        found = set()
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            m = self.COMMENTED_KEY_RE.match(line)
+            if m:
+                found.add(m.group(1))
+        extra = found - allowed
+        self.assertEqual(
+            extra, set(),
+            f"{sorted(extra)} appears as a commented-out key but is read by no "
+            "code, so uncommenting it is a silent no-op. Either implement it or "
+            "describe it in prose that cannot be mistaken for working config.",
+        )
+
+    def test_commented_key_guard_can_actually_see_a_commented_key(self):
+        """Guards the guard. The regex above is narrow by design, so a change
+        that made it match nothing would leave the test passing vacuously on
+        an empty set.
+        """
+        pattern = self.COMMENTED_KEY_RE
+        self.assertEqual(pattern.match("#  allow_dco:").group(1), "allow_dco")
+        self.assertEqual(pattern.match("      # force_spdx: \"MIT\"").group(1), "force_spdx")
+        self.assertIsNone(pattern.match("#    vmware/docs-site:"),
+                          "owner/repo keys must not be treated as config knobs")
+        self.assertIsNone(pattern.match("# The left side is what the detector finds"),
+                          "prose must not be treated as config")
+        self.assertIsNone(pattern.match('#    "LicenseRef-BSA": "x"'),
+                          "quoted map values must not be treated as config knobs")
+        # And it must still find the real ones in the shipped file.
+        live = {m.group(1) for m in
+                (pattern.match(l) for l in self.path.read_text(encoding="utf-8").splitlines())
+                if m}
+        self.assertIn("allow_dco", live,
+                      "the shipped file documents a commented allow_dco; if that "
+                      "went away, this guard is no longer exercised by real input")
+
     def test_license_overrides_shaped_as_requires_cla_expects(self):
         overrides = self.mapping().get("license_overrides")
         self.assertIsInstance(overrides, dict)
@@ -1055,3 +1115,341 @@ class TestOverrideWildcards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# The gate workflow may only reference paths it actually checks out.
+# ---------------------------------------------------------------------------
+class TestGateWorkflowPaths(unittest.TestCase):
+    """`required-compliance.yml` sparse-checks-out part of this repo, then
+    hands filesystem paths to the job through `env:`. A path pointing outside
+    that subset names a file that does not exist on the runner.
+
+    This shipped: `LICENSES_JSON` pointed at
+    `.github-tools/data/licenses_all.json` while the checkout pulled only
+    `scripts`. It was inert purely by luck — `license_detector` consults that
+    variable only when handed no `catalog_data`, and production always passes
+    both catalogues in memory from the API fetch. Ruleset 12239008 pins this
+    workflow to `refs/heads/main`, so a future caller that omitted
+    `catalog_data` would have found the missing file in production, with no
+    pre-merge signal anywhere.
+    """
+
+    WORKFLOW = (Path(__file__).resolve().parents[1]
+                / ".github" / "workflows" / "required-compliance.yml")
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.text = cls.WORKFLOW.read_text(encoding="utf-8")
+        cls.doc = yaml.safe_load(cls.text)
+
+    def checkout_step(self):
+        for job in (self.doc.get("jobs") or {}).values():
+            for step in job.get("steps", []):
+                if str(step.get("uses", "")).startswith("actions/checkout"):
+                    return step
+        self.fail(f"no actions/checkout step found in {self.WORKFLOW}")
+
+    def sparse_dirs(self):
+        raw = (self.checkout_step().get("with") or {}).get("sparse-checkout")
+        self.assertIsNotNone(
+            raw, "the checkout step declares no sparse-checkout; if that is "
+                 "deliberate, this test's premise no longer holds")
+        return {ln.strip().strip("/") for ln in str(raw).splitlines() if ln.strip()}
+
+    def test_sparse_checkout_is_declared_and_non_empty(self):
+        self.assertTrue(self.sparse_dirs())
+
+    def test_every_tools_path_in_env_is_actually_checked_out(self):
+        """Generic on purpose. Pinning the absence of `LICENSES_JSON` by name
+        would fail a legitimate future change that reinstated it *and* added
+        `data` to the sparse-checkout; this passes exactly when the paths and
+        the checkout agree, which is the property that matters."""
+        import re
+        allowed = self.sparse_dirs()
+        referenced = {}
+        for m in re.finditer(
+            r"([A-Z][A-Z0-9_]*):\s*\$\{\{\s*github\.workspace\s*\}\}/\.github-tools/(\S+)",
+            self.text,
+        ):
+            referenced[m.group(1)] = m.group(2).split("/")[0]
+        self.assertTrue(
+            referenced,
+            "expected at least one .github-tools/<dir> path in env; if the "
+            "workflow stopped using them this test should be retired, not left "
+            "passing vacuously",
+        )
+        bad = {var: top for var, top in referenced.items() if top not in allowed}
+        self.assertEqual(
+            bad, {},
+            f"{bad} point outside the sparse-checkout {sorted(allowed)}, so the "
+            "path will not exist on the runner. Either drop the variable or add "
+            "the directory to sparse-checkout in the same change.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Top-level `repos:` is a fallback, not a supplement.
+# ---------------------------------------------------------------------------
+class TestTopLevelReposFallback(PolicySelectorTestCase):
+    """`fetch_shared_config` reads `license_overrides.repos`, and only falls
+    back to a top-level `repos:` when that is absent or empty.
+
+    Worth pinning because the fallback is invisible in the shipped file:
+    `license_overrides.repos` is populated, so a top-level `repos:` added
+    beside it does nothing at all. Whoever added it would see a valid-looking
+    entry and no effect.
+    """
+
+    def _config(self, body):
+        self.install(routes={"/contents/cla/allowlist.yml": self._file(body)})
+        return policy_selector.fetch_shared_config("https://api.invalid", "tok")
+
+    @staticmethod
+    def _file(text):
+        import base64
+        return {"content": base64.b64encode(text.encode()).decode()}
+
+    NESTED = ("license_overrides:\n"
+              "  repos:\n"
+              "    vmware/nested:\n"
+              "      require_cla: false\n")
+    LEGACY = ("repos:\n"
+              "  vmware/legacy:\n"
+              "    require_cla: false\n")
+
+    def test_top_level_repos_is_used_when_nested_is_absent(self):
+        cfg = self._config(self.LEGACY)
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertEqual(cfg["allowlist_repos"], ["vmware/legacy"])
+
+    def test_top_level_repos_is_used_when_nested_is_empty(self):
+        cfg = self._config("license_overrides:\n  repos: {}\n" + self.LEGACY)
+        self.assertEqual(cfg["allowlist_repos"], ["vmware/legacy"])
+
+    def test_nested_repos_shadows_top_level_entirely(self):
+        """Not a merge. The legacy entry is dropped, not appended."""
+        cfg = self._config(self.NESTED + self.LEGACY)
+        self.assertEqual(
+            cfg["allowlist_repos"], ["vmware/nested"],
+            "top-level repos must be ignored, not merged, when the nested "
+            "block has entries",
+        )
+
+    def test_shadowing_is_reported_rather_than_silent(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._config(self.NESTED + self.LEGACY)
+        out = buf.getvalue()
+        self.assertIn("Top-level 'repos:' is ignored", out)
+        self.assertIn("vmware/legacy", out,
+                      "the warning must name what is being ignored, or it "
+                      "cannot be acted on")
+
+    def test_no_warning_when_only_one_source_is_present(self):
+        for label, body in (("nested only", self.NESTED), ("legacy only", self.LEGACY)):
+            with self.subTest(label):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self._config(body)
+                self.assertNotIn("Top-level 'repos:' is ignored", buf.getvalue())
+
+    def test_null_license_overrides_does_not_discard_the_whole_allowlist(self):
+        """`license_overrides:` present but empty parses to None. A `.get()`
+        default does not apply to a key that exists with a null value, so
+        `.get("license_overrides", {}).get("repos")` raised AttributeError,
+        which the caller swallowed into "enforce CLA for every repo". One
+        empty key cost the entire policy.
+        """
+        cfg = self._config("license_overrides:\n" + self.LEGACY)
+        self.assertIs(cfg["allowlist_ok"], True,
+                      "a null license_overrides must not read as an unparseable file")
+        self.assertEqual(cfg["allowlist_repos"], ["vmware/legacy"])
+
+
+# ---------------------------------------------------------------------------
+# The CI paths filter must cover everything this suite depends on.
+# ---------------------------------------------------------------------------
+class TestTestsWorkflowPathsFilter(unittest.TestCase):
+    """`tests.yml` only runs on a paths filter, so a file this suite reads but
+    the filter omits can be changed with CI green and nothing checking it.
+
+    That has now happened three times: `cla/**` was missing when the tests
+    that parse the allowlist were added (#74), `data/**` was missing while
+    TestOverrideMatchesTheRealCatalogue parsed the real catalogue (#76), and
+    `required-compliance.yml` was missing when TestGateWorkflowPaths was added
+    to guard it. Each time the guard existed and simply never ran.
+
+    Derives its expectations from the same constants the tests use, rather
+    than a hand-kept list that would drift out of date in the same way.
+    """
+
+    WORKFLOW = (Path(__file__).resolve().parents[1]
+                / ".github" / "workflows" / "tests.yml")
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        cls.doc = yaml.safe_load(cls.WORKFLOW.read_text(encoding="utf-8"))
+        # PyYAML parses a bare `on:` key as the boolean True.
+        cls.triggers = cls.doc.get("on", cls.doc.get(True))
+
+    @staticmethod
+    def _covered(path, globs):
+        """GitHub path-filter semantics, narrowed to the forms we use:
+        `dir/**` covers anything beneath dir, and a literal path matches
+        itself."""
+        for g in globs:
+            if g.endswith("/**"):
+                if path.startswith(g[:-2]):
+                    return True
+            elif g == path:
+                return True
+        return False
+
+    def repo_relative(self, p):
+        return str(Path(p).resolve().relative_to(Path(__file__).resolve().parents[1]))
+
+    def required_paths(self):
+        """Files the suite genuinely reads, taken from production constants."""
+        root = Path(__file__).resolve().parents[1]
+        return {
+            self.repo_relative(requires_cla._ALLOWLIST_PATH),
+            self.repo_relative(root / "data" / "licenses_all.json"),
+            self.repo_relative(TestGateWorkflowPaths.WORKFLOW),
+            self.repo_relative(Path(policy_selector.__file__)),
+            self.repo_relative(Path(__file__)),
+        }
+
+    def test_both_triggers_declare_the_same_filter(self):
+        pr = self.triggers["pull_request"]["paths"]
+        push = self.triggers["push"]["paths"]
+        self.assertEqual(
+            pr, push,
+            "pull_request and push must agree, or a change can pass pre-merge "
+            "and go unverified on main, or vice versa",
+        )
+
+    def test_filter_covers_every_file_the_suite_reads(self):
+        globs = self.triggers["pull_request"]["paths"]
+        missing = sorted(p for p in self.required_paths() if not self._covered(p, globs))
+        self.assertEqual(
+            missing, [],
+            f"{missing} are read by this suite but not matched by the tests.yml "
+            f"paths filter {globs}, so changing them runs no tests.",
+        )
+
+    def test_coverage_check_rejects_a_path_outside_the_filter(self):
+        """Guards the guard: _covered must be capable of returning False."""
+        globs = ["scripts/**", ".github/workflows/tests.yml"]
+        self.assertTrue(self._covered("scripts/policy_selector.py", globs))
+        self.assertTrue(self._covered(".github/workflows/tests.yml", globs))
+        self.assertFalse(self._covered("data/licenses_all.json", globs))
+        self.assertFalse(self._covered(".github/workflows/required-compliance.yml", globs),
+                         "a literal glob must not match a sibling file")
+
+
+# ---------------------------------------------------------------------------
+# A malformed entry must cost that entry, not the whole policy.
+# ---------------------------------------------------------------------------
+class TestMalformedRepoEntriesAreContained(PolicySelectorTestCase):
+    """`fetch_shared_config` wraps the whole parse in one try/except whose
+    failure mode is "Enforcing CLA for every repo". Anything that raises in
+    there — including while building a log line — therefore has an org-wide
+    blast radius from a single bad indent.
+
+    Two separate faults lived here. `r_config.get("require_cla")` on a null or
+    boolean value raised AttributeError. And the shadowing warning added in
+    this change called `sorted()` on a top-level `repos:` of arbitrary YAML
+    shape, so a list of dicts raised TypeError — a regression caught by
+    re-probing malformed shapes against origin/main rather than by review.
+    """
+
+    def _config(self, body):
+        self.install(routes={"/contents/cla/allowlist.yml": self._file(body)})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cfg = policy_selector.fetch_shared_config("https://api.invalid", "tok")
+        return cfg, buf.getvalue()
+
+    @staticmethod
+    def _file(text):
+        import base64
+        return {"content": base64.b64encode(text.encode()).decode()}
+
+    NESTED = ("license_overrides:\n  repos:\n    vmware/nested:\n"
+              "      require_cla: false\n")
+
+    # A top-level `repos:` of each shape YAML can produce. Only dicts are
+    # meaningful; the rest must be inert, never fatal.
+    LEGACY_SHAPES = {
+        "list of dicts": "repos:\n  - vmware/a: true\n  - vmware/b: true\n",
+        "list of strings": "repos:\n  - vmware/a\n  - vmware/b\n",
+        "scalar string": "repos: vmware/a\n",
+        "integer": "repos: 5\n",
+        "null": "repos:\n",
+    }
+
+    def test_odd_top_level_repos_shape_never_discards_the_allowlist(self):
+        for label, legacy in self.LEGACY_SHAPES.items():
+            with self.subTest(label):
+                cfg, _ = self._config(self.NESTED + legacy)
+                self.assertIs(
+                    cfg["allowlist_ok"], True,
+                    f"a top-level repos: of type {label} must not cost the whole "
+                    "policy — the except in fetch_shared_config enforces CLA "
+                    "org-wide",
+                )
+                self.assertEqual(cfg["allowlist_repos"], ["vmware/nested"])
+
+    NESTED_BAD_VALUES = {"null": "", "boolean": " true", "string": " hello", "integer": " 7"}
+
+    def test_malformed_nested_entry_is_skipped_not_fatal(self):
+        for label, value in self.NESTED_BAD_VALUES.items():
+            with self.subTest(label):
+                cfg, _ = self._config(
+                    f"license_overrides:\n  repos:\n    vmware/x:{value}\n")
+                self.assertIs(cfg["allowlist_ok"], True,
+                              f"a repo entry of type {label} must not discard the file")
+                self.assertEqual(cfg["allowlist_repos"], [])
+
+    def test_a_good_entry_survives_alongside_a_malformed_one(self):
+        """The property that matters: blast radius is the bad entry, not the file."""
+        cfg, _ = self._config(
+            "license_overrides:\n"
+            "  repos:\n"
+            "    vmware/good:\n"
+            "      require_cla: false\n"
+            "    vmware/bad:\n"
+        )
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertEqual(
+            cfg["allowlist_repos"], ["vmware/good"],
+            "one unparseable entry must not take the readable ones with it",
+        )
+
+    def test_malformed_entry_stays_on_cla_rather_than_being_let_through(self):
+        """Skipping must not be mistaken for permitting. allowlist_repos is the
+        DCO-only set, so absence from it means CLA — the strict direction."""
+        cfg, _ = self._config("license_overrides:\n  repos:\n    vmware/bad:\n")
+        self.assertNotIn("vmware/bad", cfg["allowlist_repos"])
+
+    def test_skipped_entry_is_reported(self):
+        _, out = self._config("license_overrides:\n  repos:\n    vmware/bad:\n")
+        self.assertIn("vmware/bad", out)
+        self.assertIn("expected a mapping", out)
+
+    def test_warning_renders_a_non_dict_legacy_block_without_raising(self):
+        """Direct pin on the regression: the diagnostic itself must be safe.
+
+        TWO dicts, deliberately. `sorted()` on a single-element list never
+        performs a comparison, so a one-entry version of this test passes even
+        with the broken `sorted(legacy_repos)` in place — it cannot fail for
+        the scenario its own name describes. Found by mutation testing, which
+        is the only reason this reads as it does.
+        """
+        cfg, out = self._config(
+            self.NESTED + "repos:\n  - vmware/a: true\n  - vmware/b: true\n")
+        self.assertIs(cfg["allowlist_ok"], True)
+        self.assertIn("Top-level 'repos:' is ignored", out)
