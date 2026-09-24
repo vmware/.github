@@ -1744,6 +1744,29 @@ class TestSweeperExitCode(unittest.TestCase):
         os.environ.pop("SWEEPER_STRICT_EXIT", None)
         self.assertTrue(cla_sweeper.strict_exit_enabled())
 
+    def test_long_failure_lists_are_truncated_with_a_count(self):
+        """The log caps at 20 named failures. A sweep that broke everywhere
+        would otherwise emit hundreds of ::warning:: lines and bury its own
+        summary; the remainder has to still be counted, or the log understates
+        how bad the run was."""
+        self.install(prs_per_repo=15, fail_on=tuple(range(1, 16)))   # 30 failures
+        rc, out = self.run_sweep()
+        self.assertEqual(rc, 1)
+        self.assertIn("30 failed PR(s)", out)
+        self.assertIn("...and 10 more", out)
+        # Count inside the SUMMARY block only. Each failure is also logged
+        # inline as it happens, which is deliberate — the full detail belongs
+        # in the log, the cap applies to the digest at the end.
+        summary = out.split("failed PR(s):", 1)[1]
+        self.assertEqual(summary.count("boom on"), 20,
+                         "the end-of-run summary should name exactly 20")
+
+    def test_short_failure_lists_are_not_truncated(self):
+        self.install(prs_per_repo=1, fail_on=(1,))
+        _, out = self.run_sweep()
+        self.assertNotIn("more", out.split("failed PR(s)")[-1].split("\n")[0])
+        self.assertNotIn("...and", out)
+
     # --- the early-return path ---
 
     def test_no_repositories_is_a_failure_not_a_quiet_success(self):
