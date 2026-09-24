@@ -68,6 +68,13 @@ try:
 except Exception:  # pragma: no cover - exercised only on a degraded runner
     requires_cla = None
 
+# cla_sweeper imports policy_selector, so it must come after the env setup
+# above. Guarded for the same reason requires_cla is.
+try:
+    import cla_sweeper  # noqa: E402
+except Exception:  # pragma: no cover
+    cla_sweeper = None
+
 
 SIGNED_SUFFIX = "for this and all future contributions"
 
@@ -339,20 +346,20 @@ class TestPostPrComment(PolicySelectorTestCase):
 class TestGetExistingStatusState(PolicySelectorTestCase):
     def call(self, payload):
         fake = self.install(routes={"/commits/abc123/status": payload})
-        return policy_selector.get_existing_status_state(
+        return policy_selector.get_existing_status(
             "https://api.invalid", "vmware/repo", "abc123", "tok"
         ), fake
 
     def test_returns_our_context_state(self):
-        state, _ = self.call({"statuses": [{"context": policy_selector.STATUS_CONTEXT, "state": "success"}]})
+        (state, _desc), _ = self.call({"statuses": [{"context": policy_selector.STATUS_CONTEXT, "state": "success"}]})
         self.assertEqual(state, "success")
 
     def test_ignores_other_contexts(self):
-        state, _ = self.call({"statuses": [{"context": "Some Other CI", "state": "failure"}]})
+        (state, _desc), _ = self.call({"statuses": [{"context": "Some Other CI", "state": "failure"}]})
         self.assertIsNone(state)
 
     def test_picks_our_context_out_of_a_crowd(self):
-        state, _ = self.call({"statuses": [
+        (state, _desc), _ = self.call({"statuses": [
             {"context": "lint", "state": "success"},
             {"context": policy_selector.STATUS_CONTEXT, "state": "failure"},
             {"context": "build", "state": "success"},
@@ -360,11 +367,11 @@ class TestGetExistingStatusState(PolicySelectorTestCase):
         self.assertEqual(state, "failure")
 
     def test_no_statuses_returns_none(self):
-        state, _ = self.call({"statuses": []})
+        (state, _desc), _ = self.call({"statuses": []})
         self.assertIsNone(state)
 
     def test_api_failure_returns_none(self):
-        state, _ = self.call(None)
+        (state, _desc), _ = self.call(None)
         self.assertIsNone(state)
 
 
@@ -398,7 +405,12 @@ class TestCheckDcoCommits(PolicySelectorTestCase):
 # ---------------------------------------------------------------------------
 # process_single_pr  — the decision table
 # ---------------------------------------------------------------------------
-class TestProcessSinglePr(PolicySelectorTestCase):
+class ProcessSinglePrHarness(PolicySelectorTestCase):
+    """Fixtures for driving process_single_pr. Carries no tests of its own:
+    subclassing a populated TestCase re-runs every parent test under the
+    child's name, which inflated the suite by 34 duplicates and 9 seconds
+    the first time this was written."""
+
     SHARED_CONFIG = {
         "allowlist_data": {},
         "allowlist_repos": [],
@@ -415,11 +427,18 @@ class TestProcessSinglePr(PolicySelectorTestCase):
         # `is_org_member` does not route through `github_api` — it builds its own
         # urllib request — so it needs its own stub.
         policy_selector.is_org_member = lambda *a, **k: False
+        # The compliant path sleeps a real second before force_merge_check_refresh,
+        # and record_signature's retry loop sleeps 1-3s per attempt. Neither
+        # affects any assertion here, and paying them per test made the suite
+        # take 9 seconds instead of 2.
+        self._saved_sleep = policy_selector.time.sleep
+        policy_selector.time.sleep = lambda *_a, **_k: None
         self.addCleanup(self._restore_helpers)
 
     def _restore_helpers(self):
         policy_selector.requires_cla.requires_CLA = self._saved_requires
         policy_selector.is_org_member = self._saved_is_member
+        policy_selector.time.sleep = self._saved_sleep
 
     def run_pr(self, routes=None, paginated_routes=None, user="contributor", config=None):
         fake = self.install(routes or {}, paginated_routes or {})
@@ -429,8 +448,9 @@ class TestProcessSinglePr(PolicySelectorTestCase):
         )
         return fake
 
-    def _status(self, state):
-        return {"statuses": [{"context": policy_selector.STATUS_CONTEXT, "state": state}]}
+    def _status(self, state, description=None):
+        return {"statuses": [{"context": policy_selector.STATUS_CONTEXT,
+                              "state": state, "description": description}]}
 
     def _registry(self, names):
         import base64
@@ -449,6 +469,8 @@ class TestProcessSinglePr(PolicySelectorTestCase):
             "/contents/signatures/dco.json": self._registry([]),
         }
 
+
+class TestProcessSinglePr(ProcessSinglePrHarness):
     def test_already_successful_status_short_circuits_with_no_writes(self):
         # This is the PR #67 fix. Repainting an already-green PR bumps its
         # updated_at, which puts it back in the sweeper's lookback window.
@@ -551,7 +573,11 @@ class TestProcessSinglePr(PolicySelectorTestCase):
         self.assertEqual(fake.statuses()[0]["description"], "DCO Missing")
 
     def test_correct_sentence_passes_and_is_recorded(self):
-        fake = self.run_pr(paginated_routes={
+        # Writable registry routes matter: without them record_signature fails,
+        # and before the record-pending marker existed this test asserted the
+        # clean description and passed anyway — the failed write was invisible
+        # even here. That is the defect this suite now covers.
+        fake = self.run_pr(routes=self._writable_registry_routes(), paginated_routes={
             "/issues/5/comments": [comment(signature_body("CLA"), comment_id=61)],
         })
         self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
@@ -1453,3 +1479,307 @@ class TestMalformedRepoEntriesAreContained(PolicySelectorTestCase):
             self.NESTED + "repos:\n  - vmware/a: true\n  - vmware/b: true\n")
         self.assertIs(cfg["allowlist_ok"], True)
         self.assertIn("Top-level 'repos:' is ignored", out)
+
+
+# ---------------------------------------------------------------------------
+# A consent record that did not persist must be visible AND retryable.
+# ---------------------------------------------------------------------------
+class TestRecordPendingMarker(unittest.TestCase):
+    """`has_pending_record` decides whether a green PR gets re-processed, so
+    it is the hinge the whole retry depends on."""
+
+    def test_marker_is_detected(self):
+        self.assertTrue(policy_selector.has_pending_record("CLA Signed (record pending)"))
+
+    def test_detection_is_case_insensitive(self):
+        self.assertTrue(policy_selector.has_pending_record("DCO Signed (RECORD PENDING)"))
+
+    def test_clean_description_is_not_marked(self):
+        self.assertFalse(policy_selector.has_pending_record("CLA Signed"))
+
+    def test_none_is_tolerated(self):
+        """The API returns no description for a status posted without one, and
+        `None in str` would raise rather than return False."""
+        self.assertFalse(policy_selector.has_pending_record(None))
+
+    def test_empty_is_not_marked(self):
+        self.assertFalse(policy_selector.has_pending_record(""))
+
+    def test_the_description_we_paint_is_the_one_we_detect(self):
+        """Ties the writer to the reader. Reword one without the other and the
+        retry silently stops happening, with everything still green."""
+        painted = f"CLA Signed ({policy_selector.RECORD_PENDING_MARKER})"
+        self.assertTrue(policy_selector.has_pending_record(painted))
+
+
+class TestFailedConsentRecordIsMarkedAndRetried(ProcessSinglePrHarness):
+    """Before this, `record_signature`'s return value was discarded and the PR
+    was painted a clean success regardless. Combined with the PR #67
+    short-circuit — which skips any commit already carrying a successful
+    status — a failed write became both invisible and permanent: green PR, no
+    consent record, nothing ever coming back to fix it.
+    """
+
+    SIGNED = {"/issues/5/comments": [comment(signature_body("CLA"), comment_id=61)]}
+
+    def _broken_registry_routes(self):
+        """Readable signature file, but the PUT returns nothing, so
+        record_signature exhausts its retries and returns False."""
+        routes = dict(self._writable_registry_routes())
+        routes["/contents/signatures/cla.json"] = self._registry([])
+        return routes
+
+    def run_with_failed_write(self):
+        saved = policy_selector.record_signature
+        policy_selector.record_signature = lambda *a, **k: False
+        self.addCleanup(lambda: setattr(policy_selector, "record_signature", saved))
+        return self.run_pr(routes=self._writable_registry_routes(),
+                           paginated_routes=self.SIGNED)
+
+    def run_with_successful_write(self):
+        saved = policy_selector.record_signature
+        policy_selector.record_signature = lambda *a, **k: True
+        self.addCleanup(lambda: setattr(policy_selector, "record_signature", saved))
+        return self.run_pr(routes=self._writable_registry_routes(),
+                           paginated_routes=self.SIGNED)
+
+    # --- defect 7: the failure must be recorded in the status ---
+
+    def test_successful_write_paints_a_clean_description(self):
+        fake = self.run_with_successful_write()
+        self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
+        self.assertEqual(fake.statuses()[0]["description"], "CLA Signed")
+        self.assertFalse(policy_selector.has_pending_record(fake.statuses()[0]["description"]))
+
+    def test_failed_write_is_marked_in_the_description(self):
+        fake = self.run_with_failed_write()
+        self.assertTrue(
+            policy_selector.has_pending_record(fake.statuses()[0]["description"]),
+            f"expected the record-pending marker, got {fake.statuses()[0]['description']!r}",
+        )
+
+    def test_failed_write_still_passes_the_contributor(self):
+        """They signed. An infrastructure failure on our side is not theirs to
+        pay for, and blocking them would be outward-facing on a real PR."""
+        fake = self.run_with_failed_write()
+        self.assertEqual([s["state"] for s in fake.statuses()], ["success"])
+
+    # --- defect 8: the marked status must be re-processed ---
+
+    def test_plain_success_is_still_skipped(self):
+        """The #67 short-circuit must survive intact, or the repaint loop it
+        exists to prevent comes straight back."""
+        fake = self.run_pr(routes={"/commits/abc123/status": self._status("success", "CLA Signed")})
+        self.assertEqual(fake.writes(), [], "a clean green PR must not be touched")
+
+    def test_success_with_pending_record_is_reprocessed(self):
+        fake = self.run_pr(
+            routes=dict(self._writable_registry_routes(),
+                        **{"/commits/abc123/status": self._status("success", "CLA Signed (record pending)")}),
+            paginated_routes=self.SIGNED,
+        )
+        self.assertTrue(fake.writes(),
+                        "a green PR whose consent record never landed must be retried")
+
+    def test_a_successful_retry_clears_the_marker(self):
+        """The end state that matters: the PR converges on a clean status, so
+        it stops being re-processed once the record exists."""
+        saved = policy_selector.record_signature
+        policy_selector.record_signature = lambda *a, **k: True
+        self.addCleanup(lambda: setattr(policy_selector, "record_signature", saved))
+        fake = self.run_pr(
+            routes=dict(self._writable_registry_routes(),
+                        **{"/commits/abc123/status": self._status("success", "CLA Signed (record pending)")}),
+            paginated_routes=self.SIGNED,
+        )
+        self.assertEqual(fake.statuses()[-1]["description"], "CLA Signed")
+        self.assertFalse(policy_selector.has_pending_record(fake.statuses()[-1]["description"]))
+
+    def test_missing_description_on_a_green_status_is_still_skipped(self):
+        """A status posted before this change carries no description. Treating
+        None as 'pending' would re-process every historically-green PR in the
+        org on the next sweep."""
+        fake = self.run_pr(routes={"/commits/abc123/status": self._status("success", None)})
+        self.assertEqual(fake.writes(), [])
+
+    def test_failure_and_pending_states_are_unaffected(self):
+        for state in ("failure", "pending"):
+            with self.subTest(state):
+                fake = self.run_pr(
+                    routes=dict(self._writable_registry_routes(),
+                                **{"/commits/abc123/status": self._status(state, "whatever")}),
+                    paginated_routes=self.SIGNED,
+                )
+                self.assertTrue(fake.writes(), f"a {state} status must still be re-checked")
+
+
+# ---------------------------------------------------------------------------
+# A sweep that failed must not look like a sweep that worked.
+# ---------------------------------------------------------------------------
+@unittest.skipIf(cla_sweeper is None, "cla_sweeper unavailable on this runner")
+class TestSweeperExitCode(unittest.TestCase):
+    """Every PR is processed inside a try/except that logs and continues, so
+    a sweep where all of them failed still exited 0. On a 5-minute cron with
+    nobody reading logs, that made failure indistinguishable from success
+    indefinitely — including a consent record that never persisted.
+
+    First tests this script has ever had.
+    """
+
+    REPOS = [{"full_name": "vmware/a"}, {"full_name": "vmware/b"}]
+
+    def setUp(self):
+        self._saved = {
+            "paginated": cla_sweeper.github_api_paginated,
+            "fetch": policy_selector.fetch_shared_config,
+            "process": policy_selector.process_single_pr,
+            "token": getattr(policy_selector, "ensure_valid_token", None),
+        }
+        self._saved_env = {k: os.environ.get(k) for k in ("GH_TOKEN", "SWEEPER_STRICT_EXIT", "HOURS_BACK")}
+        os.environ["GH_TOKEN"] = "tok"
+        os.environ.pop("SWEEPER_STRICT_EXIT", None)
+        os.environ["HOURS_BACK"] = "24"
+        policy_selector.fetch_shared_config = lambda *a, **k: {}
+        if self._saved["token"]:
+            policy_selector.ensure_valid_token = lambda *a, **k: None
+        cla_sweeper.time.sleep = lambda *_a, **_k: None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        cla_sweeper.github_api_paginated = self._saved["paginated"]
+        policy_selector.fetch_shared_config = self._saved["fetch"]
+        policy_selector.process_single_pr = self._saved["process"]
+        if self._saved["token"]:
+            policy_selector.ensure_valid_token = self._saved["token"]
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _pr(self, number):
+        return {"number": number, "updated_at": "2099-01-01T00:00:00Z",
+                "head": {"sha": f"sha{number}"}, "user": {"login": "someone"},
+                "draft": False}
+
+    def install(self, repos=None, prs_per_repo=2, fail_on=()):
+        repos = self.REPOS if repos is None else repos
+
+        def paginated(url, token):
+            if "/installation/repositories" in url:
+                return repos
+            return [self._pr(i) for i in range(1, prs_per_repo + 1)]
+
+        self.processed = []
+
+        def process(pr_number, *a, **k):
+            self.processed.append(pr_number)
+            if pr_number in fail_on:
+                raise RuntimeError(f"boom on {pr_number}")
+
+        cla_sweeper.github_api_paginated = paginated
+        policy_selector.process_single_pr = process
+
+    def run_sweep(self):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = cla_sweeper.main()
+        return rc, buf.getvalue()
+
+    # --- the exit code itself ---
+
+    def test_clean_sweep_returns_zero(self):
+        self.install()
+        rc, _ = self.run_sweep()
+        self.assertEqual(rc, 0)
+
+    def test_any_failed_pr_returns_nonzero(self):
+        self.install(fail_on=(2,))
+        rc, _ = self.run_sweep()
+        self.assertEqual(rc, 1, "one failed PR must redden the sweep")
+
+    def test_failure_does_not_abort_the_rest_of_the_sweep(self):
+        """The try/except stays: one bad PR must not cost the other repos
+        their status updates."""
+        self.install(prs_per_repo=3, fail_on=(1,))
+        rc, _ = self.run_sweep()
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.processed), 6, "all PRs across both repos should still be attempted")
+
+    def test_failures_are_named_in_the_log(self):
+        self.install(fail_on=(1,))
+        _, out = self.run_sweep()
+        self.assertIn("vmware/a#1", out)
+        self.assertIn("boom on 1", out)
+
+    # --- the kill switch ---
+
+    def test_kill_switch_suppresses_the_nonzero_exit(self):
+        os.environ["SWEEPER_STRICT_EXIT"] = "false"
+        self.install(fail_on=(1,))
+        rc, out = self.run_sweep()
+        self.assertEqual(rc, 0)
+        self.assertIn("SWEEPER_STRICT_EXIT is off", out)
+
+    def test_kill_switch_still_logs_the_failures(self):
+        """Quieting the exit code must not quieten the diagnosis."""
+        os.environ["SWEEPER_STRICT_EXIT"] = "false"
+        self.install(fail_on=(1,))
+        _, out = self.run_sweep()
+        self.assertIn("vmware/a#1", out)
+
+    def test_kill_switch_accepts_the_usual_spellings(self):
+        for v in ("false", "FALSE", "0", "no", "off", " False "):
+            with self.subTest(v):
+                os.environ["SWEEPER_STRICT_EXIT"] = v
+                self.assertFalse(cla_sweeper.strict_exit_enabled())
+
+    def test_anything_else_leaves_strict_exit_on(self):
+        for v in ("true", "1", "yes", "", "banana"):
+            with self.subTest(v):
+                os.environ["SWEEPER_STRICT_EXIT"] = v
+                self.assertTrue(cla_sweeper.strict_exit_enabled(),
+                                "an unrecognised value must fail safe to strict")
+
+    def test_default_is_strict(self):
+        os.environ.pop("SWEEPER_STRICT_EXIT", None)
+        self.assertTrue(cla_sweeper.strict_exit_enabled())
+
+    def test_long_failure_lists_are_truncated_with_a_count(self):
+        """The log caps at 20 named failures. A sweep that broke everywhere
+        would otherwise emit hundreds of ::warning:: lines and bury its own
+        summary; the remainder has to still be counted, or the log understates
+        how bad the run was."""
+        self.install(prs_per_repo=15, fail_on=tuple(range(1, 16)))   # 30 failures
+        rc, out = self.run_sweep()
+        self.assertEqual(rc, 1)
+        self.assertIn("30 failed PR(s)", out)
+        self.assertIn("...and 10 more", out)
+        # Count inside the SUMMARY block only. Each failure is also logged
+        # inline as it happens, which is deliberate — the full detail belongs
+        # in the log, the cap applies to the digest at the end.
+        summary = out.split("failed PR(s):", 1)[1]
+        self.assertEqual(summary.count("boom on"), 20,
+                         "the end-of-run summary should name exactly 20")
+
+    def test_short_failure_lists_are_not_truncated(self):
+        self.install(prs_per_repo=1, fail_on=(1,))
+        _, out = self.run_sweep()
+        self.assertNotIn("more", out.split("failed PR(s)")[-1].split("\n")[0])
+        self.assertNotIn("...and", out)
+
+    # --- the early-return path ---
+
+    def test_no_repositories_is_a_failure_not_a_quiet_success(self):
+        """An empty installation list means the token or the App install is
+        broken. Returning 0 there reported a sweep that examined nothing as
+        a clean sweep."""
+        self.install(repos=[])
+        rc, out = self.run_sweep()
+        self.assertEqual(rc, 1)
+        self.assertIn("No repositories", out)
+
+    def test_no_repositories_respects_the_kill_switch(self):
+        os.environ["SWEEPER_STRICT_EXIT"] = "false"
+        self.install(repos=[])
+        rc, _ = self.run_sweep()
+        self.assertEqual(rc, 0)

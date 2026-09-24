@@ -90,4 +90,14 @@ jobs:
           DCO_DOC_URL: "https://${{ vars.CENTRAL_ORG }}.github.io/oss-public-policy/DCO_1.1"
 
           HOURS_BACK: ${{ github.event.inputs.hours_back || '24' }}
+
+          # A sweep that hit per-PR failures now exits non-zero, so a broken
+          # sweep reddens this run instead of looking identical to a clean one.
+          # There is no continue-on-error here, which is the point.
+          #
+          # If a transient fault ever starts reddening every run, set the repo
+          # or org variable SWEEPER_STRICT_EXIT to "false" to quiet the exit
+          # code without reverting code or disabling the schedule. Failures are
+          # still logged either way. Unset means strict.
+          SWEEPER_STRICT_EXIT: ${{ vars.SWEEPER_STRICT_EXIT || 'true' }}
         run: python .github-tools/scripts/cla_sweeper.py
