@@ -153,6 +153,17 @@
       "head_sha": "3823a84ddc90e840f1f930999a2ae20ab9097c12",
       "comment_id": 5768463117,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "ericvmw",
+      "id": 32748317,
+      "signedAt": "2026-09-30T19:47:24.525007Z",
+      "org": "vmware",
+      "repo": "vmware/vsphere-supervisor",
+      "pr_number": 15,
+      "head_sha": "b2ab8f518fe73cfb3055e6efaa3370860dab9db0",
+      "comment_id": 5918314541,
+      "agreement_version": "1.0"
     }
   ]
 }
