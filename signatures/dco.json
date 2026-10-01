@@ -65,6 +65,17 @@
       "head_sha": "9c532d8be21a3eb6a42bd8df44eeebf38bb70a3f",
       "comment_id": 5785878136,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "mscranebcom",
+      "id": 224132836,
+      "signedAt": "2026-10-01T03:36:14.095905Z",
+      "org": "vmware",
+      "repo": "vmware/vmware-config-modules",
+      "pr_number": 46,
+      "head_sha": "caf8689073f84387c5f57a06febae556b699f55a",
+      "comment_id": 5924038571,
+      "agreement_version": "1.0"
     }
   ]
 }
