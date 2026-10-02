@@ -98,6 +98,17 @@
       "head_sha": "438b876b6af31ab908cf38767f5f29c42b2db4c0",
       "comment_id": 5946671018,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "elesueur",
+      "id": 8139865,
+      "signedAt": "2026-10-02T13:16:41.728432Z",
+      "org": "vmware",
+      "repo": "vmware/govmomi",
+      "pr_number": 4141,
+      "head_sha": "9963edfef72657a55f1991f4773e4f425c22aa0c",
+      "comment_id": 5953150543,
+      "agreement_version": "1.0"
     }
   ]
 }
