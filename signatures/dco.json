@@ -87,6 +87,17 @@
       "head_sha": "f376892a0fe6b46eb93491c0a8309118f962864c",
       "comment_id": 5942161964,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Shubham-Padkonde",
+      "id": 177908686,
+      "signedAt": "2026-10-02T06:50:49.059633Z",
+      "org": "vmware",
+      "repo": "vmware/pyvmomi",
+      "pr_number": 1118,
+      "head_sha": "438b876b6af31ab908cf38767f5f29c42b2db4c0",
+      "comment_id": 5946671018,
+      "agreement_version": "1.0"
     }
   ]
 }
