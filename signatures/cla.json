@@ -164,6 +164,17 @@
       "head_sha": "b2ab8f518fe73cfb3055e6efaa3370860dab9db0",
       "comment_id": 5918314541,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "dsu-igeek",
+      "id": 1008014,
+      "signedAt": "2026-10-05T23:16:43.302674Z",
+      "org": "vmware",
+      "repo": "vmware/vsphere-supervisor",
+      "pr_number": 16,
+      "head_sha": "d08c334944971fdcbbf965ab94f3bee274c1d3db",
+      "comment_id": 6005127958,
+      "agreement_version": "1.0"
     }
   ]
 }
