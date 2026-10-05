@@ -218,7 +218,17 @@ def get_license_decision(repo_full: str, token: Optional[str] = None, api_base_u
 
 def requires_CLA(repo_full: str, token: Optional[str] = None, api_base_url: str = "https://api.github.com", timeout_s: int = 20, licenses_data=None, permissive_data=None, allowlist_data=None) -> bool:
     res = get_license_decision(repo_full, token, api_base_url, timeout_s, licenses_data, permissive_data, allowlist_data)
-    return bool(res.get("requires_CLA", True))
+    # Only an explicit False means DCO. get_license_decision reports None when
+    # it identified a licence but could not decide whether it is permissive
+    # (an SPDX expression that does not parse, for example), and bool(None) is
+    # False - so an undecided licence used to be downgraded to DCO. The
+    # paths that fail to identify a licence at all already return True; this
+    # makes the identified-but-undecided path agree with them.
+    #
+    # None is kept in get_license_decision itself on purpose: the org licence
+    # reports read it as "unknown", which is the honest answer there. This
+    # facade is the enforcement boundary, so this is where it must fail closed.
+    return res.get("requires_CLA") is not False
 
 if __name__ == "__main__":
     import sys, json
