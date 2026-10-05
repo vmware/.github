@@ -1004,6 +1004,117 @@ class TestAllowlistFailClosed(PolicySelectorTestCase):
                          "a bare string must be rejected, not iterated per character")
 
 
+@unittest.skipIf(requires_cla is None, "requires_cla unavailable (optional dep missing)")
+class TestRequiresClaFailsClosed(unittest.TestCase):
+    """requires_CLA() is the only thing the gate asks, and it used to return
+    bool(res.get("requires_CLA", True)). get_license_decision reports None
+    when it identified a licence but could not decide whether it is
+    permissive, and bool(None) is False - so an undecided licence was quietly
+    downgraded to DCO, the weaker document.
+
+    Every other test in this file replaces requires_CLA wholesale, so the
+    facade itself had no coverage at all. These stub one layer lower, at
+    get_license_decision (or at the single network call inside it), so the
+    real facade runs.
+    """
+
+    # A non-empty dict, so _load_allowlist uses it rather than falling through
+    # to the real cla/allowlist.yml on disk - and with no overrides, so nothing
+    # here depends on what that file currently says.
+    NO_OVERRIDES = {"license_overrides": {"require_cla": [], "allow_dco": []}}
+
+    def setUp(self):
+        saved_decision = requires_cla.get_license_decision
+        saved_api = requires_cla.dorl.get_repo_license_api
+        self.addCleanup(setattr, requires_cla, "get_license_decision", saved_decision)
+        self.addCleanup(setattr, requires_cla.dorl, "get_repo_license_api", saved_api)
+
+    def _decision(self, value):
+        requires_cla.get_license_decision = lambda *a, **k: value
+        return requires_cla.requires_CLA("vmware/repo")
+
+    def test_undecided_licence_requires_cla(self):
+        """The defect."""
+        self.assertIs(self._decision({"requires_CLA": None}), True)
+
+    def test_explicit_false_still_means_dco(self):
+        """Guard against over-correcting: a permissive licence must stay DCO,
+        or every permissive repo in the org would start asking for a CLA."""
+        self.assertIs(self._decision({"requires_CLA": False}), False)
+
+    def test_explicit_true_still_means_cla(self):
+        self.assertIs(self._decision({"requires_CLA": True}), True)
+
+    def test_missing_key_requires_cla(self):
+        """Unchanged behaviour, pinned so a rewrite can't lose it."""
+        self.assertIs(self._decision({}), True)
+
+    def test_the_detector_really_returns_none_for_an_unparseable_expression(self):
+        """Proves the None path exists in shipped code, so the tests above are
+        not guarding something hypothetical. An SPDX expression that parses to
+        no clauses is the one input that reaches it."""
+        for expr in ("WITH", "()"):
+            with self.subTest(expr=expr):
+                self.assertEqual(
+                    requires_cla.ld.is_permissive_with_reason(expr, expr, [], []),
+                    (None, "expr_empty_or_unparsed"))
+
+    def test_undecided_licence_from_the_api_requires_cla_end_to_end(self):
+        """Runs the real get_license_decision with only the GitHub call faked:
+        the repo reports a licence whose SPDX id is an expression that does
+        not parse. Also pins that the decision record still says None - the
+        org licence reports read that as "unknown", and the fix deliberately
+        lives in the facade rather than erasing that information."""
+        async def fake_license_api(session, owner, repo):
+            return {"license": {"spdx_id": "WITH", "name": "WITH"}}
+        requires_cla.dorl.get_repo_license_api = fake_license_api
+        kwargs = dict(licenses_data=[], permissive_data=[], allowlist_data=self.NO_OVERRIDES)
+
+        decision = requires_cla.get_license_decision("vmware/repo", **kwargs)
+        self.assertIsNone(decision["requires_CLA"])
+        self.assertEqual(decision["policy_reason"], "expr_empty_or_unparsed")
+
+        self.assertIs(requires_cla.requires_CLA("vmware/repo", **kwargs), True)
+
+    def test_permissive_licence_from_the_api_stays_dco_end_to_end(self):
+        """Positive control for the test above: the same path with a licence
+        that is genuinely permissive must still come out DCO, which shows the
+        end-to-end test can tell the two cases apart."""
+        async def fake_license_api(session, owner, repo):
+            return {"license": {"spdx_id": "MIT", "name": "MIT License"}}
+        requires_cla.dorl.get_repo_license_api = fake_license_api
+        self.assertIs(requires_cla.requires_CLA(
+            "vmware/repo", licenses_data=[], permissive_data=[],
+            allowlist_data=self.NO_OVERRIDES), False)
+
+
+@unittest.skipIf(requires_cla is None, "requires_cla unavailable (optional dep missing)")
+class TestGateFailsClosedOnAnUndecidedLicence(ProcessSinglePrHarness):
+    """The same defect seen from the gate: process_single_pr with the real
+    requires_CLA facade in place (the harness stubs it out by default), and
+    only get_license_decision faked."""
+
+    def setUp(self):
+        super().setUp()
+        policy_selector.requires_cla.requires_CLA = self._saved_requires
+        saved = policy_selector.requires_cla.get_license_decision
+        self.addCleanup(setattr, policy_selector.requires_cla, "get_license_decision", saved)
+
+    def _run_with_decision(self, value):
+        policy_selector.requires_cla.get_license_decision = lambda *a, **k: {"requires_CLA": value}
+        return self.run_pr(paginated_routes={"/issues/5/comments": [], "/pulls/5/commits": []})
+
+    def test_undecided_licence_asks_for_a_cla(self):
+        fake = self._run_with_decision(None)
+        self.assertEqual(fake.statuses()[0]["description"], "CLA Missing")
+
+    def test_permissive_licence_still_asks_for_a_dco(self):
+        """Positive control: shows the real facade is wired in, not a stub
+        that always says CLA."""
+        fake = self._run_with_decision(False)
+        self.assertEqual(fake.statuses()[0]["description"], "DCO Missing")
+
+
 class TestOverrideMatchesTheRealCatalogue(unittest.TestCase):
     """Guard the seam between two files that must agree but are spelled
     differently.
