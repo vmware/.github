@@ -1,78 +1,65 @@
-# Contributing to {{ project }}
+# Contributing
 
-_NOTE: This is a template document that requires editing before it is ready to use!_
+We welcome contributions from the community, and thank you for taking the time to contribute!
 
-We welcome contributions from the community and first want to thank you for taking the time to contribute!
+This is the default contributing guide for repositories in the `vmware` GitHub organization. If a repository has its own `CONTRIBUTING.md`, that file takes precedence. For how to build, run and test a particular project, see that repository's README.
 
-Please familiarize yourself with the [Code of Conduct](https://github.com/vmware/.github/blob/main/CODE_OF_CONDUCT.md) before contributing.
-
-_TO BE EDITED: Depending on the open source license that governs the project, leave only one of the options below:_
-
-* _DCO: Before you start working with {{ project }}, please read our [Developer Certificate of Origin](https://cla.vmware.com/dco). All contributions to this repository must be signed as described on that page. Your signature certifies that you wrote the patch or have the right to pass it on as an open-source patch._
-* _CLA: Before you start working with {{ project }}, please read and sign our Contributor License Agreement [CLA](https://cla.vmware.com/cla/1/preview). If you wish to contribute code and you have not signed our contributor license agreement (CLA), our bot will update the issue when you open a Pull Request. For any questions about the CLA process, please refer to our [FAQ]([https://cla.vmware.com/faq](https://cla.vmware.com/faq))._
+Please read the [Code of Conduct](https://github.com/vmware/.github/blob/main/CODE_OF_CONDUCT.md) before contributing.
 
 ## Ways to contribute
 
-We welcome many different types of contributions and not all of them need a Pull request. Contributions may include:
+We welcome many different types of contributions, and not all of them need a pull request. Contributions may include:
 
 * New features and proposals
 * Documentation
 * Bug fixes
-* Issue Triage
+* Issue triage
 * Answering questions and giving feedback
 * Helping to onboard new contributors
-* Other related activities
 
-## Getting started
+## Signing the CLA or DCO
 
-_TO BE EDITED: This section explains how to build the project from source, including Development Environment Setup, Build, Run and Test._
+Before a pull request can be merged, its author must sign either the Contributor License Agreement (CLA) or the Developer Certificate of Origin (DCO). Which one is decided automatically from the repository's license — you don't need to work it out yourself. The pull request's **Check CLA/DCO** status shows which document applies.
 
-_Provide information about how someone can find your project, get set up, build the code, test it, and submit a pull request successfully without having to ask any questions. Also include common errors people run into, or useful scripts they should run._
+**DCO.** Sign off every commit with `git commit -s`, which adds a `Signed-off-by: Your Name <you@example.com>` line to the commit message. If every commit in the pull request is signed off, the check passes with no further action. Read the [Developer Certificate of Origin](https://vmware.github.io/oss-public-policy/DCO_1.1).
 
-_List any tests that the contributor should run / or testing processes to follow before submitting. Describe any automated and manual checks performed by reviewers._
+**CLA.** Read the [Broadcom Contributor License Agreement](https://vmware.github.io/oss-public-policy/Broadcom_CLA), then post this as a new comment on your pull request:
 
+```text
+I have read the CLA Document and I hereby sign the CLA for this and all future contributions.
+```
 
-## Contribution Flow
+If the check fails, a bot comments on your pull request with the exact sentence to post — for a DCO repository whose commits aren't all signed off, posting the DCO sentence it gives you works too. Copy the sentence exactly. The check updates automatically, usually within 15–20 minutes, and you don't need to ask a maintainer.
 
-This is a rough outline of what a contributor's workflow looks like:
+Signing is a one-time step per GitHub account. It covers every repository in this organization that requires the same document. The CLA and DCO are tracked separately, so signing one does not cover the other.
 
-* Make a fork of the repository within your GitHub account
-* Create a topic branch in your fork from where you want to base your work
+If the check reads something like **CLA Missing (DCO text posted)**, you posted the sentence for the other document. Post the sentence for the document named first.
+
+## Contribution flow
+
+This is a rough outline of a contributor's workflow:
+
+* Fork the repository into your GitHub account
+* Create a topic branch in your fork from the branch you want to base your work on
 * Make commits of logical units
-* Make sure your commit messages are with the proper format, quality and descriptiveness (see below)
+* Write clear, descriptive commit messages (see below)
 * Push your changes to the topic branch in your fork
-* Create a pull request containing that commit
+* Open a pull request against the repository's default branch
 
-We follow the GitHub workflow and you can find more details on the [GitHub flow documentation](https://docs.github.com/en/get-started/quickstart/github-flow).
+We follow the GitHub workflow; see the [GitHub flow documentation](https://docs.github.com/en/get-started/using-github/github-flow) for details.
 
-Before submitting your pull request, we advise you to use the following:
+### Pull request checklist
 
+1. Check that your changes pass the project's linting checks and tests.
+2. Ensure your commit messages are descriptive. We follow the conventions in [How to Write a Git Commit Message](https://cbea.ms/git-commit/). Include any related GitHub issue references in the commit message — see [referencing issues and pull requests](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#referencing-issues-and-pull-requests).
+3. Check your commits and commit messages for typos.
 
-### Pull Request Checklist
+## Reporting bugs and creating issues
 
-1. Check if your code changes will pass both code linting checks and unit tests.
-2. Ensure your commit messages are descriptive. We follow the conventions on [How to Write a Git Commit Message](http://chris.beams.io/posts/git-commit/). Be sure to include any related GitHub issue references in the commit message. See [GFM syntax](https://guides.github.com/features/mastering-markdown/#GitHub-flavored-markdown) for referencing issues and commits.
-3. Check the commits and commits messages and ensure they are free from typos.
+Open an issue in the relevant repository, following its issue template if it has one.
 
-## Reporting Bugs and Creating Issues
+**Do not report security vulnerabilities in public issues.** Email [vmware.psirt@broadcom.com](mailto:vmware.psirt@broadcom.com) or use the repository's **Report a vulnerability** button instead — see the [security policy](https://github.com/vmware/.github/blob/main/SECURITY.md).
 
-For specifics on what to include in your report, please follow the guidelines in the issue and pull request templates when available.
+## Ask for help
 
-_TO BE EDITED: Add additional information if needed._
-
-
-## Ask for Help
-
-_TO BE EDITED: Provide information about the channels you use to communicate (i.e. Slack, IRC, Discord, etc)_
-
-The best way to reach us with a question when contributing is to ask on:
-
-* The original GitHub issue
-* The developer mailing list
-* Our Slack channel
-
-
-## Additional Resources
-
-_Optional_
-
+The best place to ask a question about a contribution is the related GitHub issue or pull request.
