@@ -31,7 +31,7 @@ I have read the CLA Document and I hereby sign the CLA for this and all future c
 
 If the check fails, a bot comments on your pull request with the exact sentence to post — for a DCO repository whose commits aren't all signed off, posting the DCO sentence it gives you works too. Copy the sentence exactly. The check updates automatically, usually within 15–20 minutes, and you don't need to ask a maintainer.
 
-Signing is a one-time step per GitHub account. It covers every repository in this organization that requires the same document. The CLA and DCO are tracked separately, so signing one does not cover the other.
+Posting the sentence is a one-time step per GitHub account: it covers every repository in this organization that requires the same document. Signing off commits with `git commit -s` is per commit, so keep doing it on future pull requests. The CLA and DCO are tracked separately, so signing one does not cover the other.
 
 If the check reads something like **CLA Missing (DCO text posted)**, you posted the sentence for the other document. Post the sentence for the document named first.
 
