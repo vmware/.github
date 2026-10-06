@@ -109,6 +109,17 @@
       "head_sha": "9963edfef72657a55f1991f4773e4f425c22aa0c",
       "comment_id": 5953150543,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "rcastley",
+      "id": 2493008,
+      "signedAt": "2026-10-06T15:24:22.850364Z",
+      "org": "vmware",
+      "repo": "vmware/vks-validated-solutions",
+      "pr_number": 8,
+      "head_sha": "255bae56ac9649752a0457160a315775ffde9637",
+      "comment_id": 6019151357,
+      "agreement_version": "1.0"
     }
   ]
 }
