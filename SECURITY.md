@@ -17,9 +17,7 @@ If you know of a publicly disclosed security vulnerability for this project, ple
 
 **IMPORTANT: Do not file public issues on GitHub for security vulnerabilities**
 
-To report a vulnerability or a security-related issue, please contact the maintainers with enough details through one of the following channels: 
-* Email **vmware.psirt@broadcom.com** — the VMware Product Security Incident Response Team. Use this address for any repository that does not list its own maintainer contact.
-* Open a [GitHub Security Advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability). This allows for anyone to report security vulnerabilities directly and privately to the maintainers via GitHub.
+To report a vulnerability or a security-related issue, please email **vmware.psirt@broadcom.com**, the VMware Product Security Incident Response Team, with enough details. Use this address for any repository that does not list its own maintainer contact.
 
 Some repositories publish their own `SECURITY.md` with maintainer-specific contact details; where present, that file takes precedence over this one.
 
