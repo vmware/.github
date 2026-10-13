@@ -23,7 +23,7 @@ To report a vulnerability or a security-related issue, please contact the mainta
 
 Some repositories publish their own `SECURITY.md` with maintainer-specific contact details; where present, that file takes precedence over this one.
 
-The report will be fielded by the maintainers who have committer and release permissions. Feedback will be sent within 3 business days, including a detailed plan to investigate the issue and any potential workarounds to perform in the meantime. 
+The report will be fielded by PSIRT or, where a repository publishes its own contact, by that repository's maintainers who have committer and release permissions. We will respond to your report, including a detailed plan to investigate the issue and any potential workarounds to perform in the meantime. 
 
 Do not report non-security-impacting bugs through this channel. Use GitHub issues for all non-security-impacting bugs.
 
@@ -43,7 +43,7 @@ Provide a descriptive title and in the description of the report include the fol
 
 *   When you think this project has a potential security vulnerability.
 *   When you suspect a potential vulnerability but you are unsure that it impacts this project.
-*   When you know of or suspect a potential vulnerability on another project that is used by this project.
+*   When you know of or suspect a potential vulnerability in a dependency of this project, whether or not that dependency is in the vmware GitHub org.
 
 
 ## Patch, Release, and Disclosure
@@ -52,7 +52,7 @@ The maintainers will respond to vulnerability reports as follows:
 
 1. The maintainers will investigate the vulnerability and determine its impact and criticality.
 2. If the issue is not deemed to be a vulnerability, the maintainers will follow up with a detailed reason for rejection.
-3. The maintainers will initiate a conversation with the reporter within 3 business days.
+3. The maintainers will initiate a conversation with the reporter.
 4. If a vulnerability is acknowledged and the timeline for a fix is determined, the maintainers will work on a plan to communicate with the appropriate community, including identifying viable mitigating (if any) steps that affected users can take to protect themselves until the fix is rolled out.
 5. The maintainers will create a [Security Advisory](https://docs.github.com/en/code-security/repository-security-advisories/publishing-a-repository-security-advisory) and assign a [CVSS Score](https://www.first.org/cvss/calculator/3.1), if it is not created yet. The maintainers make the final call on the calculated CVSS; it is better to move quickly than making the CVSS perfect. The draft advisory will initially be set to private.
 6. The maintainers will work on fixing the vulnerability and perform internal testing before preparing to roll out the fix.
