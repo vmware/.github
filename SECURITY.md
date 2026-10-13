@@ -1,6 +1,6 @@
 # Security Release Process
 
-The community has adopted this security disclosure and response policy to ensure we responsibly handle critical issues.
+The community has adopted this security disclosure and response policy to ensure we responsibly handle security issues.
 
 
 ## Supported Versions
@@ -12,7 +12,7 @@ For a list of support versions that this project will potentially create securit
 
 Security is of the highest importance and all security vulnerabilities or suspected security vulnerabilities should be reported to this project privately, to minimize attacks against current users  before they are fixed. Vulnerabilities will be investigated and patched on the next patch (or minor) release as soon as possible. This information could be kept entirely internal to the project.
 
-If you know of a publicly disclosed security vulnerability for this project, please **IMMEDIATELY** contact the maintainers of this project privately. The use of encrypted email is encouraged.
+If you know of a publicly disclosed security vulnerability for this project, please **IMMEDIATELY** contact the maintainers of this project privately. The use of encrypted email is encouraged: see the [Broadcom security response policy](https://www.broadcom.com/support/vmware-services/security-response) and the [security response PGP key](https://knowledge.broadcom.com/external/article?legacyId=1055).
 
 
 **IMPORTANT: Do not file public issues on GitHub for security vulnerabilities**
@@ -32,11 +32,11 @@ Do not report non-security-impacting bugs through this channel. Use GitHub issue
 
 Provide a descriptive title and in the description of the report include the following information:
 
-*   Basic identity information, such as your name and your affiliation or company.
-*   Detailed steps to reproduce the vulnerability  (POC scripts, screenshots, and logs are all helpful to us).
-*   Description of the effects of the vulnerability on this project and the related hardware and software configurations, so that the maintainers can reproduce it.
-*   How the vulnerability affects this project's usage and an estimation of the attack surface, if there is one.
-*   List other projects or dependencies that were used in conjunction with this project to produce the vulnerability.
+*   Reporter identity and contact information, such as your name, your affiliation or company, and how to reach you.
+*   Vulnerability description.
+*   Vulnerability impact: the effects of the vulnerability on this project and the related hardware and software configurations, how it affects this project's usage, and an estimation of the attack surface, if there is one.
+*   Reproduction steps: detailed steps to reproduce the vulnerability, so that the maintainers can reproduce it (POC scripts, screenshots, and logs are all helpful to us).
+*   Dependencies: other projects or dependencies that were used in conjunction with this project to produce the vulnerability.
 
 
 ## When to report a vulnerability
@@ -50,20 +50,20 @@ Provide a descriptive title and in the description of the report include the fol
 
 The maintainers will respond to vulnerability reports as follows:
 
-1. The maintainers will investigate the vulnerability and determine its effects and criticality.
+1. The maintainers will investigate the vulnerability and determine its impact and criticality.
 2. If the issue is not deemed to be a vulnerability, the maintainers will follow up with a detailed reason for rejection.
 3. The maintainers will initiate a conversation with the reporter within 3 business days.
-4. If a vulnerability is acknowledged and the timeline for a fix is determined, the maintainers will work on a plan to communicate with the appropriate community, including identifying mitigating steps that affected users can take to protect themselves until the fix is rolled out.
-5. The maintainers will also create a [Security Advisory](https://docs.github.com/en/code-security/repository-security-advisories/publishing-a-repository-security-advisory) using the [CVSS Calculator](https://www.first.org/cvss/calculator/3.0), if it is not created yet.  The maintainers make the final call on the calculated CVSS; it is better to move quickly than making the CVSS perfect. Issues may also be reported to [Mitre](https://cve.mitre.org/) using this [scoring calculator](https://nvd.nist.gov/vuln-metrics/cvss/v3-calculator). The draft advisory will initially be set to private.
+4. If a vulnerability is acknowledged and the timeline for a fix is determined, the maintainers will work on a plan to communicate with the appropriate community, including identifying viable mitigating (if any) steps that affected users can take to protect themselves until the fix is rolled out.
+5. The maintainers will create a [Security Advisory](https://docs.github.com/en/code-security/repository-security-advisories/publishing-a-repository-security-advisory) and assign a [CVSS Score](https://www.first.org/cvss/calculator/3.1), if it is not created yet. The maintainers make the final call on the calculated CVSS; it is better to move quickly than making the CVSS perfect. The draft advisory will initially be set to private.
 6. The maintainers will work on fixing the vulnerability and perform internal testing before preparing to roll out the fix.
 7. Once the fix is confirmed, the maintainers will patch the vulnerability in the next patch or minor release, and backport a patch release into all earlier supported releases.
 
 
 ## Public Disclosure Process
 
-The maintainers publish the public advisory to this project's community via GitHub. In most cases, additional communication via Slack, Twitter, mailing lists, blog, and other channels will assist in educating the project's users and rolling out the patched release to affected users.
+The maintainers will publish the public advisory to this project's community via GitHub. In most cases, additional communication via Slack, Twitter, mailing lists, blog, and other channels will assist in educating the project's users and rolling out the patched release to affected users.
 
-The maintainers will also publish any mitigating steps users can take until the fix can be applied to their instances. This project's distributors will handle creating and publishing their own security advisories.
+The maintainers may also publish any viable mitigating steps users can take until the fix can be applied to their instances. This project's distributors will handle creating and publishing their own security advisories.
 
 
 ## Confidentiality, integrity and availability
