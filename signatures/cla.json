@@ -175,6 +175,17 @@
       "head_sha": "d08c334944971fdcbbf965ab94f3bee274c1d3db",
       "comment_id": 6005127958,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "ergSey",
+      "id": 75573061,
+      "signedAt": "2026-10-15T14:25:26.797173Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vcd",
+      "pr_number": 1436,
+      "head_sha": "8d0a52189d25e498fccca57e93ca45e148bfe190",
+      "comment_id": 6194105213,
+      "agreement_version": "1.0"
     }
   ]
 }
