@@ -186,6 +186,17 @@
       "head_sha": "8d0a52189d25e498fccca57e93ca45e148bfe190",
       "comment_id": 6194105213,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "xuelichao",
+      "id": 68891670,
+      "signedAt": "2026-10-19T02:53:40.335354Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-tanzu-mission-control",
+      "pr_number": 692,
+      "head_sha": "7fb1d74859d14e4ea1357b7775d21f7d8a25a173",
+      "comment_id": 6258473331,
+      "agreement_version": "1.0"
     }
   ]
 }
