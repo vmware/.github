@@ -120,6 +120,17 @@
       "head_sha": "255bae56ac9649752a0457160a315775ffde9637",
       "comment_id": 6019151357,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Indy-rbo",
+      "id": 147405976,
+      "signedAt": "2026-10-20T09:05:39.649717Z",
+      "org": "vmware",
+      "repo": "vmware/build-tools-for-vmware-aria",
+      "pr_number": 1239,
+      "head_sha": "0546a3431b50ec47eb5344c8ddcd74170bd32868",
+      "comment_id": 6287031236,
+      "agreement_version": "1.0"
     }
   ]
 }
