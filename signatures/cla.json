@@ -197,6 +197,17 @@
       "head_sha": "7fb1d74859d14e4ea1357b7775d21f7d8a25a173",
       "comment_id": 6258473331,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "eworm-de",
+      "id": 970853,
+      "signedAt": "2026-10-27T14:48:48.963449Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 808,
+      "head_sha": "aedcb1075ec75ff59b5479798569f1297a4d32e5",
+      "comment_id": 6444999769,
+      "agreement_version": "1.0"
     }
   ]
 }
