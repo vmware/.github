@@ -131,6 +131,17 @@
       "head_sha": "0546a3431b50ec47eb5344c8ddcd74170bd32868",
       "comment_id": 6287031236,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "delasio",
+      "id": 1280129,
+      "signedAt": "2026-10-29T16:19:21.502461Z",
+      "org": "vmware",
+      "repo": "vmware/packer-examples-for-vsphere",
+      "pr_number": 1139,
+      "head_sha": "5975e430e34a5f43da9b6abe7214f1346868b6f2",
+      "comment_id": 6501804108,
+      "agreement_version": "1.0"
     }
   ]
 }
