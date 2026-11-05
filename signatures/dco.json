@@ -142,6 +142,17 @@
       "head_sha": "5975e430e34a5f43da9b6abe7214f1346868b6f2",
       "comment_id": 6501804108,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "anwithaun-1",
+      "id": 263823045,
+      "signedAt": "2026-11-05T08:28:29.508200Z",
+      "org": "vmware",
+      "repo": "vmware/govmomi",
+      "pr_number": 4198,
+      "head_sha": "8a84005c3358074c55eeeff84d1473dbf6ab86b2",
+      "comment_id": 6632272026,
+      "agreement_version": "1.0"
     }
   ]
 }
