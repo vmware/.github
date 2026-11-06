@@ -208,6 +208,17 @@
       "head_sha": "aedcb1075ec75ff59b5479798569f1297a4d32e5",
       "comment_id": 6444999769,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "sesh22",
+      "id": 17364827,
+      "signedAt": "2026-11-06T21:07:29.651086Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vsphere",
+      "pr_number": 2803,
+      "head_sha": "ebe559ffb0eecf653957988b01c41e5d2904b219",
+      "comment_id": 6692153879,
+      "agreement_version": "1.0"
     }
   ]
 }
