@@ -219,6 +219,17 @@
       "head_sha": "ebe559ffb0eecf653957988b01c41e5d2904b219",
       "comment_id": 6692153879,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "Achraf-Ben",
+      "id": 31737486,
+      "signedAt": "2026-11-10T01:38:56.845307Z",
+      "org": "vmware",
+      "repo": "vmware/terraform-provider-vsphere",
+      "pr_number": 2805,
+      "head_sha": "af7f4536babc7ffeab56466e97e2b08f3016d14c",
+      "comment_id": 6756334045,
+      "agreement_version": "1.0"
     }
   ]
 }
