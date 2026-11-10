@@ -1,5 +1,9 @@
-requests
-aiohttp>=3.9,<4
-PyYAML>=6.0.1,<7
-PyJWT
-cryptography
+# Exact versions for the CLA/DCO gate, the sweeper and the tests. Pinned to
+# what those workflows were installing on 2026-11-10, so behaviour is unchanged.
+# Dependabot (.github/dependabot.yml) proposes updates as reviewed PRs.
+requests==2.34.2
+aiohttp==3.14.5
+PyYAML==6.0.3
+PyJWT==2.15.1
+cryptography==50.0.2
+rapidfuzz==3.14.6
