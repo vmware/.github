@@ -1,0 +1,23 @@
+# Keeps the commit-SHA pins in .github/workflows/ and the Python packages in
+# scripts/requirements.txt current. Dependabot updates both the SHA and the
+# "# vX.Y.Z" comment. Each ecosystem's updates are grouped into one weekly PR.
+# Major versions are included on purpose: action majors carry runtime changes
+# (e.g. the Node 20 -> Node 24 move), so they must not silently fall behind;
+# every update is still a reviewed PR, never merged automatically.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+    groups:
+      python-packages:
+        patterns: ["*"]

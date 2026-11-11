@@ -24,18 +24,16 @@ jobs:
     name: Compliance Gate
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: read
       pull-requests: write # Needed to post comments
       statuses: write      # Needed to set status checks
-      checks: write
 
     steps:
       # 1. GENERATE TOKEN
       # We need this to authenticate with the Mothership repo to fetch signatures.
       - name: Generate Mothership Token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.CLA_APP_ID }}
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
@@ -44,7 +42,7 @@ jobs:
       # 2. CHECKOUT TOOLS
       # We download the scripts from your central .github repo.
       - name: Checkout Mothership Tools
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ vars.CENTRAL_ORG }}/.github
           token: ${{ steps.app-token.outputs.token }}
@@ -56,12 +54,12 @@ jobs:
             
       # 3. SETUP PYTHON
       - name: Setup Python & Cache
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       
       - name: Cache Pip Packages
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: pip-cache
         with:
           path: ~/.cache/pip
@@ -72,7 +70,7 @@ jobs:
       # 4. INSTALL DEPENDENCIES
       # We include rapidfuzz/aiohttp because your 'requires_cla.py' helper needs them.
       - name: Install Dependencies
-        run: pip install pyyaml PyJWT cryptography rapidfuzz aiohttp requests
+        run: pip install -r .github-tools/scripts/requirements.txt
 
       # 5. RUN COMPLIANCE CHECK
       # This single step now handles everything: 
