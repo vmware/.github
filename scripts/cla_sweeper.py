@@ -145,7 +145,11 @@ def main():
 
     for repo in repos:
         full_name = repo.get("full_name")
-        time.sleep(2) # Rate Limit Safety
+        # Rate-limit cushion between repos. Was 2s, which alone took ~3.5 of a
+        # sweep's ~4.4 minutes at ~106 repos, so sweeps ran close to the
+        # 5-minute schedule and scheduled runs were skipped. A sweep makes
+        # roughly 135 API calls, far below the installation's hourly limit.
+        time.sleep(1)
 
         # Get PRs (PAGINATED)
         pr_url = f"{api_root}/repos/{full_name}/pulls?state=open&sort=updated&direction=desc"
