@@ -16,8 +16,11 @@ on:
         default: '24'
 
 # PREVENTS OVERLAPPING RUNS (Safety Mechanism)
+# One group for every branch, not one per ref, so a manual test run on a
+# branch queues behind a live sweep instead of processing the same PRs
+# at the same time (which could post duplicate comments).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 permissions:
@@ -46,7 +49,11 @@ jobs:
           repository: ${{ vars.CENTRAL_ORG }}/.github
           token: ${{ steps.app-token.outputs.token }}
           path: .github-tools
-          ref: main
+          # Scripts from the same commit as this workflow file. Scheduled runs
+          # are on main, so they behave exactly as before; a manual run on a
+          # branch tests that branch's scripts, which `ref: main` never did.
+          # (required-compliance.yml stays on main: it runs in other repos.)
+          ref: ${{ github.sha }}
           sparse-checkout: |
             scripts
 
