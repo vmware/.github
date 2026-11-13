@@ -230,6 +230,17 @@
       "head_sha": "af7f4536babc7ffeab56466e97e2b08f3016d14c",
       "comment_id": 6756334045,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "pranav-sirnapalli",
+      "id": 68234635,
+      "signedAt": "2026-11-13T16:14:34.141401Z",
+      "org": "vmware",
+      "repo": "vmware/open-vm-tools",
+      "pr_number": 814,
+      "head_sha": "90d7ed14a6fec519c36cbacc930ac6fd613f1274",
+      "comment_id": 6842583644,
+      "agreement_version": "1.0"
     }
   ]
 }
