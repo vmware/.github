@@ -145,6 +145,12 @@ def main():
 
     for repo in repos:
         full_name = repo.get("full_name")
+        # Private repos are out of CLA/DCO scope: they are never publicly
+        # distributed. Once the bot is installed on every repo (automatic
+        # coverage, option B step 6) its installation includes them, so skip
+        # them here rather than check or comment on their pull requests.
+        if repo.get("private"):
+            continue
         # Rate-limit cushion between repos. Was 2s, which alone took ~3.5 of a
         # sweep's ~4.4 minutes at ~106 repos, so sweeps ran close to the
         # 5-minute schedule and scheduled runs were skipped. A sweep makes
