@@ -1822,6 +1822,30 @@ class TestSweeperExitCode(unittest.TestCase):
         self.assertIn("vmware/a#1", out)
         self.assertIn("boom on 1", out)
 
+    def test_private_repos_are_skipped(self):
+        """CLA/DCO doesn't apply to private repos. Once the bot is installed
+        on every repo, the sweeper must not check or comment on their PRs -
+        it must not even list them."""
+        repos = [{"full_name": "vmware/a", "private": False}, {"full_name": "vmware/p", "private": True}]
+        self.install(repos=repos)
+        listed, inner = [], cla_sweeper.github_api_paginated
+
+        def tracking(url, token):
+            listed.append(url)
+            return inner(url, token)
+
+        cla_sweeper.github_api_paginated = tracking
+        rc, _ = self.run_sweep()
+        self.assertEqual(rc, 0)
+        self.assertFalse(any("/repos/vmware/p/" in u for u in listed), "a private repo's PRs must not be listed")
+        self.assertEqual(len(self.processed), 2, "only the public repo's two PRs are processed")
+
+    def test_repos_without_a_private_field_are_still_swept(self):
+        """Fail safe: a repo object missing the field is treated as public."""
+        self.install(repos=[{"full_name": "vmware/a"}])
+        rc, _ = self.run_sweep()
+        self.assertEqual((rc, len(self.processed)), (0, 2))
+
     # --- the kill switch ---
 
     def test_kill_switch_suppresses_the_nonzero_exit(self):
