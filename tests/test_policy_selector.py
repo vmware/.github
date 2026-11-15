@@ -33,6 +33,7 @@ import sys
 import contextlib
 import io
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1728,6 +1729,64 @@ class TestFailedConsentRecordIsMarkedAndRetried(ProcessSinglePrHarness):
 # A sweep that failed must not look like a sweep that worked.
 # ---------------------------------------------------------------------------
 @unittest.skipIf(cla_sweeper is None, "cla_sweeper unavailable on this runner")
+class TestAppJwtClockSkew(unittest.TestCase):
+    """The App JWT must survive a runner clock that is a little ahead of
+    GitHub's: GitHub answers 401 if "iat" is in the future or "exp" is more
+    than 10 minutes ahead. Seen once in 115 sweeps on 2026-11-14."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import jwt  # noqa: F401
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+        except ImportError:  # pragma: no cover
+            raise unittest.SkipTest("PyJWT/cryptography not installed")
+        import cla_auth
+        cls.cla_auth = cla_auth
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cls.pem = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()).decode()
+
+    def claims(self):
+        import jwt
+        before = int(time.time())
+        token = self.cla_auth.get_integration_token("12345", self.pem)
+        after = int(time.time())
+        return before, after, jwt.decode(token, options={"verify_signature": False})
+
+    def test_iat_is_backdated_by_a_minute(self):
+        before, _, c = self.claims()
+        self.assertLessEqual(c["iat"], before - 60)
+
+    def test_exp_stays_under_ten_minutes_even_with_a_fast_clock(self):
+        _, after, c = self.claims()
+        self.assertLessEqual(c["exp"] - after, 9 * 60)
+        self.assertGreater(c["exp"], after)
+
+    def test_issuer_is_the_app_id(self):
+        self.assertEqual(self.claims()[2]["iss"], "12345")
+
+    def test_a_401_logs_githubs_reason(self):
+        class Resp:
+            status_code = 401
+
+            def json(self):
+                return {"message": "'Issued at' claim ('iat') must be an Integer representing a time in the past."}
+
+        saved = self.cla_auth.requests.get
+        self.cla_auth.requests.get = lambda *a, **k: Resp()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                token = self.cla_auth.get_installation_access_token("12345", self.pem, "vmware")
+        finally:
+            self.cla_auth.requests.get = saved
+        self.assertIsNone(token)
+        self.assertIn("Status: 401 'Issued at' claim", out.getvalue())
+
+
 class TestSweeperExitCode(unittest.TestCase):
     """Every PR is processed inside a try/except that logs and continues, so
     a sweep where all of them failed still exited 0. On a 5-minute cron with
