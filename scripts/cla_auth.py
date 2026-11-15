@@ -58,9 +58,14 @@ def get_integration_token(app_id, private_key_pem):
     Signs a JWT (JSON Web Token) using the App's Private Key.
     """
     now = int(time.time())
+    # Allow for the runner's clock being a little ahead of GitHub's. GitHub
+    # rejects a JWT (HTTP 401) whose "iat" is in the future or whose "exp" is
+    # more than 10 minutes ahead, so backdate "iat" by 60 seconds (GitHub's own
+    # recommendation) and keep "exp" at 9 minutes. The JWT is used within
+    # seconds, only to fetch an installation token.
     payload = {
-        "iat": now,
-        "exp": now + (10 * 60),  # 10 minute expiration
+        "iat": now - 60,
+        "exp": now + (9 * 60),
         "iss": app_id
     }
     
@@ -99,7 +104,11 @@ def get_installation_access_token(app_id, private_key_pem, org_name):
         resp = requests.get(install_url, headers=headers)
         
         if resp.status_code != 200:
-            print(f"::warning::[AUTH] Could not find App Installation on org '{org_name}'. Status: {resp.status_code}")
+            try:
+                reason = str(resp.json().get("message", ""))
+            except Exception:  # body isn't a JSON object; the status alone will do
+                reason = ""
+            print(f"::warning::[AUTH] Could not find App Installation on org '{org_name}'. Status: {resp.status_code} {reason}".rstrip())
             return None
         
         installation_id = resp.json().get("id")
