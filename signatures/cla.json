@@ -241,6 +241,17 @@
       "head_sha": "90d7ed14a6fec519c36cbacc930ac6fd613f1274",
       "comment_id": 6842583644,
       "agreement_version": "1.0"
+    },
+    {
+      "name": "zoharh",
+      "id": 4757466,
+      "signedAt": "2026-11-21T17:16:04.266305Z",
+      "org": "vmware",
+      "repo": "vmware/singleton",
+      "pr_number": 3274,
+      "head_sha": "87ca03ea4d9524b8bf2287f90aabec3d52e4e4fa",
+      "comment_id": 7066287493,
+      "agreement_version": "1.0"
     }
   ]
 }
